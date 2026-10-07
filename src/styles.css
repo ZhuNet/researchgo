@@ -1,0 +1,10 @@
+
+.row--pending .row__name {
+  opacity: 0.65;
+}
+.row__hint {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}

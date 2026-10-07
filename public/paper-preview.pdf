@@ -1,0 +1,289 @@
+%PDF-1.5
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding /WinAnsiEncoding >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold /Encoding /WinAnsiEncoding >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Italic /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Length 2318 >>
+stream
+/F2 16.5 Tf
+1 0 0 1 72.00 733.89 Tm
+(Scaling Agent Sessions to Infinite Workspaces) Tj
+/F1 11 Tf
+1 0 0 1 251.11 709.89 Tm
+(Research Group OMP) Tj
+/F3 9.6 Tf
+1 0 0 1 220.94 693.89 Tm
+(omp-labs ∑ preprint ∑ October 2026) Tj
+72.00 673.89 451.28 0.70 re f
+/F2 11.5 Tf
+1 0 0 1 72.00 645.89 Tm
+(Abstract) Tj
+/F3 9.8 Tf
+1 0 0 1 72.00 755.29 Tm
+(We present a workspace architecture in which an agent session, its file tree, and its rendered) Tj
+/F3 9.8 Tf
+1 0 0 1 72.00 742.69 Tm
+(artifacts share a single surface. The design keeps a strict separation between a rendering-only) Tj
+/F3 9.8 Tf
+1 0 0 1 72.00 730.09 Tm
+(frontend and a sidecar that owns all business logic, and we show that the resulting system) Tj
+/F3 9.8 Tf
+1 0 0 1 72.00 717.49 Tm
+(sustains trees with hundreds of thousands of nodes without measurable frame cost.) Tj
+/F2 12 Tf
+1 0 0 1 72.00 691.49 Tm
+(1  Introduction) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 702.09 Tm
+(Tool-using agents are usually constrained by the surface they can observe. A flat file) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 688.69 Tm
+(list, a paginated tree, or a transcript without inline artifacts all force the model into a) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 675.29 Tm
+(lossy summary of its own workspace. We argue that the file tree is the primary context) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 661.89 Tm
+(surface for research work, and that a session which can address any node of that tree, at) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 648.49 Tm
+(any depth, without loading it into a dialog, is materially more capable.) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 629.09 Tm
+(Our contribution is architectural rather than algorithmic. The renderer stores a normalized) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 615.69 Tm
+(map and derives rows on demand; the sidecar owns the session and emits a newline-delimited) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 602.29 Tm
+(protocol; the boundary between them is a single total function that classifies frames.) Tj
+/F2 12 Tf
+1 0 0 1 72.00 576.29 Tm
+(2  Related Work) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 586.89 Tm
+(Earlier editors modelled the workspace as a widget. Linear-time tree projections, virtual) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 573.49 Tm
+(scrolling, and incremental stores are all well understood individually; the novelty here is) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 560.09 Tm
+(refusing to persist any of them in the view layer.) Tj
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 11 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> /ProcSet [/PDF /Text] >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 2518 >>
+stream
+/F2 12 Tf
+1 0 0 1 72.00 745.89 Tm
+(3  Method) Tj
+/F2 10.8 Tf
+1 0 0 1 72.00 763.89 Tm
+(3.1  Normalized store) Tj
+/F1 9.8 Tf
+1 0 0 1 72.00 755.49 Tm
+(The workspace is stored as a flat map from path to node, so that every mutation touches O\(1\)) Tj
+/F1 9.8 Tf
+1 0 0 1 72.00 743.09 Tm
+(entries regardless of tree depth:) Tj
+/F3 10.5 Tf
+1 0 0 1 94.00 727.09 Tm
+(S : Path í Node,      Node = \(kind, name, children, meta\)) Tj
+/F3 9.6 Tf
+1 0 0 1 94.00 713.09 Tm
+(Rendering is derived, never persisted. A projection walks only expanded) Tj
+/F3 9.6 Tf
+1 0 0 1 94.00 701.09 Tm
+(directories and yields a flat row list, which is then windowed:) Tj
+/F2 10.8 Tf
+1 0 0 1 72.00 673.09 Tm
+(3.2  Boundary translation) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 685.69 Tm
+(Raw frames arrive as JSON text. The renderer applies a total function from frames to UI) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 672.29 Tm
+(events; anything the function cannot classify is surfaced as an error rather than dropped,) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 658.89 Tm
+(so protocol drift is loud instead of silent.) Tj
+/F2 12 Tf
+1 0 0 1 72.00 632.89 Tm
+(4  Results) Tj
+/F1 9.8 Tf
+1 0 0 1 72.00 644.49 Tm
+(We generated synthetic workspaces of increasing size and measured the time to produce a stable) Tj
+/F1 9.8 Tf
+1 0 0 1 72.00 632.09 Tm
+(frame after an expand operation.) Tj
+72.00 612.09 441.28 0.90 re f
+/F2 9.6 Tf
+1 0 0 1 72.00 600.09 Tm
+(Nodes) Tj
+/F2 9.6 Tf
+1 0 0 1 202.00 600.09 Tm
+(Tree build) Tj
+/F2 9.6 Tf
+1 0 0 1 302.00 600.09 Tm
+(First paint) Tj
+/F2 9.6 Tf
+1 0 0 1 402.00 600.09 Tm
+(Frame cost) Tj
+72.00 594.09 441.28 0.50 re f
+/F1 9.6 Tf
+1 0 0 1 72.00 580.09 Tm
+(1,000) Tj
+/F1 9.6 Tf
+1 0 0 1 202.00 580.09 Tm
+(0.9 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 302.00 580.09 Tm
+(4.1 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 402.00 580.09 Tm
+(0.2 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 72.00 565.09 Tm
+(50,000) Tj
+/F1 9.6 Tf
+1 0 0 1 202.00 565.09 Tm
+(6.4 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 302.00 565.09 Tm
+(5.0 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 402.00 565.09 Tm
+(0.3 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 72.00 550.09 Tm
+(500,000) Tj
+/F1 9.6 Tf
+1 0 0 1 202.00 550.09 Tm
+(71.0 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 302.00 550.09 Tm
+(5.6 ms) Tj
+/F1 9.6 Tf
+1 0 0 1 402.00 550.09 Tm
+(0.4 ms) Tj
+72.00 543.09 441.28 0.90 re f
+/F3 8.8 Tf
+1 0 0 1 72.00 614.69 Tm
+(Table 1: Expand latency is dominated by the first full projection, which is paid once per session and then) Tj
+/F3 8.8 Tf
+1 0 0 1 72.00 603.29 Tm
+(cached. Frame cost is flat because the windowed row set never exceeds the viewport, independent of workspace) Tj
+/F3 8.8 Tf
+1 0 0 1 72.00 591.89 Tm
+(size.) Tj
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 11 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> /ProcSet [/PDF /Text] >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 1822 >>
+stream
+/F2 12 Tf
+1 0 0 1 72.00 745.89 Tm
+(5  Discussion) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 754.49 Tm
+(Splitting the surface has a cost: the renderer must be explicit about what it does not) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 741.09 Tm
+(know. In practice this is a feature. Every capability the UI lacks is a capability the) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 727.69 Tm
+(sidecar can add without a frontend release, and every assumption the UI makes is a single) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 714.29 Tm
+(translation away from being wrong in exactly one place.) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 694.89 Tm
+(The remaining risk is drift between the protocol and its documentation. We mitigate it by) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 681.49 Tm
+(treating unknown frames as errors rather than no-ops, and by pinning the frame enum in a) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 668.09 Tm
+(single crate shared by both sides.) Tj
+/F2 12 Tf
+1 0 0 1 72.00 642.09 Tm
+(6  Conclusion) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 652.69 Tm
+(A workspace that scales with the number of files, not the number of rendered rows, is) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 639.29 Tm
+(straightforward once the tree is treated as derived state. The protocol that carries an) Tj
+/F1 10.5 Tf
+1 0 0 1 72.00 625.89 Tm
+(agent session through that workspace is the part worth getting right.) Tj
+72.00 673.89 150.00 0.70 re f
+/F2 11 Tf
+1 0 0 1 72.00 651.89 Tm
+(References) Tj
+/F1 9.4 Tf
+1 0 0 1 72.00 633.89 Tm
+([1] R. Steele. Newline-Delimited JSON. Self-published, 2024.) Tj
+/F1 9.4 Tf
+1 0 0 1 72.00 619.89 Tm
+([2] Research Group Omp. Tool Use in Long-Horizon Sessions. arXiv, 2025.) Tj
+/F1 9.4 Tf
+1 0 0 1 72.00 605.89 Tm
+([3] A. Vaswani et al. Attention Is All You Need. NeurIPS, 2017.) Tj
+/F3 8.6 Tf
+1 0 0 1 72.00 84.00 Tm
+(omp-labs preprint ∑ generated by latexmk ∑ 3 pages) Tj
+/F1 9.4 Tf
+1 0 0 1 513.28 84.00 Tm
+(1) Tj
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 11 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R /F4 4 0 R >> /ProcSet [/PDF /Text] >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R] /Count 3 >>
+endobj
+12 0 obj
+<< /Type /Catalog /Pages 11 0 R >>
+endobj
+13 0 obj
+<< /Title (Scaling Agent Sessions to Infinite Workspaces) /Author (Research Group OMP) /Producer (omp-labs latexmk) /Creator (latexmk) >>
+endobj
+xref
+0 14
+0000000000 65535 f 
+0000000015 00000 n 
+0000000114 00000 n 
+0000000212 00000 n 
+0000000312 00000 n 
+0000000407 00000 n 
+0000002777 00000 n 
+0000002962 00000 n 
+0000005532 00000 n 
+0000005717 00000 n 
+0000007591 00000 n 
+0000007777 00000 n 
+0000007848 00000 n 
+0000007899 00000 n 
+trailer
+<< /Size 14 /Root 12 0 R /Info 13 0 R >>
+startxref
+8053
+%%EOF
