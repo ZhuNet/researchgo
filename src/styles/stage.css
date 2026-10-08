@@ -292,123 +292,32 @@
   background: var(--bg-1);
 }
 
-.pdf__bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  height: 32px;
-  padding: 0 var(--sp-3) 0 var(--sp-5);
-  flex: none;
-  border-bottom: 1px solid var(--bd-1);
-  background: var(--bg-1);
-}
-
-.pdf__id {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  min-width: 0;
-  font-size: 11.5px;
-  color: var(--tx-2);
-}
-
-.pdf__icon {
-  color: var(--err);
-}
-
-.pdf__tool {
-  gap: var(--sp-2);
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.pdf__ctrls {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex: none;
-}
-
-.pdf__page,
-.pdf__zoom {
-  font-size: 10.5px;
-  font-family: var(--font-mono);
-  color: var(--tx-3);
-  min-width: 44px;
-  text-align: center;
-}
-
-.pdf__sep {
-  width: 1px;
-  height: 14px;
-  background: var(--bd-2);
-  margin: 0 var(--sp-2);
-}
-
-.pdf__ctrls .btn {
-  height: 22px;
-  font-size: 11px;
-}
-
 .pdf__scroll {
   flex: 1;
   min-height: 0;
-  padding: var(--sp-6) 0 var(--sp-9);
+  display: flex;
+  flex-direction: column;
   background:
     radial-gradient(120% 60% at 50% 0%, rgba(255, 255, 255, 0.028), transparent 60%),
     var(--bg-0);
 }
 
-.pdf__wrap {
+/*
+ * The viewer is block-level and needs a definite height, so it is absolutely
+ * placed against this host rather than left to stretch: a flex child with no
+ * intrinsic height collapses, and pdf.js's own container would then lay its
+ * toolbar over the document area.
+ */
+.pdf__host {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-6);
-  min-height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
-.pdfpage {
-  position: relative;
-  flex: none;
-  border-radius: 2px;
-  background: #fff;
-  box-shadow: var(--sh-paper);
-  overflow: hidden;
-}
-
-.pdfpage canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.pdfpage__no {
+.pdf__host > pdfjs-viewer-element {
   position: absolute;
-  bottom: 0;
-  right: 0;
-  padding: 2px 6px;
-  font-size: 9px;
-  font-family: var(--font-mono);
-  color: var(--tx-4);
-  background: var(--bg-2);
-  border-top-left-radius: 4px;
-  opacity: 0;
-  transition: opacity var(--t-fast) var(--ease);
-}
-
-.pdfpage:hover .pdfpage__no {
-  opacity: 1;
-}
-
-.pdf__loading {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-9);
-  color: var(--tx-3);
-  font-size: 12px;
+  inset: 0;
+  border: 0;
 }
 
 .pdf__empty {
@@ -488,21 +397,56 @@
 }
 
 /*
- * Build log. Sits under the document rather than over it: a failed build has
- * nothing to document, and keeping the failed output on screen is the entire
- * point of showing it here.
+ * A failed build takes the whole pane.
+ *
+ * There is no document to show — the one on screen would predate the edit that
+ * broke it — so the failure is not a strip under a preview but the preview's
+ * entire content. The output scrolls inside it, which is the only scrolling here
+ * now: the viewer brings its own.
  */
-.pdf__log {
+.pdf__fail {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  border-top: 1px solid var(--bd-1);
-  background: var(--bg-0);
+  overflow: hidden;
 }
 
+.pdf__failhead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-5);
+  padding: var(--sp-6) var(--sp-6) var(--sp-5);
+  color: var(--err);
+}
+
+.pdf__failhead .btn {
+  flex: none;
+  margin-left: auto;
+}
+
+.pdf__failtitle h3 {
+  margin: 0 0 var(--sp-2);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--tx-2);
+}
+
+.pdf__failtitle p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--tx-4);
+  max-width: 62ch;
+}
+
+/*
+ * Build log. Only reachable from a failure now, and it fills what is left: the
+ * whole reason this pane exists on a failed build is that the output is the only
+ * thing there is to read, so it scrolls rather than being clipped.
+ */
 .pdf__loghead {
-  position: sticky;
-  top: 0;
+  flex: none;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -510,6 +454,7 @@
   font-size: 11.5px;
   color: var(--tx-3);
   background: var(--bg-1);
+  border-top: 1px solid var(--bd-1);
   border-bottom: 1px solid var(--bd-1);
 }
 
@@ -522,6 +467,11 @@
   color: var(--tx-3);
   white-space: pre-wrap;
   word-break: break-word;
+  /* The output is whatever the compiler wrote, which can be far longer than the
+     pane. This is the one thing that scrolls on a failed build. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .chip--warn {

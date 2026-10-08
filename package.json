@@ -19,8 +19,9 @@
   },
   "dependencies": {
     "@shikijs/monaco": "^4.5.0",
-    "monaco-editor": "^0.56.0",
-    "pdfjs-dist": "^4.10.38",
+    "monaco-editor": "^0.57.0",
+    "pdfjs-dist": "^6.4.299",
+    "pdfjs-viewer-element": "^4.2.0",
     "shiki": "^4.5.0",
     "solid-js": "^1.9.15"
   },
@@ -31,5 +32,8 @@
     "vite": "^8.3.0",
     "vite-plugin-solid": "^2.11.14",
     "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "dompurify": "3.4.16"
   }
 }
