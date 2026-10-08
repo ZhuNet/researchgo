@@ -18,9 +18,32 @@ pub struct OpenedFolder {
 /// `access(W_OK)` is the only reliable test: permission bits lie under ACLs,
 /// read-only mounts and group ownership, and guessing wrong means the UI offers
 /// an action that then fails with a bare EACCES.
+#[cfg(unix)]
 pub fn dir_writable(dir: &str) -> bool {
   match std::ffi::CString::new(dir) {
     Ok(c) => unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 },
+    Err(_) => false,
+  }
+}
+
+/// Windows does not expose POSIX `access(W_OK)`. Probe the operation the UI
+/// needs to perform instead, using a unique file and removing it immediately.
+#[cfg(windows)]
+pub fn dir_writable(dir: &str) -> bool {
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
+
+  let probe = Path::new(dir).join(format!(
+    ".researchgo-write-check-{}-{}",
+    std::process::id(),
+    NEXT_PROBE.fetch_add(1, Ordering::Relaxed)
+  ));
+  match fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+    Ok(file) => {
+      drop(file);
+      fs::remove_file(probe).is_ok()
+    }
     Err(_) => false,
   }
 }

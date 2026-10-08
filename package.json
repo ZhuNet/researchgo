@@ -13,13 +13,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "postinstall": "node scripts/copy-pdfjs-assets.mjs",
-    "tauri": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri",
-    "tauri:dev": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri dev",
-    "tauri:build": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri build"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@shikijs/monaco": "^4.5.0",
-    "monaco-editor": "^0.57.0",
+    "monaco-editor": "^0.56.0",
     "pdfjs-dist": "^4.10.38",
     "shiki": "^4.5.0",
     "solid-js": "^1.9.15"
