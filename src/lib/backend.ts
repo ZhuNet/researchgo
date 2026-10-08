@@ -124,6 +124,11 @@ export interface Backend {
   removeEntry(path: string): Promise<void>;
   syncWatch(dirs: string[]): Promise<string[]>;
   onChange(handler: (change: Change) => void): () => void;
+  /**
+   * Fires when PATH changed on the host — a toolchain installed or removed
+   * outside this window. The handler re-asks `buildPlan`.
+   */
+  onToolchainChange(handler: () => void): () => void;
 }
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -134,6 +139,39 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return Promise.reject(new Error(`Tauri bridge unavailable (command: ${cmd})`));
   }
   return tauri.core.invoke(cmd, args) as Promise<T>;
+}
+
+/**
+ * Subscribes to a backend event and hands back the unsubscribe.
+ *
+ * The unsubscribe has to work before `listen` has resolved: a component can tear
+ * down in the same tick it subscribed in, so cancellation flips a flag the
+ * resolution checks rather than only dropping a handle it may not hold yet.
+ */
+function listenTo<T>(event: string, handler: (payload: T) => void): () => void {
+  const tauri = (globalThis as Record<string, unknown>).__TAURI__ as
+    | {
+        event: {
+          listen: (
+            e: string,
+            cb: (message: { payload: T }) => void,
+          ) => Promise<() => void>;
+        };
+      }
+    | undefined;
+  if (!tauri) return () => {};
+  let dispose: (() => void) | undefined;
+  let cancelled = false;
+  void tauri.event.listen(event, (message) => {
+    handler(message.payload);
+  }).then((un) => {
+    if (cancelled) un();
+    else dispose = un;
+  });
+  return () => {
+    cancelled = true;
+    dispose?.();
+  };
 }
 
 export const tauriBackend: Backend = {
@@ -158,29 +196,13 @@ export const tauriBackend: Backend = {
   removeEntry: (path) => invoke<void>('remove_entry', { path }),
   syncWatch: (dirs) => invoke<string[]>('sync_watch', { dirs }),
   onChange(handler) {
-    const tauri = (globalThis as Record<string, unknown>).__TAURI__ as
-      | {
-          event: {
-            listen: (
-              e: string,
-              cb: (payload: { payload: Change }) => void,
-            ) => Promise<() => void>;
-          };
-        }
-      | undefined;
-    if (!tauri) return () => {};
-    let dispose: (() => void) | undefined;
-    let cancelled = false;
-    void tauri.event.listen('fs:change', (message) => {
-      handler(message.payload);
-    }).then((un) => {
-      if (cancelled) un();
-      else dispose = un;
-    });
-    return () => {
-      cancelled = true;
-      dispose?.();
-    };
+    return listenTo<Change>('fs:change', handler);
+  },
+  onToolchainChange(handler) {
+    // No payload to read: what is buildable depends on the open project's
+    // documents as much as on PATH, so the event says only "look again" and the
+    // frontend re-asks `buildPlan` rather than caching an answer here.
+    return listenTo<null>('toolchain:change', () => handler());
   },
 };
 

@@ -1,6 +1,7 @@
 mod content;
 mod dirindex;
 mod fsops;
+mod toolchain;
 mod watcher;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,6 +12,7 @@ pub fn run() {
     .setup(|app| {
       dirindex::init(app);
       watcher::init(app);
+      toolchain::init(app);
       if cfg!(debug_assertions) {
         log::info!("ResearchGO ready");
       }

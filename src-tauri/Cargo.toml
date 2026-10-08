@@ -26,3 +26,10 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 notify = "8"
 libc = "0.2"
+
+# Windows keeps PATH in the registry, and reading it there is the only way a
+# toolchain installed after this process launched becomes visible to it. There is
+# no registry on the other platforms, so the dependency is Windows-only rather
+# than a cross-platform crate used on one target.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

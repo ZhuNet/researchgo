@@ -2,7 +2,7 @@ import { createRoot } from 'solid-js';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createWorkspace, type Workspace } from '../src/store/workspace';
-import { fakeBackend, FakeFs, SAMPLE_TREE } from './fakefs';
+import { emitToolchainChange, fakeBackend, FakeFs, SAMPLE_TREE } from './fakefs';
 
 function withWs(
   fn: (ws: Workspace, fs: FakeFs) => void | Promise<void>,
@@ -745,6 +745,52 @@ describe('写入权限', () => {
       fs.readOnly.add('/src');
       await expect(ws.createEntry('/src', 'x.rs', 'file')).rejects.toThrow();
       expect(fs.files.has('/src/x.rs')).toBe(false);
+    });
+  });
+});
+
+describe('本机编译环境变了', () => {
+  it('装好 xelatex 后会重新问一遍能不能构建', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+
+      // 打开项目时工具链还没装：预览会据此把 Build 置灰。
+      fs.plan = {
+        buildable: false,
+        command: 'xelatex -interaction=nonstopmode main.tex  (2 passes)',
+        reason: 'XeLaTeX',
+        artifact: '/.rg/build/main.pdf',
+        passes: 2,
+        detail: 'xelatex was not found on PATH',
+      };
+      await ws.editor.loadPlan('/');
+      expect(ws.editor.plan()?.buildable).toBe(false);
+
+      // 用户在终端里装完 MiKTeX，宿主发出 PATH 变化。
+      fs.plan = { ...fs.plan, buildable: true, detail: null };
+      emitToolchainChange(fs);
+      await flush();
+
+      // 不重启 app，Build 自己恢复可点。
+      expect(ws.editor.plan()?.buildable).toBe(true);
+    });
+  });
+
+  it('没有打开项目时不追问', async () => {
+    await withWs(async (ws, fs) => {
+      fs.plan = {
+        buildable: true,
+        command: 'xelatex main.tex  (2 passes)',
+        reason: 'XeLaTeX',
+        artifact: '/.rg/build/main.pdf',
+        passes: 2,
+        detail: null,
+      };
+      emitToolchainChange(fs);
+      await flush();
+
+      // 没有 root 就没有可构建的对象，这次事件没有可问的东西。
+      expect(ws.editor.plan()).toBeNull();
     });
   });
 });

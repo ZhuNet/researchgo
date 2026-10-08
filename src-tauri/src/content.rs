@@ -334,6 +334,41 @@ struct PassOutcome {
   output: String,
 }
 
+/// The executable to spawn for this plan.
+///
+/// A bare command name is resolved here, through the same lookup the pre-flight
+/// check used, instead of being handed to Windows to find. Handing it over means
+/// `CreateProcessW` searches *this process's* PATH — the snapshot the OS gave
+/// the app at launch — so a toolchain installed since then is invisible to the
+/// spawn even though the check that ran a moment earlier found it, and the build
+/// fails on a machine where the command runs fine. Detection and execution have
+/// to agree by construction; resolving once is what makes them.
+///
+/// A command that is already a path is passed through: the reader named that
+/// file, so there is nothing to look up.
+fn program_in(entries: &[PathBuf], dir: &Path, plan: &BuildPlan) -> PathBuf {
+  let named = PathBuf::from(&plan.command);
+  if plan.command.contains('/') {
+    if named.is_absolute() {
+      return named;
+    }
+    // A relative command is resolved against the project instead of being left
+    // to the platform: `Command` documents a relative program path as ambiguous
+    // between the parent's working directory and `current_dir`, with the answer
+    // differing by platform. Resolving here is also what makes the spawn agree
+    // with `toolchain_problem`, which looked in exactly this place.
+    let relative = dir.join(&named);
+    return if relative.is_file() { relative } else { named };
+  }
+  crate::toolchain::which_in(entries, &plan.command, dir)
+    .unwrap_or(named)
+}
+
+/// `program_in` against the current search path.
+fn program_for(dir: &Path, plan: &BuildPlan) -> PathBuf {
+  program_in(&crate::toolchain::search_path(), dir, plan)
+}
+
 fn run_pass(dir: &Path, plan: &BuildPlan) -> Result<PassOutcome, String> {
   // The output directory has to exist before the tool runs. XeLaTeX does not
   // create `-output-directory`, and it fails with "I can't write on file" rather
@@ -346,7 +381,7 @@ fn run_pass(dir: &Path, plan: &BuildPlan) -> Result<PassOutcome, String> {
     }
   }
 
-  let mut child = Command::new(&plan.command)
+  let mut child = Command::new(program_for(dir, plan))
     .args(&plan.args)
     .current_dir(dir)
     .stdin(Stdio::null())
@@ -356,8 +391,8 @@ fn run_pass(dir: &Path, plan: &BuildPlan) -> Result<PassOutcome, String> {
     .map_err(|e| {
       if e.kind() == std::io::ErrorKind::NotFound {
         format!(
-          "`{}` was not found — this app may have a smaller PATH than a shell; \
-           set an absolute path in .rg/build.json",
+          "`{}` was not found on PATH — install it, or point .rg/build.json \
+           at it with an absolute path",
           plan.command
         )
       } else {
@@ -423,6 +458,12 @@ fn missing_build_message() -> String {
 }
 
 /// Why this plan cannot run here, if it cannot.
+///
+/// The PATH lookup goes through `toolchain::which`, which resolves the platform's
+/// executable suffix and reads PATH afresh — on Windows from the registry, not
+/// from this process's launch snapshot. The messages stay specific because the
+/// three ways of naming a missing command need different advice: a path the
+/// reader wrote is their typo, a bare name is a missing install.
 fn toolchain_problem(root: &Path, plan: &BuildPlan) -> Option<String> {
   if plan.command.contains('/') {
     let direct = Path::new(&plan.command);
@@ -438,7 +479,7 @@ fn toolchain_problem(root: &Path, plan: &BuildPlan) -> Option<String> {
     }
     return None;
   }
-  if which(&plan.command, root).is_some() {
+  if crate::toolchain::which(&plan.command, root).is_some() {
     return None;
   }
   let install = if plan.command == "xelatex" {
@@ -450,23 +491,6 @@ fn toolchain_problem(root: &Path, plan: &BuildPlan) -> Option<String> {
     "{} was not found on PATH — {install}, or point .rg/build.json at it with an absolute path",
     plan.command
   ))
-}
-
-/// Minimal `which`: PATH lookup, plus a relative command resolved against the
-/// project, because a build command in `.rg/build.json` is often `./build.sh`.
-fn which(command: &str, cwd: &Path) -> Option<PathBuf> {
-  if command.contains('/') {
-    let direct = PathBuf::from(command);
-    if direct.is_absolute() {
-      return direct.is_file().then_some(direct);
-    }
-    let relative = cwd.join(command);
-    return relative.is_file().then_some(relative);
-  }
-  let path = std::env::var_os("PATH")?;
-  std::env::split_paths(&path)
-    .map(|dir| dir.join(command))
-    .find(|candidate| candidate.is_file())
 }
 
 fn artifact_info(root: &Path, path: &Path) -> Option<ArtifactInfo> {
@@ -680,7 +704,12 @@ mod tests {
       Some(s.path().join(".rg").join("build").join("main.pdf").as_path())
     );
     assert!(plan.args.iter().any(|a| a.contains("-halt-on-error")));
-    assert!(plan.args.iter().any(|a| a.contains(".rg/build")));
+    // Compared against the directory it was built from rather than a literal
+    // path spelled with forward slashes: the separator belongs to the host, and
+    // asserting one particular spelling fails on Windows for a plan that is
+    // correct there.
+    let out_dir = format!("-output-directory={}", tex_out_dir(s.path()).display());
+    assert!(plan.args.contains(&out_dir), "was: {:?}", plan.args);
     assert_eq!(plan.args.last().unwrap(), "main.tex");
   }
 
@@ -810,6 +839,66 @@ mod tests {
     let plan = detect_build(s.path()).unwrap();
     // The file is there, so nothing is wrong with the plan.
     assert!(toolchain_problem(s.path(), &plan).is_none());
+  }
+
+  #[test]
+  fn a_bare_command_is_spawned_by_the_path_it_resolves_to() {
+    // The regression this guards: detection resolved `xelatex` through the
+    // registry and said the toolchain was there, then the spawn handed the bare
+    // name to Windows, which searched the PATH this process inherited at launch
+    // and did not have it. The build failed on a machine where the command ran.
+    let s = Scratch::new("program-resolve");
+    let bin = s.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join(crate::toolchain::native_name("xelatex"));
+    std::fs::write(&tool, b"").unwrap();
+    let plan = BuildPlan {
+      command: "xelatex".into(),
+      args: vec![],
+      reason: "XeLaTeX",
+      passes: 2,
+      artifact: None,
+    };
+
+    let program = program_in(&[bin], s.path(), &plan);
+
+    assert_eq!(program, tool);
+  }
+
+  #[test]
+  fn a_relative_command_is_spawned_from_the_project_not_the_launch_directory() {
+    let s = Scratch::new("program-relative");
+    let script = s.path().join("build.sh");
+    std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let plan = BuildPlan {
+      command: "./build.sh".into(),
+      args: vec![],
+      reason: ".rg/build.json",
+      passes: 1,
+      artifact: None,
+    };
+
+    let program = program_in(&[], s.path(), &plan);
+
+    assert_eq!(program, script);
+  }
+
+  #[test]
+  fn an_unresolvable_command_is_still_handed_over_by_name() {
+    // So the spawn fails, and fails with the message that names the command —
+    // a resolved-only path here would report a bare filename as a missing file.
+    let s = Scratch::new("program-missing");
+    let plan = BuildPlan {
+      command: "xelatex-does-not-exist".into(),
+      args: vec![],
+      reason: "XeLaTeX",
+      passes: 2,
+      artifact: None,
+    };
+
+    let program = program_in(&[s.path().to_path_buf()], s.path(), &plan);
+
+    assert_eq!(program, PathBuf::from("xelatex-does-not-exist"));
   }
 
   #[test]

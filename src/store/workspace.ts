@@ -857,6 +857,22 @@ export function createWorkspace(
   const stopWatch = backend.onChange((change: Change) => onDiskChange(change));
 
   /**
+   * A toolchain is installed from a terminal, not from this window, so PATH can
+   * go from "no xelatex" to "xelatex" while the app sits open. The build plan is
+   * asked once per project and cached, so without this the preview goes on
+   * reporting a toolchain that is now installed, and leaves Build disabled on a
+   * machine where the command runs fine.
+   *
+   * Subscribed here rather than in the preview because the answer is not the
+   * preview's: it is a property of the host, and it goes stale whether or not
+   * that pane happens to be showing.
+   */
+  const stopToolchainWatch = backend.onToolchainChange(() => {
+    const dir = root();
+    if (dir) void editor.loadPlan(dir);
+  });
+
+  /**
    * A restored session has a root and a set of open tabs but nothing resident, so
    * the tree used to come back empty until the folder was picked again.
    *
@@ -1078,7 +1094,10 @@ export function createWorkspace(
     closeFolder,
     refresh,
     stats: () => cache.stats(),
-    dispose: stopWatch,
+    dispose: () => {
+      stopWatch();
+      stopToolchainWatch();
+    },
   };
 }
 

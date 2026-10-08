@@ -17,6 +17,8 @@ export class FakeFs {
   readOnly = new Set<string>();
   watching: string[] = [];
   changeHandlers: ((change: Change) => void)[] = [];
+  /** Subscribers to "PATH changed on the host", so the re-check can be driven. */
+  toolchainHandlers: (() => void)[] = [];
   failList = new Set<string>();
   /** Paths whose content is not text, so the binary path can be exercised. */
   binaryFiles = new Set<string>();
@@ -241,7 +243,18 @@ export function fakeBackend(fs: FakeFs, picked: string | null = '/'): Backend {
         fs.changeHandlers = fs.changeHandlers.filter((h) => h !== handler);
       };
     },
+    onToolchainChange(handler) {
+      fs.toolchainHandlers.push(handler);
+      return () => {
+        fs.toolchainHandlers = fs.toolchainHandlers.filter((h) => h !== handler);
+      };
+    },
   };
+}
+
+/** Fires the toolchain-changed event, as the host does when PATH changes. */
+export function emitToolchainChange(fs: FakeFs): void {
+  for (const handler of [...fs.toolchainHandlers]) handler();
 }
 
 export const SAMPLE_TREE: Record<string, string[]> = {
