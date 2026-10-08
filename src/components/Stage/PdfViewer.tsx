@@ -116,17 +116,77 @@ export function PdfViewer(props: { ws: Workspace }) {
     host.appendChild(el);
     setViewer(el);
 
-    // Only the width: colour, hover and the active theme's own variables come
-    // from pdf.js's `.toolbarViewerButton`, which is what keeps this button
-    // legible in both themes without a second set of rules here.
-    void el.injectViewerStyles?.(
-      `#toolbarViewerRight button.rg-build {
-         width: auto;
-         min-width: 4.5em;
-         padding-inline: 0.7em;
-         font-size: 11px;
-       }`,
-    );
+    // Injected rather than styled from here: the button lives in the viewer's own
+    // document, and pdf.js 6 drives its palette through custom properties on that
+    // document's root. Reading `--main-color` instead of picking a colour is what
+    // keeps the button in step with whichever theme is active, with no second
+    // palette to maintain here.
+    //
+    // No background, deliberately. It is a text action sitting among icon
+    // buttons, and the chrome that makes a button look like a button is what made
+    // it read as a foreign object pasted onto the toolbar.
+    void el.injectViewerStyles?.(`
+      #toolbarViewerRight .rg-build {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        height: 100%;
+        flex: none;
+        padding: 0 6px;
+        background: none;
+        border: 0;
+        border-radius: 2px;
+        color: var(--main-color);
+        font: message-box;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      #toolbarViewerRight .rg-build:hover:not(:disabled) {
+        filter: var(--hover-filter);
+      }
+      #toolbarViewerRight .rg-build:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      #toolbarViewerRight .rg-build svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      /*
+       * The scrollbar is the one part of the viewer the browser draws, so it
+       * arrives as a light-mode system scrollbar in a dark pane. light-dark()
+       * follows the \`color-scheme\` the viewer sets on its own root when the
+       * theme changes, so one rule covers both themes and keeps following them.
+       */
+      #viewerContainer {
+        scrollbar-width: thin;
+        scrollbar-color: light-dark(rgba(9, 10, 20, 0.3), rgba(255, 255, 255, 0.26)) transparent;
+      }
+      #viewerContainer::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+      }
+      #viewerContainer::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #viewerContainer::-webkit-scrollbar-thumb {
+        background: light-dark(rgba(9, 10, 20, 0.26), rgba(255, 255, 255, 0.22));
+        background-clip: content-box;
+        border: 3px solid transparent;
+        border-radius: 6px;
+      }
+      #viewerContainer::-webkit-scrollbar-thumb:hover {
+        background: light-dark(rgba(9, 10, 20, 0.42), rgba(255, 255, 255, 0.34));
+        background-clip: content-box;
+      }
+
+      /* The canvas behind the pages, matched to the app's own page colour. */
+      #viewerContainer,
+      #outerContainer {
+        background-color: light-dark(#f4f5f7, #07080a);
+      }
+    `);
 
     onCleanup(() => {
       el.remove();
@@ -217,8 +277,15 @@ export function PdfViewer(props: { ws: Workspace }) {
         if (!host) return;
         button = doc.createElement('button');
         button.type = 'button';
-        button.className = 'toolbarViewerButton rg-build';
-        button.title = 'Build this project and show the result here';
+        button.className = 'rg-build';
+        button.title = 'Compile the project and show the result here';
+        // The app's own lightning bolt, drawn rather than imported: this is
+        // another document, and an icon that does not match the one on the empty
+        // state's button would be two Rebuild buttons that look like two actions.
+        button.innerHTML = ZAP_ICON;
+        const label = doc.createElement('span');
+        label.textContent = 'Rebuild';
+        button.appendChild(label);
         button.addEventListener('click', () => void build());
         host.appendChild(button);
         setBuildButton(button);
@@ -232,7 +299,11 @@ export function PdfViewer(props: { ws: Workspace }) {
   });
 
   /**
-   * The button's own label and disabled state.
+   * The button's own disabled state.
+   *
+   * The label does not change: pdf.js's toolbar is dense and a button that grows
+   * and shrinks its own text reflows everything to its left. The spinner in the
+   * app's own button covers the same ground.
    *
    * The button lives in another document, so Solid does not own it; this is what
    * keeps it honest after the injection effect has run once.
@@ -241,9 +312,7 @@ export function PdfViewer(props: { ws: Workspace }) {
     const button = buildButton();
     const busy = building();
     if (!button) return;
-    button.textContent = busy ? 'Building…' : 'Build';
     button.disabled = busy || !root();
-    button.classList.toggle('rg-build--busy', busy);
   });
 
   return (
@@ -324,6 +393,18 @@ export function PdfViewer(props: { ws: Workspace }) {
     </div>
   );
 }
+
+/**
+ * The app's lightning bolt, for the viewer's toolbar.
+ *
+ * Copied rather than imported because it has to end up inside another document,
+ * where the app's `Icon` component cannot reach. The stroke attributes are the
+ * ones `Icon` renders with, so the two match exactly.
+ */
+const ZAP_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M13.5 2.5 5 13.5h6l-.5 8 8.5-11h-6z"/></svg>';
 
 /**
  * The viewer document, once its toolbar exists.

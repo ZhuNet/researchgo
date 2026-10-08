@@ -548,7 +548,7 @@ export function createWorkspace(
     syncWatch();
   }
 
-  async function openFile(path: string, mode?: StageMode): Promise<void> {
+  async function openFile(path: string): Promise<void> {
     const base = root();
     if (!base) return;
     if (path === base) return;
@@ -576,9 +576,10 @@ export function createWorkspace(
     }
     setTabs((prev) => (prev.includes(path) ? prev : [...prev, path]));
     setActive(path);
-    if (mode) setStageMode(mode);
-    // Opening a file never changes what the stage shows: a PDF is a binary file
-    // that says so, not a switch to the preview. The preview is reached on purpose.
+    // Opening a file is a request to read source, so the stage follows it there.
+    // Without this a reader who was in the preview has to notice that the editor
+    // they just asked for is hidden behind another pane, and click their way back.
+    setStageMode('code');
     await loadText(path);
   }
 

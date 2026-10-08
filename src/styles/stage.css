@@ -201,6 +201,16 @@
   flex-direction: column;
 }
 
+/*
+ * Hidden but still mounted. `display: none` rather than a Solid `<Show>`: the
+ * preview's viewer keeps its scroll position, page number and parsed document in
+ * its own state, and unmounting it throws all three away — which is what put the
+ * reader back at the top of page one every time they returned to it.
+ */
+.stage__pane--hidden {
+  display: none;
+}
+
 .stage__body--split .stage__pane:first-child {
   border-right: 1px solid var(--bd-1);
 }

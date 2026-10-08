@@ -1,4 +1,4 @@
-import { createMemo, Match, Show, Switch } from 'solid-js';
+import { Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { toast } from '../../store/ui';
@@ -9,7 +9,6 @@ import { TabBar } from './TabBar';
 
 export function Stage(props: { ws: Workspace }) {
   const ws = () => props.ws;
-  const activePath = () => ws().active();
 
   /**
    * The tab being read.
@@ -18,38 +17,32 @@ export function Stage(props: { ws: Workspace }) {
    * it reports that a PDF is not text. The preview is a separate mode, reached from
    * the titlebar or the palette, and it shows what the project compiled.
    */
-  const codePath = createMemo(() => activePath());
+  const activePath = () => ws().active();
 
   return (
     <section class="stage">
       <TabBar ws={ws()} />
 
       <div class="stage__body" classList={{ 'stage__body--split': ws().stageMode() === 'split' }}>
-        <Switch>
-          <Match when={ws().stageMode() === 'pdf'}>
-            <PdfViewer ws={ws()} />
-          </Match>
-          <Match when={ws().stageMode() === 'split'}>
-            <div class="stage__pane">
-              <Show when={codePath()} fallback={<EmptyStage ws={ws()} />}>
-                {(p) => <CodeViewer ws={ws()} path={p()} />}
-              </Show>
-            </div>
-            <div class="stage__pane">
-              <PdfViewer ws={ws()} />
-            </div>
-          </Match>
-          <Match when={true}>
-            <div class="stage__pane">
-              <Show
-                when={activePath()}
-                fallback={<EmptyStage ws={ws()} />}
-              >
-                {(p) => <CodeViewer ws={ws()} path={p()} />}
-              </Show>
-            </div>
-          </Match>
-        </Switch>
+        <Show when={ws().stageMode() !== 'pdf'}>
+          <div class="stage__pane">
+            <Show when={activePath()} fallback={<EmptyStage ws={ws()} />}>
+              {(p) => <CodeViewer ws={ws()} path={p()} />}
+            </Show>
+          </div>
+        </Show>
+        {/*
+         * The preview stays mounted in every mode, hidden with `display: none`
+         * rather than unmounted. pdf.js holds the scroll position, the page number
+         * and the parsed document in its own state, and all three are lost the
+         * moment it is torn down — which is what made returning to the preview
+         * land at the top of page one instead of where the reader left off. The
+         * cost is that pdf.js is loaded once a build has produced a PDF, whether
+         * or not the preview is the pane being looked at.
+         */}
+        <div class="stage__pane" classList={{ 'stage__pane--hidden': ws().stageMode() === 'code' }}>
+          <PdfViewer ws={ws()} />
+        </div>
       </div>
     </section>
   );

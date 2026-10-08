@@ -794,3 +794,42 @@ describe('本机编译环境变了', () => {
     });
   });
 });
+
+describe('打开文件回到源码', () => {
+  it('在预览里点开文件会切回 Source', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      ws.setStageMode('pdf');
+      expect(ws.stageMode()).toBe('pdf');
+
+      await ws.openFile('/README.md');
+
+      // 否则读者要点开文件、再发现编辑器被预览挡着、再手动点回 Source。
+      expect(ws.stageMode()).toBe('code');
+      expect(ws.active()).toBe('/README.md');
+    });
+  });
+
+  it('在分屏里点开文件也会切回 Source', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      ws.setStageMode('split');
+
+      await ws.openFile('/README.md');
+
+      expect(ws.stageMode()).toBe('code');
+    });
+  });
+
+  it('打开目录不会切走当前视图', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      ws.setStageMode('pdf');
+
+      // 目录不是文件：展开它不代表想读什么，不该把预览换掉。
+      await ws.openFile('/src');
+
+      expect(ws.stageMode()).toBe('pdf');
+    });
+  });
+});
