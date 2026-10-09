@@ -172,7 +172,7 @@ describe('编译：结果与原因都在预览里', () => {
         durationMs: 1234,
         artifact: { path: '/out/main.pdf', absPath: '/p/out/main.pdf', size: 2048, builtMs: 9 },
       });
-      const out = await editor.build('/p', true);
+      const out = await editor.build('/p');
       expect(out?.ok).toBe(true);
       expect(editor.buildState()?.phase).toBe('ok');
       expect(editor.buildCommand()).toBe('npm run pdf');
@@ -258,7 +258,7 @@ describe('编译：结果与原因都在预览里', () => {
         durationMs: 10,
         artifact: { path: '/.rg/build/main.pdf', absPath: '/p/.rg/build/main.pdf', size: 10, builtMs: 5 },
       });
-      await editor.build('/p', true);
+      await editor.build('/p');
       expect(editor.artifact()?.path).toBe('/.rg/build/main.pdf');
 
       fs.buildResults.push({
@@ -269,10 +269,61 @@ describe('编译：结果与原因都在预览里', () => {
         durationMs: 12,
         artifact: null,
       });
-      await editor.build('/p', true);
+      await editor.build('/p');
       // 失败不把上一份文档顶回来：屏幕上留着它，但明确标记为失败。
       expect(editor.artifact()?.path).toBe('/.rg/build/main.pdf');
       expect(editor.buildState()?.phase).toBe('failed');
+    });
+  });
+
+  it('每次成功编译都换上新的 artifact 对象：预览的重开靠它触发', async () => {
+    await withEditor(async (editor, fs) => {
+      const artifact = () => ({
+        path: '/out/main.pdf',
+        absPath: '/p/out/main.pdf',
+        size: 2048,
+        builtMs: 9,
+      });
+      fs.buildResults.push({ ok: true, command: 'xelatex', code: 0, output: '', durationMs: 5, artifact: artifact() });
+      await editor.build('/p');
+      const first = editor.artifact();
+
+      fs.buildResults.push({ ok: true, command: 'xelatex', code: 0, output: '', durationMs: 5, artifact: artifact() });
+      await editor.build('/p');
+      const second = editor.artifact();
+
+      // 同一路径、同样大小：对象也必须是新的。预览不比较路径——它把
+      // “artifact 信号被 set 了”当作“编译成功”事件本身。哪天有人把这里
+      // 优化成路径相等就跳过 set，刷新就会悄悄地再坏一次。
+      expect(second).not.toBe(first);
+      expect(second?.absPath).toBe(first?.absPath);
+    });
+  });
+
+  it('clearAll 把编译预览状态清干净，切换项目不残留旧 PDF', async () => {
+    await withEditor(async (editor, fs) => {
+      fs.buildResults.push({
+        ok: true,
+        command: 'xelatex',
+        code: 0,
+        output: 'wrote out/main.pdf',
+        durationMs: 5,
+        artifact: { path: '/out/main.pdf', absPath: '/p/out/main.pdf', size: 10, builtMs: 5 },
+      });
+      await editor.build('/p');
+      await editor.loadPlan('/p');
+      expect(editor.artifact()).not.toBeNull();
+
+      editor.clearAll();
+
+      // 打开另一个项目时 clearAll 会跑：上一个项目的产物、失败原因和
+      // 构建计划都不能跟着过去，否则预览会展示一个不属于当前项目的文档。
+      expect(editor.artifact()).toBeNull();
+      expect(editor.buildState()).toBeNull();
+      expect(editor.buildOutput()).toBe('');
+      expect(editor.buildCommand()).toBe('');
+      expect(editor.buildDuration()).toBeNull();
+      expect(editor.plan()).toBeNull();
     });
   });
 });

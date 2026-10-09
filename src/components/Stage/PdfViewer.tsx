@@ -9,8 +9,17 @@ import {
 } from 'solid-js';
 import 'pdfjs-viewer-element';
 import type PdfjsViewerElement from 'pdfjs-viewer-element';
+import type { PdfViewerApplication } from 'pdfjs-viewer-element';
 
 import { Icon } from '../Icon';
+import {
+  applySidebarView,
+  applyViewerPosition,
+  captureSidebarView,
+  captureViewerPosition,
+  type PdfViewerLike,
+  type ViewsManagerLike,
+} from '../../lib/pdfposition';
 import { theme, toast } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
 import type { BuildPlan } from '../../store/editor';
@@ -40,11 +49,6 @@ import type { BuildPlan } from '../../store/editor';
 export function PdfViewer(props: { ws: Workspace }) {
   const editor = () => props.ws.editor;
   const root = () => props.ws.root();
-
-  /**
-   * The document to show: the file the build wrote, not any PDF in the tree.
-   */
-  const target = createMemo(() => editor().artifact()?.absPath ?? null);
 
   /**
    * Ask what Build would run, once a root exists.
@@ -186,6 +190,23 @@ export function PdfViewer(props: { ws: Workspace }) {
       #outerContainer {
         background-color: light-dark(#f4f5f7, #07080a);
       }
+
+      /*
+       * Suspends the sidebar's slide animation while the reader's state is
+       * put back after a rebuild. A preset zoom ("page-width", "auto") is
+       * computed from the container's width, and the container's width
+       * depends on whether the sidebar is open — so the restore must see the
+       * sidebar's final position, not a width animating toward it. Canceling
+       * a running transition this way snaps the layout to where the
+       * animation would have ended, and removing the class afterwards cannot
+       * jump anything, because the layout is already there.
+       */
+      :root.rg-restoring #viewerContainer,
+      :root.rg-restoring #viewsManager,
+      :root.rg-restoring #sidebarContainer,
+      :root.rg-restoring #toolbarContainer {
+        transition: none !important;
+      }
     `);
 
     onCleanup(() => {
@@ -214,10 +235,29 @@ export function PdfViewer(props: { ws: Workspace }) {
    * re-request the whole document for every range it wants, out of a URL this
    * window has to keep alive. `open` also swaps the document without rebuilding
    * the viewer, so the toolbar and the injected button survive a rebuild.
+   *
+   * The artifact signal is the refresh trigger, and it is read whole rather
+   * than reduced to a path: every successful build sets a *fresh* ArtifactInfo
+   * object, so this effect re-runs on each one and re-reads the bytes
+   * unconditionally — a rebuild whose output is byte-identical still reopens,
+   * because "the build succeeded" is the only evidence the preview needs.
+   * Reducing the signal to its path is exactly how the preview ended up
+   * showing a document older than the sources it claims to reflect: the path
+   * is the same on every rebuild, so nothing ever re-ran.
+   *
+   * pdf.js resets page, zoom, scroll and the sidebar when a document is
+   * swapped, so the reading position and the sidebar's view are taken before
+   * `open` and put back once the new pages exist — a rebuild that shifts the
+   * content still lands the reader on the same spot on the same page, with
+   * the sidebar open where it was, not back at the top of page one. The
+   * sidebar is put back before the zoom, because a preset zoom is computed
+   * from the container's width and the container's width depends on the
+   * sidebar — restoring them the other way round computes the zoom against
+   * the wrong width.
    */
   createEffect(() => {
     const el = viewer();
-    const abs = target();
+    const abs = editor().artifact()?.absPath;
     if (!el || !abs) return;
     let alive = true;
     setLoadError(null);
@@ -231,6 +271,11 @@ export function PdfViewer(props: { ws: Workspace }) {
           props.ws.backend.readArtifact(abs),
         ]);
         if (!alive) return;
+        const pv = pdfViewerOf(viewerApp);
+        const vm = viewsManagerOf(viewerApp);
+        // Before the swap: after it, the old document's positions are gone.
+        const position = pv ? captureViewerPosition(pv) : null;
+        const sidebar = vm ? captureSidebarView(vm) : null;
         // `{ data }`, not the bytes alone: `getDocument` wants exactly one of
         // `data`, `range` or `url`, and handing it a bare `Uint8Array` fails with
         // "expected either `data`, `range`, or `url` parameter" — a mistake the
@@ -241,6 +286,39 @@ export function PdfViewer(props: { ws: Workspace }) {
         // buffer to the worker, which detaches it. A second `open` with the same
         // array would see a zero-length one.
         await viewerApp?.open({ data: new Uint8Array(bytes) });
+        if (!alive) return;
+        if (pv && position) {
+          try {
+            // Two gates before the reader's state goes back. The pages must
+            // exist for the position to anchor to, and the app's own initial
+            // view must have run — a PDF with /PageMode opens the sidebar on
+            // its own, and restoring before that would only be overridden.
+            await Promise.all([afterDocumentInit(viewerApp, 2_000), pv.pagesPromise]);
+            if (!alive) return;
+            // The sidebar goes back first, with its slide animation
+            // suspended: a preset zoom ("page-width", "auto") is computed
+            // from the container's width, and the container's width depends
+            // on whether the sidebar is open — so the zoom must be computed
+            // against the sidebar's final position, not against a width
+            // still animating toward it or away from it. One microtask lets
+            // `open` land the class change it queues; with the animation
+            // off, the layout is final the moment it lands.
+            const doc = el.iframe?.contentDocument;
+            doc?.documentElement.classList.add('rg-restoring');
+            try {
+              if (vm && sidebar !== null) applySidebarView(vm, sidebar);
+              await null;
+              if (!alive) return;
+              applyViewerPosition(pv, position);
+            } finally {
+              doc?.documentElement.classList.remove('rg-restoring');
+            }
+          } catch {
+            // The document is open and correct; the position and the sidebar
+            // are best-effort and must never be reported as a rendering
+            // failure.
+          }
+        }
       } catch (err: unknown) {
         if (!alive) return;
         setLoadError(err instanceof Error ? err.message : String(err));
@@ -378,7 +456,7 @@ export function PdfViewer(props: { ws: Workspace }) {
               <pre class="pdf__logbody">{editor().buildOutput() || 'No output was captured.'}</pre>
             </div>
           </Match>
-          <Match when={target()}>
+          <Match when={editor().artifact()}>
             <div class="pdf__host" ref={mount} />
             <Show when={loadError()}>
               <div class="pdf__empty">
@@ -405,6 +483,61 @@ const ZAP_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" ' +
   'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
   '<path d="M13.5 2.5 5 13.5h6l-.5 8 8.5-11h-6z"/></svg>';
+
+/**
+ * The viewer application as this component uses it.
+ *
+ * pdfjs-viewer-element's types stop at `open` and `eventBus`, but the object
+ * it hands over is pdf.js's own application, which carries the `pdfViewer`
+ * and the `viewsManager` (pdf.js 6's sidebar) that the restore needs. The
+ * cast is confined to this shape — the same structural contracts
+ * `pdfposition` is tested against, plus the promise that says when the new
+ * pages exist.
+ */
+interface ViewerApp extends PdfViewerApplication {
+  pdfViewer?: PdfViewerLike & { pagesPromise: Promise<void> | null };
+  viewsManager?: ViewsManagerLike;
+}
+
+/** The pdf.js viewer inside the application, or undefined if not there yet. */
+function pdfViewerOf(app: PdfViewerApplication | undefined): ViewerApp['pdfViewer'] {
+  return (app as ViewerApp | undefined)?.pdfViewer;
+}
+
+/** The sidebar inside the application, or undefined if not there yet. */
+function viewsManagerOf(app: PdfViewerApplication | undefined): ViewerApp['viewsManager'] {
+  return (app as ViewerApp | undefined)?.viewsManager;
+}
+
+/**
+ * Resolves once the app has applied its own initial view for the document it
+ * just loaded — or once the deadline passes, because a viewer that never
+ * gets there should not keep the restore waiting on it.
+ *
+ * `open` resolving only means the document is loaded; the app then applies a
+ * "setInitialView" of its own once the first page is ready, and that view can
+ * move the reader — a PDF's /PageMode opens the sidebar, a default zoom is
+ * set. The "documentinit" event is dispatched immediately after it, so
+ * waiting for it is waiting for the app to be done before the reader's own
+ * state is put back over it.
+ */
+function afterDocumentInit(app: PdfViewerApplication | undefined, deadlineMs: number): Promise<void> {
+  const bus = app?.eventBus;
+  if (!bus) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      bus.off('documentinit', listener);
+      resolve();
+    };
+    const listener = () => settle();
+    const timer = setTimeout(settle, deadlineMs);
+    bus.on('documentinit', listener);
+  });
+}
 
 /**
  * The viewer document, once its toolbar exists.

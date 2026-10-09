@@ -130,6 +130,17 @@ export function createEditor(
     texts.clear();
     probes.clear();
     reasons.clear();
+    // The build preview is as much "the last project's" as a resident buffer:
+    // left alone, opening a new folder keeps showing the old project's PDF
+    // next to the new project's sources. The plan is dropped too — the
+    // preview re-asks it for the new root, and until then "looking for a
+    // build command" is the honest message.
+    setArtifact(null);
+    setBuildState(null);
+    setBuildOutput('');
+    setBuildCommand('');
+    setBuildDuration(null);
+    setPlan(null);
     bump();
   }
 
