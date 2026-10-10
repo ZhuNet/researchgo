@@ -199,7 +199,15 @@ pub fn create_entry(
 
 #[tauri::command]
 pub fn rename_entry(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
-  if Path::new(&to).exists() {
+  // A rename that only changes case ("Readme.md" -> "README.md") targets the
+  // same entry, but Windows resolves paths case-insensitively, so a plain
+  // `exists()` rejects it. Canonicalized paths agree only for the same file,
+  // so that comparison is the "already exists" that still lets case through.
+  let same_entry = match (fs::canonicalize(&from), fs::canonicalize(&to)) {
+    (Ok(a), Ok(b)) => a == b,
+    _ => false,
+  };
+  if !same_entry && Path::new(&to).exists() {
     return Err(format!("already exists: {to}"));
   }
   fs::rename(&from, &to).map_err(|e| format!("rename failed: {e}"))?;

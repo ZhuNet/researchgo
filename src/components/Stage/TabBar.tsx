@@ -8,8 +8,7 @@ import {
   Show,
 } from 'solid-js';
 
-import { Icon, LANG_COLOR } from '../Icon';
-import { fileGlyphOf, fileIconLang } from '../../lib/fs';
+import { FileGlyph, Icon } from '../Icon';
 import { scrollToReveal, tabWindow, TAB_WIDTH } from '../../lib/tabwindow';
 import { copyText, openMenu } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
@@ -235,12 +234,7 @@ export function TabBar(props: { ws: Workspace }) {
                   }}
                   title={item.path}
                 >
-                  <Icon
-                    name={fileGlyphOf(item.path)}
-                    size={13}
-                    class="row__glyph"
-                    style={{ color: LANG_COLOR[fileIconLang(item.path)] }}
-                  />
+                  <FileGlyph path={item.path} size={13} />
                   <span class="tab__name truncate">{item.path.split('/').pop()}</span>
                   <Show when={props.ws.dirty().has(item.path)}>
                     <span class="tab__dirty" />

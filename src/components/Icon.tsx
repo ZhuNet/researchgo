@@ -1,3 +1,5 @@
+import { fileGlyphOf, fileIconLang } from '../lib/fs';
+
 const P: Record<string, string> = {
   chevronRight: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
   chevronDown: '<path d="M5.5 9.5 12 16l6.5-6.5"/>',
@@ -69,6 +71,22 @@ const P: Record<string, string> = {
 };
 
 export type IconName = keyof typeof P | string;
+
+/**
+ * The file-type glyph for a path: one glyph mapping, one color table, one
+ * look. Every place that shows a file's type icon — tree rows, tabs, search
+ * results — renders this, so a new file kind is added exactly once.
+ */
+export function FileGlyph(props: { path: string; size?: number }) {
+  return (
+    <Icon
+      name={fileGlyphOf(props.path)}
+      size={props.size ?? 14}
+      class="row__glyph"
+      style={{ color: LANG_COLOR[fileIconLang(props.path)] }}
+    />
+  );
+}
 
 export function Icon(props: {
   name: IconName;

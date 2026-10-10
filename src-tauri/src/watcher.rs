@@ -86,35 +86,55 @@ impl WatchState {
   }
 
   fn sync(&self, wanted: &[String]) {
-    if let Ok(mut dirs) = self.dirs.lock() {
+    // The add/remove plan is computed under one short lock, and the watcher is
+    // never touched while `dirs` is held. `watch()` blocks until the watcher's
+    // event thread acknowledges the command, and that same thread runs the
+    // event callback, which locks `dirs` — holding it across `watch()` is a
+    // deadlock the moment an event is in flight, and it froze the whole
+    // window from the UI thread.
+    let (to_add, to_remove): (Vec<PathBuf>, Vec<PathBuf>) = {
+      let Ok(mut dirs) = self.dirs.lock() else { return };
       let want: HashSet<PathBuf> = wanted.iter().map(PathBuf::from).collect();
-      dirs.retain(|d| want.contains(d));
-    }
-    if wanted.is_empty() {
+      let mut to_remove = Vec::new();
+      dirs.retain(|d| {
+        let keep = want.contains(d);
+        if !keep {
+          to_remove.push(d.clone());
+        }
+        keep
+      });
+      let to_add = want.into_iter().filter(|d| !dirs.contains(d)).collect();
+      (to_add, to_remove)
+    };
+    if to_add.is_empty() && to_remove.is_empty() {
       return;
     }
-    if let Err(err) = self.ensure_watcher() {
+    if !to_add.is_empty()
+      && let Err(err) = self.ensure_watcher()
+    {
       log::warn!("{err}");
       return;
     }
     let Ok(mut slot) = self.watcher.lock() else { return };
     let Some(watcher) = slot.as_mut() else { return };
-    let Ok(mut dirs) = self.dirs.lock() else { return };
 
-    for dir in wanted {
-      let path = PathBuf::from(dir);
-      if dirs.contains(&path) {
-        continue;
+    for path in to_remove {
+      // Fire-and-forget: unwatch never waits for the event thread.
+      if let Err(err) = watcher.unwatch(&path) {
+        log::warn!("unwatch {:?} failed: {err}", path);
       }
+    }
+    for path in to_add {
       match watcher.watch(&path, RecursiveMode::NonRecursive) {
         Ok(()) => {
-          dirs.insert(path);
+          if let Ok(mut dirs) = self.dirs.lock() {
+            dirs.insert(path);
+          }
         }
-        Err(err) => log::warn!("watch {dir:?} failed: {err}"),
+        Err(err) => log::warn!("watch {:?} failed: {err}", path),
       }
     }
   }
-
 }
 
 /// One `metadata()` call, on the one path an event is about. Everything else
@@ -177,10 +197,15 @@ fn normalize(event: &Event) -> Option<Change> {
 }
 
 #[tauri::command]
-pub fn sync_watch(app: tauri::AppHandle, dirs: Vec<String>) -> Result<Vec<String>, String> {
-  let state = app.state::<WatchState>();
-  state.sync(&dirs);
-  Ok(dirs)
+pub async fn sync_watch(app: tauri::AppHandle, dirs: Vec<String>) -> Result<Vec<String>, String> {
+  // Off the UI thread: `watch()` waits for the watcher's event thread to
+  // acknowledge, which takes as long as any in-flight event callback.
+  tauri::async_runtime::spawn_blocking(move || {
+    app.state::<WatchState>().sync(&dirs);
+    dirs
+  })
+  .await
+  .map_err(|e| format!("sync_watch task failed: {e}"))
 }
 
 pub fn init(app: &mut tauri::App) {

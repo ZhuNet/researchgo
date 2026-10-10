@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { Icon, LANG_COLOR } from './Icon';
-import { fileIconLang } from '../lib/fs';
+import { fileGlyphOf, fileIconLang } from '../lib/fs';
 import { fuzzyScore } from '../lib/tree';
 import {
   agentCollapsed,
@@ -77,7 +77,7 @@ export function CommandPalette(props: { ws: Workspace; agent: Agent }) {
           group: 'Files',
           label: entry.name,
           hint: dir,
-          icon: fileIconLang(entry.path),
+          icon: fileGlyphOf(entry.path),
           color: LANG_COLOR[fileIconLang(entry.path)],
           run: () => void props.ws.openFile(entry.path),
         });

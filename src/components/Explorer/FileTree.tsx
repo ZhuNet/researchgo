@@ -8,8 +8,7 @@ import {
   Show,
 } from 'solid-js';
 
-import { Icon, LANG_COLOR } from '../Icon';
-import { fileGlyphOf, fileIconLang } from '../../lib/fs';
+import { FileGlyph, Icon } from '../Icon';
 import { anchoredScrollTop, virtualRange } from '../../lib/tree';
 import { moveTargetOf, parentOf, type Row } from '../../lib/rowindex';
 import { copyText, openMenu, setTreeCmd, toast, treeCmd } from '../../store/ui';
@@ -65,6 +64,8 @@ export function FileTree(props: { ws: Workspace }) {
    * press must not re-render the window.
    */
   let pending: { path: string; x: number; y: number; id: number } | null = null;
+  /** The pointer a drag captured, so a lost pointerup can still be undone. */
+  let armedId: number | undefined;
   /** Swallows the click that follows a completed drag, so releasing the mouse
    *  does not also toggle the folder it lands on. */
   let swallowClick = false;
@@ -542,7 +543,13 @@ export function FileTree(props: { ws: Workspace }) {
           pending = { path: item.path, x: e.clientX, y: e.clientY, id: e.pointerId };
         }}
         dragging={dragPath() === item.path}
-        onSelect={(e) => {
+        onClick={(e) => {
+          // A completed click — press and release without the press becoming
+          // a drag; the click after a drag is swallowed — selects, and a
+          // plain click on a folder toggles it. Selection used to happen on
+          // pointerdown, so a drag-move had already selected its source row
+          // before the move even began.
+          //
           // Event-time work: keeping `indexOf` out of the *render* path matters,
           // since it would make every visible row depend on the index memo and
           // re-run the whole window on each expand.
@@ -569,9 +576,6 @@ export function FileTree(props: { ws: Workspace }) {
             ws().setSelected(picked);
             return;
           }
-          // A plain click on a folder expands or collapses it, the way every
-          // file explorer behaves. The chevron stops propagation, so clicking it
-          // still toggles exactly once.
           if (item.kind === 'dir') void ws().toggleDir(item.path);
         }}
         onHover={() => onRowHover(item.path, item.kind)}
@@ -593,6 +597,14 @@ export function FileTree(props: { ws: Workspace }) {
     // the browser only consults the capture element's cursor, so per-row CSS
     // can never take effect.
     if (scroller) scroller.style.cursor = '';
+    // Capture normally releases itself on pointerup; doing it here too covers
+    // the case where that event never arrived — a context menu's modal loop
+    // can swallow it — which would otherwise leave every later pointer event
+    // routed to the scroller and the tree dead to clicks.
+    if (scroller && armedId !== undefined && scroller.hasPointerCapture(armedId)) {
+      scroller.releasePointerCapture(armedId);
+    }
+    armedId = undefined;
     if (expandDwell !== undefined) {
       clearTimeout(expandDwell);
       expandDwell = undefined;
@@ -708,14 +720,18 @@ export function FileTree(props: { ws: Workspace }) {
   // scroller keeps the up event coming even outside the window and stops row
   // hover churn while dragging.
   createEffect(() => {
-    const onDown = (): void => {
+    const onDown = (e: PointerEvent): void => {
       swallowClick = false;
+      // A fresh primary press while a drag is still armed means that drag's
+      // pointerup was lost; release it rather than stay stuck in drag mode.
+      if (e.button === 0 && dragPath()) releaseDrag();
     };
     const onMove = (e: PointerEvent): void => {
       if (pending && e.pointerId === pending.id) {
         const dx = e.clientX - pending.x;
         const dy = e.clientY - pending.y;
         if (dx * dx + dy * dy < DRAG_ARM_PX * DRAG_ARM_PX) return;
+        armedId = e.pointerId;
         scroller?.setPointerCapture(e.pointerId);
         setDragPath(pending.path);
         pending = null;
@@ -867,7 +883,8 @@ function TreeRow(props: {
   onToggle: () => void;
   /** A press that may become a drag if the pointer travels far enough. */
   onPress: (e: PointerEvent, row: Row) => void;
-  onSelect: (e: MouseEvent) => void;
+  /** Selection and folder toggling — a completed click, never a press. */
+  onClick: (e: MouseEvent) => void;
   onHover: () => void;
 }) {
   const row = () => props.row;
@@ -906,8 +923,16 @@ function TreeRow(props: {
       data-kind={row().kind}
       onPointerEnter={props.onHover}
       onPointerDown={(e) => {
+        // Only the primary button arms drags. A right press must never arm
+        // one: a drifting right-click used to capture the pointer and could
+        // even move the folder on release.
+        if (e.button !== 0) return;
         if (!props.renaming) props.onPress(e, row());
-        props.onSelect(e);
+      }}
+      onClick={(e) => {
+        // Clicks inside the rename input are editing, not navigation.
+        if (props.renaming) return;
+        props.onClick(e);
       }}
       onDblClick={() => {
         if (props.renaming) return;
@@ -952,12 +977,7 @@ function TreeRow(props: {
           when={row().kind === 'file'}
           fallback={<Icon name="folder" size={14} class="row__glyph" />}
         >
-          <Icon
-            name={fileGlyphOf(row().path)}
-            size={14}
-            class="row__glyph"
-            style={{ color: LANG_COLOR[fileIconLang(row().path)] }}
-          />
+          <FileGlyph path={row().path} size={14} />
         </Show>
         <span class="row__name truncate">{row().name}</span>
         <Show when={pending() || blocked()}>

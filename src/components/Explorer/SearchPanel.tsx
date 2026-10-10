@@ -1,7 +1,6 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 
-import { Icon, LANG_COLOR } from '../Icon';
-import { fileGlyphOf, fileIconLang } from '../../lib/fs';
+import { FileGlyph, Icon } from '../Icon';
 import { fuzzyScore } from '../../lib/tree';
 import type { Workspace } from '../../store/workspace';
 
@@ -112,12 +111,7 @@ export function SearchPanel(props: { ws: Workspace }) {
               {([path, list]) => (
                 <div class="result">
                   <button class="result__head" onClick={() => props.ws.openFile(path)}>
-                    <Icon
-                      name={fileGlyphOf(path)}
-                      size={13}
-                      class="row__glyph"
-                      style={{ color: LANG_COLOR[fileIconLang(path)] }}
-                    />
+                    <FileGlyph path={path} size={13} />
                     <span class="truncate">{path.split('/').pop()}</span>
                     <span class="result__dir truncate">{path}</span>
                     <span class="result__count">{list.length}</span>
