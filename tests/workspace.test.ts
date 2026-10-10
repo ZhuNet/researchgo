@@ -355,6 +355,37 @@ describe('磁盘同步', () => {
     });
   });
 
+  it('收起父目录时被撤掉监听的展开子目录，重开后后台刷新', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      ws.setExpanded('/src', true);
+      ws.setExpanded('/src/util', true);
+      await flush();
+      expect(fs.watching).toContain('/src/util');
+
+      // 收起 /src：/src/util 的展开状态保留在 expanded 集合里，但 watcher 集合
+      // 只含可达子树，/src/util 随之被宿主 unwatch。
+      ws.setExpanded('/src', false);
+      await flush();
+      expect(fs.watching).not.toContain('/src/util');
+
+      // 这段时间磁盘上在 /src/util 里新增了文件；没有 watcher 就没有事件上来，
+      // 驻留缓存里的旧列表不会被打补丁。
+      fs.addEntry('/src/util', 'new.rs', 'file');
+
+      // 重开 /src。组件交出窗口范围后，屏幕内"驻留但已 stale"的子目录要补一次后台读，
+      // 而不是等用户再把 /src/util 收起再展开。
+      ws.setExpanded('/src', true);
+      ws.protectWindow(0, 20);
+      for (const dir of [...ws.missing()]) void ws.ensureLoaded(dir);
+      await flush();
+      await flush();
+
+      expect(fs.listCalls).toContain('/src/util');
+      expect(paths(ws)).toContain('/src/util/new.rs');
+    });
+  });
+
   it('外部新建文件后行立刻出现，且不产生读盘', async () => {
     // 事件本身就带类型，直接就地补丁即可；一次 listDirPage 都不该发生。
     await withWs(async (ws, fs) => {

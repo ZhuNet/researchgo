@@ -214,6 +214,11 @@ export function createWorkspace(
         if (row.kind !== 'dir' || !row.expanded) continue;
         if (failedDirs.has(row.path)) failed.push(row.path);
         else if (!cache.has(row.path)) gaps.push(row.path);
+        // Resident but stale (its ancestor was collapsed while open, so the
+        // watcher dropped it and the disk moved underneath): treat it like a
+        // gap so the effect re-reads it in the background, keeping the rows we
+        // already have on screen instead of waiting for a second click.
+        else if (cache.listing(row.path)?.stale) gaps.push(row.path);
       }
     }
     publishWindowState(gaps, failed, more);
@@ -522,6 +527,15 @@ export function createWorkspace(
       // The host's mtime check keeps the unchanged case cheap, and a
       // listing warmed by prefetch (never watched, expanded within a
       // heartbeat) stays zero-read by design.
+      //
+      // The same loss of coverage hits every *expanded descendant*: the watch
+      // set is built from reachable spans, so collapsing this folder unwatches
+      // its open subfolders too. Their rows stay resident and their expanded
+      // flag stays set; without this they reappear with stale children until
+      // the reader collapses and re-expands the subfolder itself.
+      for (const d of expanded()) {
+        if (d !== path && d.startsWith(`${path}/`)) cache.markStale(d);
+      }
       if (cache.has(path)) cache.markStale(path);
       syncWatch();
     }
