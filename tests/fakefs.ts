@@ -8,6 +8,7 @@ import {
   type DirPage,
   type FileDragEvent,
   type OpenedFolder,
+  type SearchHit,
 } from '../src/lib/backend';
 
 /** In-memory filesystem so the store can be tested without Rust or a browser. */
@@ -250,6 +251,23 @@ export function fakeBackend(fs: FakeFs, picked: string | null = '/'): Backend {
         copied.push(dest === '/' ? `/${finalName}` : `${dest}/${finalName}`);
       }
       return copied;
+    },
+    async searchWorkspace(root, query, caseSensitive) {
+      const needle = caseSensitive ? query : query.toLowerCase();
+      const out: SearchHit[] = [];
+      if (!needle) return out;
+      for (const [path, content] of fs.files) {
+        if (!path.startsWith(root)) continue;
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          const hay = caseSensitive ? lines[i] : lines[i].toLowerCase();
+          if (hay.includes(needle)) {
+            out.push({ path, line: i + 1, text: lines[i].trim().slice(0, 200) });
+            if (out.length >= 500) return out;
+          }
+        }
+      }
+      return out;
     },
     async syncWatch(dirs) {
       fs.watching = dirs;

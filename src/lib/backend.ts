@@ -83,6 +83,13 @@ export interface OpenedFolder {
   page: DirPage;
 }
 
+/** One matching line of a workspace-wide content search. */
+export interface SearchHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
 export type ChangeKind = 'created' | 'removed' | 'changed' | 'renamed';
 
 /**
@@ -137,6 +144,8 @@ export interface Backend {
   removeEntry(path: string): Promise<void>;
   /** Copies files or whole directories into `dest`, renaming on collision. */
   copyInto(dest: string, sources: string[]): Promise<string[]>;
+  /** Full-text search over the whole workspace, bounded on the host side. */
+  searchWorkspace(root: string, query: string, caseSensitive: boolean): Promise<SearchHit[]>;
   syncWatch(dirs: string[]): Promise<string[]>;
   onChange(handler: (change: Change) => void): () => void;
   onFileDrag(handler: (event: FileDragEvent) => void): () => void;
@@ -211,6 +220,8 @@ export const tauriBackend: Backend = {
   renameEntry: (from, to) => invoke<void>('rename_entry', { from, to }),
   removeEntry: (path) => invoke<void>('remove_entry', { path }),
   copyInto: (dest, sources) => invoke<string[]>('copy_into', { dest, sources }),
+  searchWorkspace: (root, query, caseSensitive) =>
+    invoke<SearchHit[]>('search_workspace', { root, query, caseSensitive }),
   syncWatch: (dirs) => invoke<string[]>('sync_watch', { dirs }),
   onChange(handler) {
     return listenTo<Change>('fs:change', handler);

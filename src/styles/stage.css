@@ -325,6 +325,10 @@
   flex-direction: column;
   flex: 1;
   min-width: 0;
+  /* The one link the scroll chain was missing: without this, the pane refuses
+     to shrink below the build log's content height, the inner `overflow: auto`
+     never engages, and a long compiler error is clipped with no scrollbar. */
+  min-height: 0;
   background: var(--bg-1);
 }
 

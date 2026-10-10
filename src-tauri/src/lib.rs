@@ -1,6 +1,7 @@
 mod content;
 mod dirindex;
 mod fsops;
+mod search;
 mod toolchain;
 mod watcher;
 
@@ -37,6 +38,7 @@ pub fn run() {
       fsops::copy_into,
       watcher::sync_watch,
       fsops::pick_directory,
+      search::search_workspace,
     ])
     .run(tauri::generate_context!())
     .expect("error while building tauri application");

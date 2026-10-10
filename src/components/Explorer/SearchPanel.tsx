@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { FileGlyph, Icon } from '../Icon';
 import { fuzzyScore } from '../../lib/tree';
@@ -11,47 +11,73 @@ interface Hit {
   score: number;
 }
 
+/** Typing cadence: a keystroke every 100ms should not launch a search each time. */
+const DEBOUNCE_MS = 180;
+
 export function SearchPanel(props: { ws: Workspace }) {
   const [query, setQuery] = createSignal('');
   const [caseSensitive, setCaseSensitive] = createSignal(false);
+  const [hits, setHits] = createSignal<Hit[]>([]);
+  const [searching, setSearching] = createSignal(false);
+  let seq = 0;
+  let timer: number | undefined;
+  onCleanup(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 
   /**
-   * Full-text search is inherently unbounded, so it runs over a bounded slice:
-   * files already loaded into the text cache. Anything wider needs a real index
-   * (ripgrep on the Rust side), which is the next step, not a frontend loop.
+   * The search runs on the host over the whole workspace. The old version
+   * only saw files already open as tabs, so it answered "no results" for
+   * anything the reader had not happened to open. Bounds live on the Rust
+   * side; here the concerns are cadence (debounce) and staleness (a newer
+   * query's answer wins even when an older one lands late).
    */
-  const hits = createMemo<Hit[]>(() => {
+  createEffect(() => {
     const q = query().trim();
-    if (q.length < 2) return [];
-    const needle = caseSensitive() ? q : q.toLowerCase();
-    const out: Hit[] = [];
-    const seen = new Set<string>();
-    const files: string[] = [];
-    for (const path of props.ws.tabs()) files.push(path);
-    if (props.ws.active()) files.push(props.ws.active() as string);
-    for (const path of files) {
-      if (seen.has(path)) continue;
-      seen.add(path);
-      const content = props.ws.contentOf(path);
-      if (!content) continue;
-      const name = path.slice(path.lastIndexOf('/') + 1);
-      const nameScore = fuzzyScore(needle, name.toLowerCase());
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const hay = caseSensitive() ? lines[i] : lines[i].toLowerCase();
-        const at = hay.indexOf(needle);
-        if (at < 0) continue;
-        out.push({
-          path,
-          line: i + 1,
-          text: lines[i].trim().slice(0, 200),
-          score: nameScore + 500 - at,
-        });
-        if (out.length > 400) break;
-      }
-      if (out.length > 400) break;
+    const cs = caseSensitive();
+    const root = props.ws.root();
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
     }
-    return out.sort((a, b) => b.score - a.score).slice(0, 120);
+    if (q.length < 2 || !root) {
+      seq++;
+      setSearching(false);
+      setHits([]);
+      return;
+    }
+    const mine = ++seq;
+    setSearching(true);
+    timer = setTimeout(() => {
+      timer = undefined;
+      void props.ws.backend
+        .searchWorkspace(root, q, cs)
+        .then((found) => {
+          if (mine !== seq) return;
+          const needle = cs ? q : q.toLowerCase();
+          const ranked = found
+            .map((hit) => {
+              const name = hit.path.slice(hit.path.lastIndexOf('/') + 1);
+              const hay = cs ? hit.text : hit.text.toLowerCase();
+              return {
+                ...hit,
+                score:
+                  fuzzyScore(needle, name.toLowerCase()) +
+                  500 -
+                  Math.max(hay.indexOf(needle), 0),
+              };
+            })
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 120);
+          setHits(ranked);
+          setSearching(false);
+        })
+        .catch(() => {
+          if (mine !== seq) return;
+          setHits([]);
+          setSearching(false);
+        });
+    }, DEBOUNCE_MS);
   });
 
   const grouped = createMemo(() => {
@@ -87,26 +113,30 @@ export function SearchPanel(props: { ws: Workspace }) {
       </div>
 
       <div class="scroll panel__body">
-        <Show
-          when={query().trim().length >= 2}
-          fallback={
-            <div class="panel__empty">
-              <Icon name="search" size={22} />
-              <p>Type at least two characters</p>
-              <span>Searches names and file contents</span>
-            </div>
-          }
-        >
+          <Show
+            when={query().trim().length >= 2}
+            fallback={
+              <div class="panel__empty">
+                <Icon name="search" size={22} />
+                <p>Type at least two characters</p>
+                <span>Searches file contents across the workspace</span>
+              </div>
+            }
+          >
           <Show
             when={grouped().length > 0}
             fallback={
               <div class="panel__empty">
                 <Icon name="inbox" size={22} />
-                <p>No results for “{query()}”</p>
+                <p>{searching() ? 'Searching…' : `No results for “${query()}”`}</p>
               </div>
             }
           >
-            <div class="results__meta">{hits().length} results in {grouped().length} files</div>
+            <div class="results__meta">
+              {searching()
+                ? 'searching…'
+                : `${hits().length} results in ${grouped().length} files`}
+            </div>
             <For each={grouped()}>
               {([path, list]) => (
                 <div class="result">
