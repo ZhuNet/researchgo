@@ -45,6 +45,7 @@ const LANG_BY_EXT: Record<string, string> = {
   zsh: 'bash',
   bash: 'bash',
   sql: 'sql',
+  pdf: 'pdf',
   txt: 'text',
   lock: 'text',
   env: 'dotenv',
@@ -91,10 +92,49 @@ export const ICON_BY_LANG: Record<string, string> = {
   dotenv: 'env',
   sql: 'sql',
   go: 'go',
+  pdf: 'pdf',
 };
 
 export function fileIconLang(path: string): string {
   return ICON_BY_LANG[langOf(path)] ?? 'txt';
+}
+
+/**
+ * A geometric glyph per file kind, keyed like `LANG_COLOR`.
+ *
+ * The two-letter labels these replace were text: they sat on the baseline
+ * inside a line box that centers by font metrics, not by ink, and read a
+ * pixel off next to the geometric icons. SVG glyphs have no baseline, so
+ * they center exactly.
+ */
+export const GLYPH_BY_LANG: Record<string, string> = {
+  ts: 'code',
+  tsx: 'code',
+  js: 'code',
+  jsx: 'code',
+  rs: 'code',
+  py: 'code',
+  go: 'code',
+  sql: 'code',
+  sh: 'terminal',
+  json: 'hash',
+  yaml: 'hash',
+  toml: 'hash',
+  env: 'hash',
+  xml: 'hash',
+  css: 'layers',
+  scss: 'layers',
+  html: 'globe',
+  md: 'fileText',
+  txt: 'fileText',
+  tex: 'fileText',
+  bib: 'fileText',
+  pdf: 'book',
+  docker: 'cpu',
+};
+
+export function fileGlyphOf(path: string): string {
+  return GLYPH_BY_LANG[fileIconLang(path)] ?? 'file';
 }
 
 export function isDir(path: string, map: FsMap): boolean {

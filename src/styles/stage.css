@@ -22,11 +22,24 @@
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
+  /* Slim and always visible when tabs overflow: the strip is scrollable (wheel,
+     auto-reveal of the active tab), but without a scrollbar that is invisible
+     knowledge — the reader has no way to discover the tabs that are cut off. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-2) transparent;
 }
 
 .tabbar__strip::-webkit-scrollbar {
-  height: 0;
+  height: 5px;
+}
+
+.tabbar__strip::-webkit-scrollbar-thumb {
+  background: var(--bd-2);
+  border-radius: var(--r-full);
+}
+
+.tabbar__strip::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
 }
 
 /*
@@ -58,11 +71,13 @@
   color: var(--tx-4);
 }
 
+/* No container gap: each seam carries its own margin, because the distances
+   are deliberately different — icon-to-name stays roomy, while the name may
+   run right up to the close button when it is long. */
 .tab {
   position: relative;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
   height: 100%;
   padding: 0 var(--sp-3) 0 var(--sp-5);
   flex: none;
@@ -128,7 +143,16 @@
   background: var(--ac-1);
 }
 
+/* Takes the space between the fixed-width ends: the name starts at a constant
+   left offset, the close button sits at a constant right offset, and the gap
+   between them absorbs the difference in name length. Buttons center their
+   text by default, so the name has to opt out — otherwise a short name drifts
+   to the middle of its elastic box and the icon-to-name distance appears to
+   vary with the name. */
 .tab__name {
+  flex: 1;
+  margin-left: var(--sp-3);
+  text-align: left;
   letter-spacing: -0.005em;
 }
 
@@ -136,6 +160,7 @@
   width: 6px;
   height: 6px;
   flex: none;
+  margin-left: var(--sp-1);
   border-radius: 50%;
   background: var(--tx-2);
 }
@@ -146,6 +171,7 @@
   width: 17px;
   height: 17px;
   flex: none;
+  margin-left: var(--sp-1);
   border-radius: var(--r-xs);
   color: var(--tx-3);
   opacity: 0;

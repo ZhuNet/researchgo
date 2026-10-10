@@ -9,7 +9,7 @@ import {
 } from 'solid-js';
 
 import { Icon, LANG_COLOR } from '../Icon';
-import { fileIconLang } from '../../lib/fs';
+import { fileGlyphOf, fileIconLang } from '../../lib/fs';
 import { scrollToReveal, tabWindow, TAB_WIDTH } from '../../lib/tabwindow';
 import { copyText, openMenu } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
@@ -235,16 +235,12 @@ export function TabBar(props: { ws: Workspace }) {
                   }}
                   title={item.path}
                 >
-                  <Show
-                    when={item.path.endsWith('.pdf')}
-                    fallback={
-                      <span class="row__mono" style={{ color: LANG_COLOR[fileIconLang(item.path)] }}>
-                        {fileIconLang(item.path)}
-                      </span>
-                    }
-                  >
-                    <Icon name="book" size={13} class="row__glyph" />
-                  </Show>
+                  <Icon
+                    name={fileGlyphOf(item.path)}
+                    size={13}
+                    class="row__glyph"
+                    style={{ color: LANG_COLOR[fileIconLang(item.path)] }}
+                  />
                   <span class="tab__name truncate">{item.path.split('/').pop()}</span>
                   <Show when={props.ws.dirty().has(item.path)}>
                     <span class="tab__dirty" />

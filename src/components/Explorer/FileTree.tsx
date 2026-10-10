@@ -9,7 +9,7 @@ import {
 } from 'solid-js';
 
 import { Icon, LANG_COLOR } from '../Icon';
-import { langOf } from '../../lib/fs';
+import { fileGlyphOf, fileIconLang } from '../../lib/fs';
 import { anchoredScrollTop, virtualRange } from '../../lib/tree';
 import { moveTargetOf, parentOf, type Row } from '../../lib/rowindex';
 import { copyText, openMenu, setTreeCmd, toast, treeCmd } from '../../store/ui';
@@ -952,9 +952,12 @@ function TreeRow(props: {
           when={row().kind === 'file'}
           fallback={<Icon name="folder" size={14} class="row__glyph" />}
         >
-          <span class="row__mono" style={{ color: LANG_COLOR[langOf(row().path)] }}>
-            {langOf(row().path).slice(0, 2)}
-          </span>
+          <Icon
+            name={fileGlyphOf(row().path)}
+            size={14}
+            class="row__glyph"
+            style={{ color: LANG_COLOR[fileIconLang(row().path)] }}
+          />
         </Show>
         <span class="row__name truncate">{row().name}</span>
         <Show when={pending() || blocked()}>

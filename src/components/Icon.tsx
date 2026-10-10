@@ -120,4 +120,5 @@ export const LANG_COLOR: Record<string, string> = {
   env: '#c8a84b',
   sql: '#d38f6d',
   go: '#00add8',
+  pdf: '#d9381e',
 };
