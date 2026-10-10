@@ -154,50 +154,77 @@ export class RowIndex {
     span.total = this.count(span, 0);
   }
 
-  /** Rows contributed by a span, recursing only into expanded children. */
-  private count(span: Span, cursor: number): number {
-    let rows = 0;
-    span.branches = [];
-    span.start = cursor;
-    const children = span.entries;
-    for (let offset = 0; offset < children.length; offset++) {
-      const entry = children[offset];
-      const isOpen = entry.kind === 'dir' && this.expanded.has(entry.path);
-      let added = 1;
-      if (isOpen) {
-        const view = this.lookup(entry.path);
-        if (view && view.entries.length) {
-          const branch: Branch = {
-            offset,
-            dir: entry.path,
-            start: cursor + rows,
-            total: 0,
-          };
-          const child: Span = {
-            dir: entry.path,
-            depth: span.depth + 1,
-            entries: view.entries,
-            start: branch.start,
-            total: 0,
-            more: !view.complete,
-            branches: [],
-          };
-          if (span.depth < 32) {
-            this.spans.push(child);
-            this.spanByDir.set(child.dir, child);
-            branch.total = 1 + this.count(child, branch.start + 1);
-          } else {
-            branch.total = 1;
-          }
-          span.branches.push(branch);
-          added = branch.total;
-        }
-      }
-      rows += added;
+  /**
+   * Rows contributed by a span, recursing only into expanded children.
+   *
+   * Iterative with an explicit stack on purpose: a deeply nested workspace used
+   * to blow the call stack here, so the walk was capped at depth 32 and
+   * everything deeper rendered as a single collapsed row. With an explicit
+   * stack there is no call frame to overflow, so nesting depth is unlimited and
+   * the old depth cap is gone. Cost is unchanged: O(resident directories),
+   * which the FIFO cache already bounds.
+   */
+  private count(root: Span, rootCursor: number): number {
+    interface Frame {
+      span: Span;
+      cursor: number;
+      i: number;
+      rows: number;
+      /** The branch this frame's span was reached through; filled on pop. */
+      branch?: Branch;
     }
-    if (span.more) rows += 1;
-    span.total = rows;
-    return rows;
+    const stack: Frame[] = [{ span: root, cursor: rootCursor, i: 0, rows: 0 }];
+    while (stack.length) {
+      const f = stack[stack.length - 1];
+      // Mirrors `span.start = cursor` at the top of the recursive count(): the
+      // span's own row sits at branch.start, and its subtree rows begin after it.
+      f.span.start = f.cursor;
+      if (f.i >= f.span.entries.length) {
+        const total = f.rows + (f.span.more ? 1 : 0);
+        f.span.total = total;
+        stack.pop();
+        // The child row itself is accounted for by the parent ("1 +"), exactly
+        // as the recursive `branch.total = 1 + count(child)` did.
+        if (f.branch) f.branch.total = 1 + total;
+        if (stack.length) stack[stack.length - 1].rows += 1 + total;
+        continue;
+      }
+      const entry = f.span.entries[f.i];
+      const isOpen = entry.kind === 'dir' && this.expanded.has(entry.path);
+      if (!isOpen) {
+        f.rows += 1;
+        f.i += 1;
+        continue;
+      }
+      const view = this.lookup(entry.path);
+      if (!view || !view.entries.length) {
+        f.rows += 1;
+        f.i += 1;
+        continue;
+      }
+      const branch: Branch = {
+        offset: f.i,
+        dir: entry.path,
+        start: f.cursor + f.rows,
+        total: 0,
+      };
+      const child: Span = {
+        dir: entry.path,
+        depth: f.span.depth + 1,
+        entries: view.entries,
+        start: branch.start,
+        total: 0,
+        more: !view.complete,
+        branches: [],
+      };
+      this.spans.push(child);
+      this.spanByDir.set(child.dir, child);
+      f.span.branches.push(branch);
+      f.i += 1;
+      // The child's own row occupies branch.start; its subtree rows follow.
+      stack.push({ span: child, cursor: branch.start + 1, i: 0, rows: 0, branch });
+    }
+    return root.total;
   }
 
   rowAt(index: number): Row | undefined {
@@ -206,8 +233,10 @@ export class RowIndex {
     if (!span) return undefined;
 
     // Branch bounds are absolute row indices, so every comparison must use
-    // `index`, never a span-relative offset.
-    for (let guard = 0; guard < 64; guard++) {
+    // `index`, never a span-relative offset. Depth is now unbounded: the loop
+    // stops on its own once no branch contains the target index (a leaf row),
+    // the high guard is purely defensive against a malformed span graph.
+    for (let guard = 0; guard < 100_000; guard++) {
       const branch = span.branches.find(
         (b) => index > b.start && index < b.start + b.total,
       );
