@@ -513,8 +513,18 @@ export function createWorkspace(
       else next.delete(path);
       return next;
     });
-    if (open) void ensureLoaded(path).then(syncWatch);
-    else syncWatch();
+    if (open) {
+      void ensureLoaded(path).then(syncWatch);
+    } else {
+      // A resident listing stops being watched the moment its directory
+      // collapses: files that land from here on produce no event, so the
+      // next expand must re-ask the host instead of trusting the cache.
+      // The host's mtime check keeps the unchanged case cheap, and a
+      // listing warmed by prefetch (never watched, expanded within a
+      // heartbeat) stays zero-read by design.
+      if (cache.has(path)) cache.markStale(path);
+      syncWatch();
+    }
   }
 
   function toggle(path: string): void {

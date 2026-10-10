@@ -727,6 +727,24 @@ describe('展开不该闪一下 loading', () => {
     });
   });
 
+  it('折叠期间落盘的文件，重新展开时能看到', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      ws.setExpanded('/src', true);
+      await flush();
+      expect(paths(ws)).toContain('/src/lib.rs');
+
+      // 折叠后目录不再被监视：外部写入不产生任何事件。
+      ws.setExpanded('/src', false);
+      fs.addEntry('/src', 'landed.rs', 'file');
+
+      // 重新展开必须重新问宿主要数据，而不是端出折叠前的旧列表。
+      ws.setExpanded('/src', true);
+      await flush();
+      expect(paths(ws)).toContain('/src/landed.rs');
+    });
+  });
+
   it('预热读不动的目录不会弹提示，但失败仍被记住', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');

@@ -184,6 +184,11 @@ struct MemListing {
   recs: Vec<Rec>,
   files: usize,
   dirs: usize,
+  /// The directory's mtime when this listing was built. The watcher only
+  /// covers expanded directories, so a file can land while a directory is
+  /// collapsed (or in the gap before a fresh watch engages) and no event
+  /// ever invalidates this entry — the mtime is the backstop that catches it.
+  mtime: u64,
 }
 
 /// FIFO by insertion order, not by access. A directory the user scrolls back into
@@ -210,12 +215,12 @@ impl MemStore {
     }
   }
 
-  fn insert(&mut self, dir: &str, recs: Vec<Rec>, files: usize, dirs: usize) {
+  fn insert(&mut self, dir: &str, recs: Vec<Rec>, files: usize, dirs: usize, mtime: u64) {
     self.drop_dir(dir);
     self.entries += recs.len();
     self.map.insert(
       dir.to_string(),
-      MemListing { recs, files, dirs },
+      MemListing { recs, files, dirs, mtime },
     );
     self.order.push_back(dir.to_string());
     self.evict();
@@ -329,9 +334,14 @@ impl DirIndex {
 
     if !self.is_invalid(dir) {
       let mem = self.mem.lock().map_err(|_| "dir index poisoned".to_string())?;
-      if let Some(listing) = mem.map.get(dir) {
+      if let Some(listing) = mem.map.get(dir)
+        && listing.mtime == mtime
+      {
         return Ok(page_from_slice(dir, listing, offset, limit));
       }
+      // A listing whose mtime has moved on means the directory changed
+      // without an event reaching us. Fall through and rebuild rather than
+      // answering from the old listing.
       drop(mem);
       if let Some(hit) = self.page_from_disk(dir, offset, limit, mtime)? {
         return Ok(hit);
@@ -427,7 +437,10 @@ impl DirIndex {
     let _guard = self.build.lock().map_err(|_| "dir index poisoned".to_string())?;
     {
       let mem = self.mem.lock().map_err(|_| "dir index poisoned".to_string())?;
-      if mem.map.contains_key(dir) {
+      // The mtime matters here too: `page` falls through on a moved-on
+      // directory, and short-circuiting on the stale entry would serve it
+      // again from the second lookup below.
+      if mem.map.get(dir).is_some_and(|l| l.mtime == mtime) {
         return Ok(());
       }
     }
@@ -491,7 +504,7 @@ impl DirIndex {
     if runs.is_empty() {
       buf.sort_by(|a, b| a.key(b));
       let mut mem = self.mem.lock().map_err(|_| "dir index poisoned".to_string())?;
-      mem.insert(dir, buf, files, dir_count);
+      mem.insert(dir, buf, files, dir_count, mtime);
       return Ok(());
     }
     if !buf.is_empty() {
@@ -981,7 +994,7 @@ mod tests {
           dir: false,
         })
         .collect();
-      mem.insert(&path, recs, 10, 0);
+      mem.insert(&path, recs, 10, 0, 0);
     }
     assert!(mem.entries <= 40, "entries: {}", mem.entries);
     assert!(mem.map.len() <= 4, "dirs: {}", mem.map.len());

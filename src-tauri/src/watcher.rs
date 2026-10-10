@@ -43,6 +43,11 @@ pub struct WatchState {
   app: AppHandle,
   dirs: Mutex<HashSet<PathBuf>>,
   watcher: Mutex<Option<Box<notify::RecommendedWatcher>>>,
+  /// Serializes syncs. `sync_watch` runs on blocking threads, and two
+  /// concurrent syncs could interleave their unwatch/watch into a state where
+  /// the set claims a directory is watched while the watcher no longer covers
+  /// it — silently dropping every later event for it.
+  sync: Mutex<()>,
 }
 
 impl WatchState {
@@ -86,6 +91,10 @@ impl WatchState {
   }
 
   fn sync(&self, wanted: &[String]) {
+    // Held for the whole operation: see the field comment. The event callback
+    // never takes this lock (only `dirs`, briefly), so waiting inside
+    // `watch()` for the watcher thread cannot cycle back here.
+    let _serial = self.sync.lock();
     // The add/remove plan is computed under one short lock, and the watcher is
     // never touched while `dirs` is held. `watch()` blocks until the watcher's
     // event thread acknowledges the command, and that same thread runs the
@@ -213,6 +222,7 @@ pub fn init(app: &mut tauri::App) {
     app: app.handle().clone(),
     dirs: Mutex::new(HashSet::new()),
     watcher: Mutex::new(None),
+    sync: Mutex::new(()),
   });
 }
 
