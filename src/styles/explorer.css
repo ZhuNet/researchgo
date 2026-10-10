@@ -124,22 +124,18 @@
   color: #fff;
 }
 
-.row--drop::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  right: var(--sp-4);
-  top: -1px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--ac-hi);
-  box-shadow: 0 0 6px var(--ac-line);
-}
-
+/* Both drag kinds mark the target folder the same way: a soft fill. The
+   move/no-drop cursor verdict is set inline on the tree while the pointer is
+   captured — per-row cursor CSS cannot win against the capture target. */
+.row--drop::after,
 .row--drop-into::after {
   opacity: 1;
   background: var(--ac-soft);
   box-shadow: inset 0 0 0 1px var(--ac-line);
+}
+
+.row--dragging {
+  opacity: 0.55;
 }
 
 .row__chevron {

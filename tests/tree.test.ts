@@ -7,6 +7,7 @@ import {
   ancestorsOf,
   basenameOf,
   joinPath,
+  moveTargetOf,
   parentOf,
   type DirView,
 } from '../src/lib/rowindex';
@@ -569,5 +570,40 @@ describe('锚点滚动：精确而不是含糊', () => {
     for (const offset of [0, 0.5, 7, 23.5]) {
       expect(anchoredScrollTop(10, offset, H, 100_000)).toBe(10 * H + offset);
     }
+  });
+});
+
+describe('拖拽移动的目标判定', () => {
+  const hit = (path: string | null, kind: 'dir' | 'file' = 'dir') => ({ path, kind });
+
+  it('文件行代表它所在的目录', () => {
+    expect(moveTargetOf('/README.md', '/', hit('/docs/guide.md', 'file'))).toBe('/docs');
+    expect(moveTargetOf('/a/f.md', '/', hit('/b.md', 'file'))).toBe('/');
+  });
+
+  it('同级（自己的父目录）是 no-op，保持无效', () => {
+    expect(moveTargetOf('/a/f.md', '/', hit('/a'))).toBeNull();
+    expect(moveTargetOf('/a/f.md', '/', hit('/a/b.md', 'file'))).toBeNull();
+    expect(moveTargetOf('/f.md', '/', hit(null))).toBeNull();
+  });
+
+  it('同级、上级与其它分支的文件夹都是有效目标', () => {
+    expect(moveTargetOf('/a/f.md', '/', hit('/a/b'))).toBe('/a/b');
+    expect(moveTargetOf('/a/b/f.md', '/', hit('/a'))).toBe('/a');
+    expect(moveTargetOf('/a/f.md', '/', hit('/c/d'))).toBe('/c/d');
+  });
+
+  it('自己和子孙目录不可作为目标', () => {
+    expect(moveTargetOf('/a', '/', hit('/a'))).toBeNull();
+    expect(moveTargetOf('/a', '/', hit('/a/b'))).toBeNull();
+    expect(moveTargetOf('/a', '/', hit('/a/b/x.md', 'file'))).toBeNull();
+  });
+
+  it('空白区域指根目录', () => {
+    expect(moveTargetOf('/a/f.md', '/', hit(null))).toBe('/');
+  });
+
+  it('树外一律无效', () => {
+    expect(moveTargetOf('/a/f.md', '/', null)).toBeNull();
   });
 });

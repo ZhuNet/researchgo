@@ -11,7 +11,7 @@ import {
 import { Icon, LANG_COLOR } from '../Icon';
 import { langOf } from '../../lib/fs';
 import { anchoredScrollTop, virtualRange } from '../../lib/tree';
-import { parentOf, type Row } from '../../lib/rowindex';
+import { moveTargetOf, parentOf, type Row } from '../../lib/rowindex';
 import { copyText, openMenu, setTreeCmd, toast, treeCmd } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
 
@@ -22,6 +22,10 @@ const ROW = 24;
  * that a deliberate move onto a folder is already paying off by the click.
  */
 const WARM_MS = 150;
+/** Pointer travel that separates a click from a drag. */
+const DRAG_ARM_PX = 4;
+/** How long a drag has to rest on a collapsed folder before it opens. */
+const EXPAND_MS = 600;
 
 interface CreateItem {
   t: 'create';
@@ -55,8 +59,21 @@ export function FileTree(props: { ws: Workspace }) {
   /** At most one directory is warmed at a time, and only on a deliberate dwell. */
   let dwell: number | undefined;
   let warming: string | null = null;
+  /**
+   * A press that might become a drag: recorded on pointerdown, promoted once
+   * the pointer travels past `DRAG_ARM_PX`. Plain state, not a signal — a
+   * press must not re-render the window.
+   */
+  let pending: { path: string; x: number; y: number; id: number } | null = null;
+  /** Swallows the click that follows a completed drag, so releasing the mouse
+   *  does not also toggle the folder it lands on. */
+  let swallowClick = false;
+  /** Folder the drag is currently resting on, and the timer that will open it. */
+  let expandTarget: string | null = null;
+  let expandDwell: number | undefined;
   onCleanup(() => {
     if (dwell !== undefined) clearTimeout(dwell);
+    if (expandDwell !== undefined) clearTimeout(expandDwell);
   });
 
   function onRowHover(path: string, kind: 'dir' | 'file'): void {
@@ -457,7 +474,12 @@ export function FileTree(props: { ws: Workspace }) {
   function onKeyDown(e: KeyboardEvent): void {
     const row = rowAtCursor();
     const path = row?.path;
-    if (e.key === 'ArrowDown') {
+    if (e.key === 'Escape' && dragPath()) {
+      e.preventDefault();
+      swallowClick = true;
+      releaseDrag();
+      return;
+    } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       moveCursor(1);
     } else if (e.key === 'ArrowUp') {
@@ -516,10 +538,10 @@ export function FileTree(props: { ws: Workspace }) {
         onRenameEnd={() => ws().setRenaming(null)}
         onContext={rowMenu}
         onToggle={() => void ws().toggleDir(item.path)}
-        onArmDrag={() => releaseDrag()}
-        onDragStart={() => setDragPath(item.path)}
-        onDragEnd={() => releaseDrag()}
-        onDragOverRow={() => setDropPath(onDropTarget(item))}
+        onPress={(e) => {
+          pending = { path: item.path, x: e.clientX, y: e.clientY, id: e.pointerId };
+        }}
+        dragging={dragPath() === item.path}
         onSelect={(e) => {
           // Event-time work: keeping `indexOf` out of the *render* path matters,
           // since it would make every visible row depend on the index memo and
@@ -558,23 +580,36 @@ export function FileTree(props: { ws: Workspace }) {
   }
 
   /**
-   * Every exit from a drag goes through here.
-   *
-   * `dragend` is not enough: a drag whose source row leaves the window (it was
-   * evicted, or the tree reshaped under it) never fires it, and the tree stays in
-   * drag mode — every row highlighted as a drop target and every hover accepted,
-   * which reads as "stuck". Pointer and window events cover the rest.
+   * Every exit from a drag goes through here: release, cancel, Escape, blur,
+   * and the case where the source row leaves the window mid-drag (evicted, or
+   * the tree reshaped under it) — otherwise the tree stays in drag mode with
+   * every row painted as a target, which reads as "stuck".
    */
   function releaseDrag(): void {
     setDragPath(null);
     setDropPath(null);
+    pending = null;
+    // The cursor is set inline while the pointer is captured: during capture
+    // the browser only consults the capture element's cursor, so per-row CSS
+    // can never take effect.
+    if (scroller) scroller.style.cursor = '';
+    if (expandDwell !== undefined) {
+      clearTimeout(expandDwell);
+      expandDwell = undefined;
+    }
+    expandTarget = null;
   }
 
-  function onDropTarget(row: Row): string | null {
-    const dragging = dragPath();
-    if (!dragging || dragging === row.path) return null;
-    if (dragging.startsWith(`${row.path}/`)) return null;
-    return row.kind === 'dir' ? row.path : (parentOf(row.path, ws().root() ?? '/') ?? null);
+  /** The row under CSS coordinates (x, y): `path: null` is the tree's empty
+   *  space, a `null` result is a point outside the tree altogether. */
+  function rowHitAt(x: number, y: number): { path: string | null; kind: 'dir' | 'file' } | null {
+    const el = document.elementFromPoint(x, y);
+    if (!el || !scroller?.contains(el)) return null;
+    const rowEl = el.closest<HTMLElement>('.row');
+    return {
+      path: rowEl?.dataset.path ?? null,
+      kind: rowEl?.dataset.kind === 'dir' ? 'dir' : 'file',
+    };
   }
 
   /**
@@ -585,13 +620,40 @@ export function FileTree(props: { ws: Workspace }) {
    * with no path of its own — means the workspace root.
    */
   function dropTargetAt(x: number, y: number): string | null {
-    const el = document.elementFromPoint(x, y);
-    if (!el || !scroller?.contains(el)) return null;
-    const rowEl = el.closest<HTMLElement>('.row');
-    const path = rowEl?.dataset.path;
-    if (!path) return ws().root();
-    if (rowEl?.dataset.kind === 'dir') return path;
-    return parentOf(path, ws().root() ?? '/') ?? ws().root();
+    const base = ws().root();
+    const hit = rowHitAt(x, y);
+    if (!base || !hit) return null;
+    if (hit.path === null) return base;
+    if (hit.kind === 'dir') return hit.path;
+    return parentOf(hit.path, base) ?? base;
+  }
+
+  /** The folder a row drag would move into at (x, y), or null when the point
+   *  sits on anything that is not a usable target. */
+  function moveTargetAt(x: number, y: number): string | null {
+    const base = ws().root();
+    const dragging = dragPath();
+    if (!base || !dragging) return null;
+    return moveTargetOf(dragging, base, rowHitAt(x, y));
+  }
+
+  /**
+   * Resting a drag on a collapsed folder opens it, the way every desktop file
+   * manager does — that is how you reach a nested target without letting go.
+   */
+  function armExpandDwell(): void {
+    const target = dropPath();
+    if (target === expandTarget) return;
+    if (expandDwell !== undefined) {
+      clearTimeout(expandDwell);
+      expandDwell = undefined;
+    }
+    expandTarget = target;
+    if (!target || ws().expanded().has(target)) return;
+    expandDwell = setTimeout(() => {
+      expandDwell = undefined;
+      if (dragPath() && dropPath() === target) void ws().toggleDir(target);
+    }, EXPAND_MS);
   }
 
   function onExternalDrop(paths: string[], x: number, y: number): void {
@@ -639,6 +701,66 @@ export function FileTree(props: { ws: Workspace }) {
     onCleanup(stop);
   });
 
+  // Row drags are pointer-driven for the same reason: Tauri's interception
+  // revokes the webview's HTML5 drop target on Windows, so dragover/drop
+  // never arrive there. A press becomes a drag once the pointer travels past
+  // DRAG_ARM_PX; before that it stays a click. Capturing the pointer on the
+  // scroller keeps the up event coming even outside the window and stops row
+  // hover churn while dragging.
+  createEffect(() => {
+    const onDown = (): void => {
+      swallowClick = false;
+    };
+    const onMove = (e: PointerEvent): void => {
+      if (pending && e.pointerId === pending.id) {
+        const dx = e.clientX - pending.x;
+        const dy = e.clientY - pending.y;
+        if (dx * dx + dy * dy < DRAG_ARM_PX * DRAG_ARM_PX) return;
+        scroller?.setPointerCapture(e.pointerId);
+        setDragPath(pending.path);
+        pending = null;
+      }
+      if (!dragPath()) return;
+      setDropPath(moveTargetAt(e.clientX, e.clientY));
+      // Inline on the scroller — the capture target — because that is the only
+      // element whose cursor the browser honors while the pointer is captured.
+      if (scroller) scroller.style.cursor = dropPath() ? 'move' : 'no-drop';
+      armExpandDwell();
+    };
+    const onUp = (e: PointerEvent): void => {
+      if (pending && e.pointerId === pending.id) pending = null;
+      const dragging = dragPath();
+      if (!dragging) return;
+      const target = moveTargetAt(e.clientX, e.clientY);
+      releaseDrag();
+      swallowClick = true;
+      if (!target) return;
+      void ws().move(dragging, target).then((moved) => {
+        if (moved) toast('info', 'Moved', `${dragging} → ${moved}`);
+        else toast('error', 'Cannot move there', `${dragging} → ${target}`);
+      });
+    };
+    const onCancel = (): void => releaseDrag();
+    const onClick = (e: MouseEvent): void => {
+      if (!swallowClick) return;
+      swallowClick = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('click', onClick, true);
+    onCleanup(() => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('click', onClick, true);
+    });
+  });
+
   return (
     <div
       class="tree scroll"
@@ -653,22 +775,7 @@ export function FileTree(props: { ws: Workspace }) {
         captureAnchor(e.currentTarget.scrollTop);
       }}
       onContextMenu={headerMenu}
-      onPointerUp={releaseDrag}
-      onPointerCancel={releaseDrag}
       onBlur={releaseDrag}
-      onDragOver={(e) => {
-        if (dragPath()) e.preventDefault();
-      }}
-      onDrop={() => {
-        const dragging = dragPath();
-        const target = dropPath() ?? ws().root();
-        releaseDrag();
-        if (!dragging || !target) return;
-        void ws().move(dragging, target).then((moved) => {
-          if (moved) toast('info', 'Moved', `${dragging} → ${moved}`);
-          else toast('error', 'Cannot move there', `${dragging} → ${target}`);
-        });
-      }}
     >
       <div
         class="tree__sizer"
@@ -750,30 +857,20 @@ function TreeRow(props: {
   selected: boolean;
   active: boolean;
   dropTarget: string | null;
-  /** External drags fill the target row; internal ones draw an insertion line. */
+  /** External drags fill the target row; internal ones outline it. */
   dropInto: boolean;
+  /** This row is the one being dragged. */
+  dragging: boolean;
   onRename: (value: string) => void;
   onRenameEnd: () => void;
   onContext: (e: MouseEvent, row: Row) => void;
   onToggle: () => void;
-  onArmDrag: () => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onDragOverRow: (e: DragEvent) => void;
+  /** A press that may become a drag if the pointer travels far enough. */
+  onPress: (e: PointerEvent, row: Row) => void;
   onSelect: (e: MouseEvent) => void;
   onHover: () => void;
 }) {
   const row = () => props.row;
-  /**
-   * A row is not draggable until a pointer actually goes down on it.
-   *
-   * `draggable` set at render time makes every click a potential drag: a couple of
-   * pixels of hand movement while pressing starts an HTML5 drag, the click never
-   * completes, and the folder under the cursor refuses to expand. Arming on
-   * pointerdown keeps the gesture available while leaving a plain click a click.
-   */
-  const [draggable, setDraggable] = createSignal(false);
-  onCleanup(() => setDraggable(false));
   const indent = () => 6 + row().depth * 13;
   // Row objects are recycled across rebuilds so `<For>` does not recreate every
   // visible row. A plain property on them is therefore invisible to Solid: the
@@ -800,35 +897,25 @@ function TreeRow(props: {
         'row--active': props.active,
         'row--drop': !props.dropInto && props.dropTarget === row().path,
         'row--drop-into': props.dropInto && props.dropTarget === row().path,
+        'row--dragging': props.dragging,
         'row--pending': pending(),
         'row--blocked': blocked(),
       }}
       style={{ 'padding-left': `${indent()}px` }}
       data-path={row().path}
       data-kind={row().kind}
-      draggable={draggable() && !props.renaming}
-      onDragStart={(e) => {
-        e.dataTransfer?.setData('text/plain', row().path);
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-        props.onDragStart();
-      }}
-      onDragEnd={props.onDragEnd}
-      onDragOver={(e) => {
-        e.preventDefault();
-        props.onDragOverRow(e);
-      }}
       onPointerEnter={props.onHover}
       onPointerDown={(e) => {
-        if (!props.renaming) setDraggable(true);
-        props.onArmDrag();
+        if (!props.renaming) props.onPress(e, row());
         props.onSelect(e);
       }}
-      onPointerUp={() => setDraggable(false)}
-      onPointerCancel={() => setDraggable(false)}
       onDblClick={() => {
         if (props.renaming) return;
-        if (row().kind === 'dir') props.onToggle();
-        else void props.ws.openFile(row().path);
+        // Folders deliberately do nothing here: a plain click already toggles
+        // on pointerdown, so a double-click is two toggles. Adding a third
+        // made rapid clicking desync from the reader's intent — a folder they
+        // opened would close again on the stray dblclick.
+        if (row().kind === 'file') void props.ws.openFile(row().path);
       }}
       onContextMenu={(e) => props.onContext(e, row())}
     >

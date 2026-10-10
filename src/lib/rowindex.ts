@@ -324,3 +324,30 @@ export function basenameOf(path: string, root: string): string {
 export function joinPath(dir: string, name: string): string {
   return dir === '/' ? `/${name}` : `${dir}/${name}`;
 }
+
+/**
+ * Where a row drag over `hit` would move `dragging` to.
+ *
+ * `hit` is the row under the pointer: `path: null` is the empty space of the
+ * tree (which means the workspace root), and a `null` hit is a point outside
+ * the tree. A file row stands for the folder that holds it. The source's own
+ * folder would be a no-op; the source's subtree is off-limits. Every other
+ * folder — a sibling, an ancestor, a folder in another branch — is a real move.
+ */
+export function moveTargetOf(
+  dragging: string,
+  base: string,
+  hit: { path: string | null; kind: 'dir' | 'file' } | null,
+): string | null {
+  if (!hit) return null;
+  const target =
+    hit.path === null
+      ? base
+      : hit.kind === 'dir'
+        ? hit.path
+        : (parentOf(hit.path, base) ?? null);
+  if (!target) return null;
+  if (target === dragging || target.startsWith(`${dragging}/`)) return null;
+  if (parentOf(dragging, base) === target) return null;
+  return target;
+}
