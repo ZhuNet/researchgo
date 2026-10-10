@@ -76,6 +76,16 @@ interface Span {
  */
 export class RowIndex {
   private spans: Span[] = [];
+  /**
+     * Span lookup by directory path. `rowAt` descends one level per row depth,
+     * and used to find the child span with `spans.find(dir)` — a linear scan over
+     * every resident directory. A viewport of rows at depth d then cost
+     * O(viewport × d × residentDirs) per frame, which is exactly the jank that
+     * showed up once a workspace had thousands of open folders. This turns the
+     * per-level jump into an O(1) map hit, so scrolling is O(viewport × depth)
+     * no matter how many directories are resident.
+     */
+  private spanByDir = new Map<string, Span>();
   private readonly root: string;
   private readonly expanded: ReadonlySet<string>;
   private readonly lookup: (dir: string) => DirView | undefined;
@@ -128,6 +138,7 @@ export class RowIndex {
   private rebuild(): void {
     this.generation += 1;
     this.spans = [];
+    this.spanByDir.clear();
     const view = this.lookup(this.root);
     const span: Span = {
       dir: this.root,
@@ -139,6 +150,7 @@ export class RowIndex {
       branches: [],
     };
     this.spans.push(span);
+    this.spanByDir.set(span.dir, span);
     span.total = this.count(span, 0);
   }
 
@@ -172,6 +184,7 @@ export class RowIndex {
           };
           if (span.depth < 32) {
             this.spans.push(child);
+            this.spanByDir.set(child.dir, child);
             branch.total = 1 + this.count(child, branch.start + 1);
           } else {
             branch.total = 1;
@@ -199,7 +212,7 @@ export class RowIndex {
         (b) => index > b.start && index < b.start + b.total,
       );
       if (!branch) break;
-      const child = this.spans.find((s) => s.dir === branch.dir);
+      const child = this.spanByDir.get(branch.dir);
       if (!child) break;
       span = child;
     }
