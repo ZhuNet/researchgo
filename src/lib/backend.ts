@@ -86,6 +86,19 @@ export interface OpenedFolder {
 export type ChangeKind = 'created' | 'removed' | 'changed' | 'renamed';
 
 /**
+ * A file drag crossing into this window from the host, as Tauri reports it.
+ *
+ * The webview never sees HTML5 drag events for these — Tauri intercepts the
+ * OS drag to hand over real file paths — so positions arrive in physical
+ * pixels and the receiver divides by `devicePixelRatio` itself.
+ */
+export type FileDragEvent =
+  | { kind: 'enter'; paths: string[]; position: { x: number; y: number } }
+  | { kind: 'over'; position: { x: number; y: number } }
+  | { kind: 'leave' }
+  | { kind: 'drop'; paths: string[]; position: { x: number; y: number } };
+
+/**
  * A change on disk.
  *
  * `isDir` and `from` are filled in only where the event itself can answer them
@@ -122,8 +135,11 @@ export interface Backend {
   canWrite(path: string): Promise<boolean>;
   renameEntry(from: string, to: string): Promise<void>;
   removeEntry(path: string): Promise<void>;
+  /** Copies files or whole directories into `dest`, renaming on collision. */
+  copyInto(dest: string, sources: string[]): Promise<string[]>;
   syncWatch(dirs: string[]): Promise<string[]>;
   onChange(handler: (change: Change) => void): () => void;
+  onFileDrag(handler: (event: FileDragEvent) => void): () => void;
   /**
    * Fires when PATH changed on the host — a toolchain installed or removed
    * outside this window. The handler re-asks `buildPlan`.
@@ -194,9 +210,29 @@ export const tauriBackend: Backend = {
   canWrite: (path) => invoke<boolean>('can_write', { path }),
   renameEntry: (from, to) => invoke<void>('rename_entry', { from, to }),
   removeEntry: (path) => invoke<void>('remove_entry', { path }),
+  copyInto: (dest, sources) => invoke<string[]>('copy_into', { dest, sources }),
   syncWatch: (dirs) => invoke<string[]>('sync_watch', { dirs }),
   onChange(handler) {
     return listenTo<Change>('fs:change', handler);
+  },
+  onFileDrag(handler) {
+    const offs = [
+      listenTo<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-enter',
+        (p) => handler({ kind: 'enter', ...p }),
+      ),
+      listenTo<{ position: { x: number; y: number } }>('tauri://drag-over', (p) =>
+        handler({ kind: 'over', ...p }),
+      ),
+      listenTo<null>('tauri://drag-leave', () => handler({ kind: 'leave' })),
+      listenTo<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-drop',
+        (p) => handler({ kind: 'drop', ...p }),
+      ),
+    ];
+    return () => {
+      for (const off of offs) off();
+    };
   },
   onToolchainChange(handler) {
     // No payload to read: what is buildable depends on the open project's

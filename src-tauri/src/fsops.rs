@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -244,4 +245,92 @@ fn parent_of(path: &str) -> Option<String> {
     Some(0) => Some("/".to_string()),
     Some(cut) => Some(trimmed[..cut].to_string()),
   }
+}
+
+/// Depth cap for `copy_tree`. `fs::metadata` follows symlinks, so a link that
+/// points at an ancestor would otherwise recurse until the disk fills.
+const COPY_DEPTH_LIMIT: usize = 64;
+
+/// The first free target for `name` inside `dir`, suffixing " (n)" on collision.
+///
+/// A drop has no confirmation step, so the safe outcome of a collision is a new
+/// name — never an overwrite.
+fn unique_target(dir: &Path, name: &OsStr) -> Result<PathBuf, String> {
+  let first = dir.join(name);
+  if !first.exists() {
+    return Ok(first);
+  }
+  let lossy = name.to_string_lossy();
+  // A leading dot belongs to the name (".gitignore" has no extension).
+  let (stem, ext) = match lossy.rfind('.') {
+    Some(at) if at > 0 => (lossy[..at].to_string(), lossy[at..].to_string()),
+    _ => (lossy.to_string(), String::new()),
+  };
+  for n in 1..1000 {
+    let candidate = dir.join(format!("{stem} ({n}){ext}"));
+    if !candidate.exists() {
+      return Ok(candidate);
+    }
+  }
+  Err(format!("too many copies of the same name in {}", dir.display()))
+}
+
+fn copy_tree(src: &Path, dst: &Path, depth: usize) -> Result<(), String> {
+  if depth > COPY_DEPTH_LIMIT {
+    return Err(format!("copy too deep (symlink loop?): {}", src.display()));
+  }
+  let meta = fs::metadata(src).map_err(|e| format!("stat failed: {} ({e})", src.display()))?;
+  if meta.is_dir() {
+    fs::create_dir_all(dst).map_err(|e| format!("mkdir failed: {} ({e})", dst.display()))?;
+    let entries =
+      fs::read_dir(src).map_err(|e| format!("read_dir failed: {} ({e})", src.display()))?;
+    for entry in entries {
+      let entry = entry.map_err(|e| format!("read_dir failed: {} ({e})", src.display()))?;
+      copy_tree(&entry.path(), &dst.join(entry.file_name()), depth + 1)?;
+    }
+  } else {
+    fs::copy(src, dst).map_err(|e| format!("copy failed: {} ({e})", src.display()))?;
+  }
+  Ok(())
+}
+
+/// Copies files or whole directories from anywhere on the host into `dest`, as
+/// a drop from the host's file manager does. Returns the paths it wrote, after
+/// collision renaming.
+#[tauri::command]
+pub async fn copy_into(
+  app: tauri::AppHandle,
+  dest: String,
+  sources: Vec<String>,
+) -> Result<Vec<String>, String> {
+  let index_dest = dest.clone();
+  let copied = tauri::async_runtime::spawn_blocking(move || {
+    let dest_dir = PathBuf::from(&dest);
+    if !dest_dir.is_dir() {
+      return Err(format!("not a directory: {dest}"));
+    }
+    let mut copied = Vec::with_capacity(sources.len());
+    for src in sources {
+      let source = PathBuf::from(&src);
+      let name = source.file_name().ok_or_else(|| format!("cannot copy: {src}"))?;
+      let target = unique_target(&dest_dir, name)?;
+      // A folder dropped into its own subtree would recurse until the depth cap
+      // and fill the disk with copies of copies.
+      if target.starts_with(&source) {
+        return Err(format!("cannot copy a folder into itself: {src}"));
+      }
+      if let Err(err) = copy_tree(&source, &target, 0) {
+        // Leave no half-copied folder behind: the next drop of the same name
+        // would silently become "name (1)".
+        let _ = fs::remove_dir_all(&target).or_else(|_| fs::remove_file(&target));
+        return Err(err);
+      }
+      copied.push(target.to_string_lossy().to_string());
+    }
+    Ok(copied)
+  })
+  .await
+  .map_err(|e| format!("copy_into task failed: {e}"))??;
+  dirindex::store(&app).invalidate(&index_dest);
+  Ok(copied)
 }

@@ -6,6 +6,7 @@ import {
   type Change,
   type DirEntry,
   type DirPage,
+  type FileDragEvent,
   type OpenedFolder,
 } from '../src/lib/backend';
 
@@ -19,6 +20,10 @@ export class FakeFs {
   changeHandlers: ((change: Change) => void)[] = [];
   /** Subscribers to "PATH changed on the host", so the re-check can be driven. */
   toolchainHandlers: (() => void)[] = [];
+  /** Subscribers to host file drags, so drop handling can be driven. */
+  dragHandlers: ((event: FileDragEvent) => void)[] = [];
+  /** `copy_into` calls, so arguments can be asserted. */
+  copyCalls: { dest: string; sources: string[] }[] = [];
   failList = new Set<string>();
   /** Paths whose content is not text, so the binary path can be exercised. */
   binaryFiles = new Set<string>();
@@ -233,6 +238,19 @@ export function fakeBackend(fs: FakeFs, picked: string | null = '/'): Backend {
     async removeEntry(path) {
       fs.removeEntry(path);
     },
+    async copyInto(dest, sources) {
+      fs.copyCalls.push({ dest, sources });
+      if (!fs.dirs.has(dest)) throw new Error(`no such folder: ${dest}`);
+      if (fs.readOnly.has(dest)) throw new Error(`Permission denied (${dest})`);
+      const copied: string[] = [];
+      for (const src of sources) {
+        const name = src.slice(src.lastIndexOf('/') + 1);
+        const finalName = uniqueNameIn(fs, dest, name);
+        copyEntry(fs, src, dest, finalName);
+        copied.push(dest === '/' ? `/${finalName}` : `${dest}/${finalName}`);
+      }
+      return copied;
+    },
     async syncWatch(dirs) {
       fs.watching = dirs;
       return dirs;
@@ -249,12 +267,44 @@ export function fakeBackend(fs: FakeFs, picked: string | null = '/'): Backend {
         fs.toolchainHandlers = fs.toolchainHandlers.filter((h) => h !== handler);
       };
     },
+    onFileDrag(handler) {
+      fs.dragHandlers.push(handler);
+      return () => {
+        fs.dragHandlers = fs.dragHandlers.filter((h) => h !== handler);
+      };
+    },
   };
 }
 
 /** Fires the toolchain-changed event, as the host does when PATH changes. */
 export function emitToolchainChange(fs: FakeFs): void {
   for (const handler of [...fs.toolchainHandlers]) handler();
+}
+
+/** Mirrors the Rust `unique_target`: "name" -> "name (1)" on collision. */
+function uniqueNameIn(fs: FakeFs, dir: string, name: string): string {
+  if (!fs.dirs.get(dir)?.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let n = 1; n < 999; n++) {
+    const candidate = `${stem} (${n})${ext}`;
+    if (!fs.dirs.get(dir)?.has(candidate)) return candidate;
+  }
+  throw new Error(`too many copies of the same name in ${dir}`);
+}
+
+function copyEntry(fs: FakeFs, src: string, dest: string, name: string): void {
+  const target = dest === '/' ? `/${name}` : `${dest}/${name}`;
+  if (fs.files.has(src)) {
+    fs.files.set(target, fs.files.get(src) ?? '');
+    fs.dirs.get(dest)?.set(name, { name, path: target, kind: 'file' });
+    return;
+  }
+  if (!fs.dirs.has(src)) throw new Error(`no such path: ${src}`);
+  fs.dirs.set(target, new Map());
+  fs.dirs.get(dest)?.set(name, { name, path: target, kind: 'dir' });
+  for (const entry of fs.entriesOf(src)) copyEntry(fs, entry.path, target, entry.name);
 }
 
 export const SAMPLE_TREE: Record<string, string[]> = {

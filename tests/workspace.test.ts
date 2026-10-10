@@ -282,6 +282,65 @@ describe('文件操作', () => {
   });
 });
 
+describe('拖入文件', () => {
+  it('拖入的文件出现在目标目录里', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.files.set('/tmp/paper.pdf', '%PDF\n');
+      const copied = await ws.importInto('/docs', ['/tmp/paper.pdf']);
+      expect(copied).toEqual(['/docs/paper.pdf']);
+      expect(fs.copyCalls).toEqual([{ dest: '/docs', sources: ['/tmp/paper.pdf'] }]);
+      ws.setExpanded('/docs', true);
+      await flush();
+      expect(paths(ws)).toContain('/docs/paper.pdf');
+    });
+  });
+
+  it('同名时自动加序号而不是覆盖', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.files.set('/tmp/guide.md', 'new\n');
+      const copied = await ws.importInto('/docs', ['/tmp/guide.md']);
+      expect(copied).toEqual(['/docs/guide (1).md']);
+      expect(fs.files.get('/docs/guide.md')).toBe('placeholder\n');
+      expect(fs.files.get('/docs/guide (1).md')).toBe('new\n');
+    });
+  });
+
+  it('拖入整个文件夹会递归复制', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.mkdir('/tmp/assets', ['logo.png', 'fonts']);
+      fs.mkdir('/tmp/assets/fonts', ['mono.woff2']);
+      const copied = await ws.importInto('/', ['/tmp/assets']);
+      expect(copied).toEqual(['/assets']);
+      ws.setExpanded('/assets', true);
+      await flush();
+      ws.setExpanded('/assets/fonts', true);
+      await flush();
+      expect(paths(ws)).toContain('/assets/logo.png');
+      expect(paths(ws)).toContain('/assets/fonts/mono.woff2');
+    });
+  });
+
+  it('无写入权限时报错', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.readOnly.add('/docs');
+      fs.files.set('/tmp/x.md', 'x\n');
+      await expect(ws.importInto('/docs', ['/tmp/x.md'])).rejects.toThrow(/Permission denied/);
+    });
+  });
+
+  it('未打开文件夹时不复制', async () => {
+    await withWs(async (ws, fs) => {
+      fs.files.set('/tmp/x.md', 'x\n');
+      expect(await ws.importInto('/docs', ['/tmp/x.md'])).toEqual([]);
+      expect(fs.copyCalls).toEqual([]);
+    });
+  });
+});
+
 describe('磁盘同步', () => {
   it('展开目录会注册 watcher', async () => {
     await withWs(async (ws, fs) => {

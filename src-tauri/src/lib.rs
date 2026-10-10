@@ -34,6 +34,7 @@ pub fn run() {
       fsops::can_write,
       fsops::rename_entry,
       fsops::remove_entry,
+      fsops::copy_into,
       watcher::sync_watch,
       fsops::pick_directory,
     ])

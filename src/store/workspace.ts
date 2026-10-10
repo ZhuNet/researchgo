@@ -764,6 +764,20 @@ export function createWorkspace(
     return target;
   }
 
+  /**
+   * Copies files or folders dragged in from the host into a directory of the
+   * open workspace. The backend resolves name collisions; the listing is
+   * re-read here so the copies become rows immediately, even in a folder the
+   * watcher is not watching.
+   */
+  async function importInto(destDir: string, sources: string[]): Promise<string[]> {
+    const base = root();
+    if (!base) return [];
+    const copied = await backend.copyInto(destDir, sources);
+    await refresh(destDir);
+    return copied;
+  }
+
   function descendants(path: string): string[] {
     const out: string[] = [];
     const walk = (dir: string) => {
@@ -1085,6 +1099,7 @@ export function createWorkspace(
     removeEntry,
     removeEntries,
     move,
+    importInto,
     contentOf,
     editor,
     isLoaded,

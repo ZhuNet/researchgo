@@ -37,6 +37,9 @@ export function FileTree(props: { ws: Workspace }) {
   const [cursorPath, setCursorPath] = createSignal<string | null>(null);
   const [dropPath, setDropPath] = createSignal<string | null>(null);
   const [dragPath, setDragPath] = createSignal<string | null>(null);
+  /** Whether the current drop highlight comes from an OS file drag rather than
+   *  an internal row drag: the two paint the target differently. */
+  const [extDrag, setExtDrag] = createSignal(false);
   /**
    * The topmost row the reader is looking at, plus the leftover pixels inside it.
    *
@@ -508,6 +511,7 @@ export function FileTree(props: { ws: Workspace }) {
         selected={ws().selected().includes(item.path)}
         active={ws().active() === item.path}
         dropTarget={dropPath()}
+        dropInto={extDrag()}
         onRename={(v) => commitRename(item.path, v)}
         onRenameEnd={() => ws().setRenaming(null)}
         onContext={rowMenu}
@@ -572,6 +576,68 @@ export function FileTree(props: { ws: Workspace }) {
     if (dragging.startsWith(`${row.path}/`)) return null;
     return row.kind === 'dir' ? row.path : (parentOf(row.path, ws().root() ?? '/') ?? null);
   }
+
+  /**
+   * The directory a host file drag would land in at CSS coordinates (x, y).
+   *
+   * `null` means the point is not over this tree at all, so the drag is not
+   * ours to accept. A point over the tree but past every row — or over a row
+   * with no path of its own — means the workspace root.
+   */
+  function dropTargetAt(x: number, y: number): string | null {
+    const el = document.elementFromPoint(x, y);
+    if (!el || !scroller?.contains(el)) return null;
+    const rowEl = el.closest<HTMLElement>('.row');
+    const path = rowEl?.dataset.path;
+    if (!path) return ws().root();
+    if (rowEl?.dataset.kind === 'dir') return path;
+    return parentOf(path, ws().root() ?? '/') ?? ws().root();
+  }
+
+  function onExternalDrop(paths: string[], x: number, y: number): void {
+    if (!ws().root()) {
+      toast('info', 'No folder open', '先打开一个文件夹，再往里拖');
+      return;
+    }
+    if (!paths.length) return;
+    const target = dropTargetAt(x, y);
+    if (!target) return;
+    void ws()
+      .importInto(target, paths)
+      .then((copied) => {
+        toast(
+          'ok',
+          copied.length > 1 ? `Copied ${copied.length} items` : 'Copied',
+          copied.length > 1 ? target : (copied[0] ?? target),
+        );
+      })
+      .catch((err: unknown) => toast('error', 'Copy failed', String(err)));
+  }
+
+  // OS file drags never raise HTML5 drag events in the webview — Tauri
+  // intercepts them to hand over real paths — so the tree listens to the
+  // host's drag events and hit-tests the reported position against its rows.
+  createEffect(() => {
+    const stop = ws().backend.onFileDrag((event) => {
+      if (event.kind === 'leave') {
+        setExtDrag(false);
+        setDropPath(null);
+        return;
+      }
+      const scale = window.devicePixelRatio || 1;
+      const x = event.position.x / scale;
+      const y = event.position.y / scale;
+      if (event.kind === 'drop') {
+        setExtDrag(false);
+        setDropPath(null);
+        onExternalDrop(event.paths, x, y);
+        return;
+      }
+      setExtDrag(true);
+      setDropPath(dropTargetAt(x, y));
+    });
+    onCleanup(stop);
+  });
 
   return (
     <div
@@ -684,6 +750,8 @@ function TreeRow(props: {
   selected: boolean;
   active: boolean;
   dropTarget: string | null;
+  /** External drags fill the target row; internal ones draw an insertion line. */
+  dropInto: boolean;
   onRename: (value: string) => void;
   onRenameEnd: () => void;
   onContext: (e: MouseEvent, row: Row) => void;
@@ -730,7 +798,8 @@ function TreeRow(props: {
       classList={{
         'row--on': props.selected,
         'row--active': props.active,
-        'row--drop': props.dropTarget === row().path,
+        'row--drop': !props.dropInto && props.dropTarget === row().path,
+        'row--drop-into': props.dropInto && props.dropTarget === row().path,
         'row--pending': pending(),
         'row--blocked': blocked(),
       }}
@@ -833,6 +902,8 @@ function MoreRow(props: { ws: Workspace; row: Row }) {
     <div
       class="row row--more"
       style={{ 'padding-left': `${6 + props.row.depth * 13}px` }}
+      data-path={props.row.path}
+      data-kind="dir"
       onPointerDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
       onClick={() => void props.ws.loadMore(props.row.path)}
