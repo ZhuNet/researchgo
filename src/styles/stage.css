@@ -512,6 +512,31 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* Compiler output is the one pane guaranteed to overflow on a failed build,
+     so the thumb stays. The track goes: a solid grey gutter down the side of a
+     mono log is the loudest thing on the screen, and a transparent one still
+     reserves the width and still composites. */
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
+}
+
+.pdf__logbody::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pdf__logbody::-webkit-scrollbar-track,
+.pdf__logbody::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.pdf__logbody::-webkit-scrollbar-thumb {
+  background: var(--bd-3);
+  border-radius: var(--r-full);
+}
+
+.pdf__logbody::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
 }
 
 .chip--warn {

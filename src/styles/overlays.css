@@ -263,6 +263,27 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Same treatment as the build log: a transparent track, so a form taller than
+     the dialog scrolls without a grey gutter crossing it. */
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
+}
+
+/* Thumb only, no track: an empty track is pure paint. The thumb stays because
+     a form taller than the dialog hides its own Save button, and the thumb is
+     what tells the reader to scroll for it. */
+.modal__body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.modal__body::-webkit-scrollbar-thumb {
+  background: var(--bd-3);
+  border-radius: var(--r-full);
+}
+
+.modal__body::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
 }
 
 .field {

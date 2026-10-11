@@ -345,6 +345,29 @@
   background: var(--bg-0);
   border: 1px solid var(--bd-1);
   overflow-x: auto;
+  /* A long line in a code block scrolls sideways, which on a narrow agent panel
+     happens constantly. Same treatment as the rest: thumb only. */
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
+}
+
+.markdown .md__pre::-webkit-scrollbar {
+  height: 6px;
+}
+
+.markdown .md__pre::-webkit-scrollbar-track,
+.markdown .md__pre::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.markdown .md__pre::-webkit-scrollbar-thumb {
+  background: var(--bd-3);
+  border-radius: var(--r-full);
+}
+
+.markdown .md__pre::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
 }
 
 .markdown .md__pre code {
@@ -456,6 +479,9 @@
   word-break: break-word;
   max-height: 260px;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
 }
 
 .tool__io + .tool__io {
@@ -584,6 +610,49 @@
   background: transparent;
   resize: none;
   overflow-y: auto;
+  /* Track out, thumb kept. The track was the part that looked wrong — a solid
+     grey gutter drawn along the text column — and a transparent one still costs
+     the same layout and paint as an opaque one. The thumb is the smaller half of
+     the problem: without it, text past 220px simply stops, and the reader has
+     no way to know the rest of their own prompt is still there to send. */
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
+}
+
+.composer__input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.composer__input::-webkit-scrollbar-track,
+.composer__input::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.composer__input::-webkit-scrollbar-thumb {
+  background: var(--bd-3);
+  border-radius: var(--r-full);
+}
+
+.composer__input::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
+}
+
+/* The tool output pane scrolls too, and has the same problem. Here the thumb
+   stays: command output is often taller than the box, and the thumb is the only
+   sign that there is more of it below — the same argument the tabbar makes. The
+   track goes, because an empty one only ever cost paint. */
+.tool__io::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tool__io::-webkit-scrollbar-thumb {
+  background: var(--bd-3);
+  border-radius: var(--r-full);
+}
+
+.tool__io::-webkit-scrollbar-thumb:hover {
+  background: var(--bd-4);
 }
 
 .composer__input::placeholder {

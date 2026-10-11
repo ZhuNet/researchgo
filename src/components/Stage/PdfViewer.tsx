@@ -162,27 +162,32 @@ export function PdfViewer(props: { ws: Workspace }) {
        * arrives as a light-mode system scrollbar in a dark pane. light-dark()
        * follows the \`color-scheme\` the viewer sets on its own root when the
        * theme changes, so one rule covers both themes and keeps following them.
+       *
+       * Injected rather than stylesheet-scoped because pdf.js creates these
+       * containers itself and nothing outside its own root can select them.
+       *
+       * Thumb only, and 6px — the same rule the rest of the app settled on. The
+       * track is the part that reads as a foreign object against a dark pane,
+       * and a transparent one reserves the width and composites anyway.
        */
       #viewerContainer {
         scrollbar-width: thin;
         scrollbar-color: light-dark(rgba(9, 10, 20, 0.3), rgba(255, 255, 255, 0.26)) transparent;
       }
       #viewerContainer::-webkit-scrollbar {
-        width: 12px;
-        height: 12px;
+        width: 6px;
+        height: 6px;
       }
-      #viewerContainer::-webkit-scrollbar-track {
+      #viewerContainer::-webkit-scrollbar-track,
+      #viewerContainer::-webkit-scrollbar-corner {
         background: transparent;
       }
       #viewerContainer::-webkit-scrollbar-thumb {
         background: light-dark(rgba(9, 10, 20, 0.26), rgba(255, 255, 255, 0.22));
-        background-clip: content-box;
-        border: 3px solid transparent;
-        border-radius: 6px;
+        border-radius: var(--r-full, 999px);
       }
       #viewerContainer::-webkit-scrollbar-thumb:hover {
         background: light-dark(rgba(9, 10, 20, 0.42), rgba(255, 255, 255, 0.34));
-        background-clip: content-box;
       }
 
       /* The canvas behind the pages, matched to the app's own page colour. */

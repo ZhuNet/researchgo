@@ -97,28 +97,22 @@ kbd {
 }
 
 .scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 
-.scroll::-webkit-scrollbar-track {
+.scroll::-webkit-scrollbar-track,
+.scroll::-webkit-scrollbar-corner {
   background: transparent;
 }
 
 .scroll::-webkit-scrollbar-thumb {
-  background: var(--bd-2);
-  border: 3px solid transparent;
-  background-clip: content-box;
+  background: var(--bd-3);
   border-radius: var(--r-full);
 }
 
 .scroll::-webkit-scrollbar-thumb:hover {
   background: var(--bd-4);
-  background-clip: content-box;
-}
-
-.scroll::-webkit-scrollbar-corner {
-  background: transparent;
 }
 
 .btn {
