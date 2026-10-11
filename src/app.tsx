@@ -5,6 +5,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { ContextMenu } from './components/ContextMenu';
 import { Explorer } from './components/Explorer/Explorer';
 import { Rail } from './components/Explorer/Rail';
+import { Settings } from './components/Settings';
 import { Splitter } from './components/Splitter';
 import { Stage } from './components/Stage/Stage';
 import { Titlebar } from './components/Titlebar';
@@ -22,7 +23,9 @@ import {
   setExplorerW,
   setPaletteOpen,
   setRailView,
+  setSettingsOpen,
   setTheme,
+  settingsOpen,
   theme,
 } from './store/ui';
 
@@ -55,6 +58,9 @@ export default function App() {
       } else if (key === 'l' && e.shiftKey) {
         e.preventDefault();
         setTheme(theme() === 'dark' ? 'light' : 'dark');
+      } else if (key === ',' ) {
+        e.preventDefault();
+        setSettingsOpen(!settingsOpen());
       } else if (key === '1' || key === '2' || key === '3') {
         e.preventDefault();
         setRailView(key === '1' ? 'files' : key === '2' ? 'search' : 'changes');
@@ -101,6 +107,9 @@ export default function App() {
 
       <ContextMenu />
       <CommandPalette ws={ws} agent={agent} />
+      <Show when={settingsOpen()}>
+        <Settings />
+      </Show>
       <Toaster />
     </div>
   );

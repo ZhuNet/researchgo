@@ -12,6 +12,7 @@ import {
   setPaletteOpen,
   setPaletteQuery,
   setRailView,
+  setSettingsOpen,
   setTheme,
   setTreeCmd,
   theme,
@@ -53,7 +54,8 @@ export function CommandPalette(props: { ws: Workspace; agent: Agent }) {
       { id: 'c11', group: 'Tree', label: 'Collapse all', icon: 'chevronUpDown', run: () => setTreeCmd({ kind: 'collapse-all' }) },
       { id: 'c16', group: 'View', label: 'Show cache stats', icon: 'sliders', run: () => { const s2 = ws.stats(); toast('info', 'Tree cache', `${s2.dirs}/${s2.maxDirs} dirs · ${s2.entries.toLocaleString()}/${s2.maxEntries.toLocaleString()} entries`); } },
       { id: 'c14', group: 'Agent', label: 'Clear agent thread', icon: 'trash', run: () => props.agent.clear() },
-      { id: 'c15', group: 'Agent', label: 'Ask: why is the tree slow?', icon: 'sparkles', run: () => props.agent.send('Why does the tree slow down past 50k nodes?') },
+      { id: 'c15', group: 'Agent', label: 'Ask: why is the tree slow?', icon: 'sparkles', run: () => { const r = props.ws.root(); if (r) void props.agent.send('Why does the tree slow down past 50k nodes?', r); } },
+      { id: 'c17', group: 'View', label: 'Settings…', hint: '⌘,', icon: 'sliders', run: () => setSettingsOpen(true) },
     ];
   });
 

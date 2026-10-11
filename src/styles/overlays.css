@@ -196,6 +196,285 @@
   font-family: var(--font-mono);
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 5, 8, 0.55);
+  backdrop-filter: blur(3px);
+  animation: fade-in var(--t-med) var(--ease);
+}
+
+:root[data-theme='light'] .modal-backdrop {
+  background: rgba(20, 21, 26, 0.28);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  border-radius: var(--r-xl);
+  background: var(--bg-2);
+  border: 1px solid var(--bd-2);
+  box-shadow: var(--sh-4);
+  overflow: hidden;
+  animation: modal-in var(--t-slow) var(--ease-out);
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+.modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 46px;
+  padding: 0 var(--sp-4) 0 var(--sp-6);
+  flex: none;
+  border-bottom: 1px solid var(--bd-1);
+}
+
+.modal__head h2 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--tx-1);
+}
+
+.modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-6);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.field-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-5);
+}
+
+.field__label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--tx-2);
+}
+
+.field__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.field__row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.field__foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-5);
+}
+
+.field__hint {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--tx-4);
+}
+
+.field__hint code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: var(--r-xs);
+  background: var(--bg-4);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-radius: var(--r-md);
+  font-size: 11.5px;
+  color: var(--warn);
+  background: rgba(242, 169, 59, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(242, 169, 59, 0.22);
+}
+
+.banner--ok {
+  color: var(--ok);
+  background: rgba(76, 183, 130, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(76, 183, 130, 0.22);
+}
+
+.modal__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  padding: var(--sp-4) var(--sp-6);
+  flex: none;
+  border-top: 1px solid var(--bd-1);
+  background: var(--bg-1);
+}
+
+.modal__note {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--tx-4);
+}
+
+.modal__actions {
+  display: flex;
+  gap: var(--sp-3);
+  flex: none;
+}
+
+.modal--wide {
+  width: min(600px, 92vw);
+}
+
+/* A row of saved endpoints. The whole row is one configuration; the leading dot
+   is which one the agent is currently calling. */
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.model {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--bg-3);
+  box-shadow: inset 0 0 0 1px var(--bd-1);
+  transition: box-shadow var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.model:hover {
+  background: var(--bg-4);
+}
+
+.model--active {
+  box-shadow: inset 0 0 0 1px var(--ac-line);
+  background: var(--ac-soft);
+}
+
+.model__pick {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--r-full);
+  transition: background var(--t-fast) var(--ease);
+}
+
+.model__pick:hover:not(:disabled) {
+  background: var(--bd-2);
+}
+
+.model__pick:disabled {
+  cursor: default;
+}
+
+.model__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bd-4);
+  transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+.model__dot--on {
+  background: var(--ac-hi);
+  box-shadow: 0 0 0 3px var(--ac-soft);
+}
+
+.model__main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.model__name {
+  font-size: 12.5px;
+  color: var(--tx-1);
+}
+
+.model__meta {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--tx-4);
+}
+
+.icon-btn--danger:hover {
+  color: var(--err);
+  background: rgba(242, 88, 91, 0.14);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-9) var(--sp-6);
+  text-align: center;
+  color: var(--tx-4);
+}
+
+.empty__title {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--tx-2);
+}
+
+.empty__hint {
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 34ch;
+}
+
+/* Inside the form rather than under the dialog: the fields and the buttons that
+   commit them belong in one box, so a long form does not leave its own save
+   button stranded at the bottom of the window. */
+.modal__foot--inset {
+  margin: var(--sp-2) calc(var(--sp-6) * -1) calc(var(--sp-6) * -1);
+  border-radius: 0;
+}
+
 .toaster {
   position: fixed;
   right: var(--sp-6);

@@ -3,6 +3,7 @@ import { createSignal, For, Show } from 'solid-js';
 import { Icon } from '../Icon';
 import { toast } from '../../store/ui';
 import type { Agent } from '../../store/agent';
+import type { Workspace } from '../../store/workspace';
 
 const MODES = [
   { id: 'agent', label: 'Agent', hint: 'Edits files, runs commands' },
@@ -16,7 +17,7 @@ const SUGGESTIONS = [
   'Audit the JSONL frame enum against the renderer',
 ];
 
-export function Composer(props: { agent: Agent }) {
+export function Composer(props: { agent: Agent; ws: Workspace }) {
   const [text, setText] = createSignal('');
   const [mode, setMode] = createSignal<(typeof MODES)[number]['id']>('agent');
   let area: HTMLTextAreaElement | undefined;
@@ -30,7 +31,14 @@ export function Composer(props: { agent: Agent }) {
   const submit = () => {
     const value = text();
     if (!value.trim()) return;
-    props.agent.send(value);
+    // The agent's tools are sandboxed to a workspace, so a prompt sent without
+    // one has nowhere to read from. Saying so beats a turn that opens with a
+    // tool error the model has to reason around.
+    if (!props.ws.root()) {
+      toast('error', 'No folder open', 'Open a folder first — the agent reads and writes inside it');
+      return;
+    }
+    void props.agent.send(value, props.ws.root()!);
     setText('');
     queueMicrotask(grow);
   };

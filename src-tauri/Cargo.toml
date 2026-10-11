@@ -14,6 +14,14 @@ rust-version = "1.90"
 name = "researchgo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Tests live in the repo's top-level `tests/`, next to the renderer ones, so
+# there is one place to look for them. Cargo would otherwise only look in
+# `src-tauri/tests`, and the file would have to live far from the TypeScript
+# suite it complements.
+[[test]]
+name = "agent_loop"
+path = "../tests/agent_loop.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.7.1", features = [] }
 
@@ -26,6 +34,20 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 notify = "8"
 libc = "0.2"
+
+# The agent calls an OpenAI-compatible endpoint from the host and reads the
+# reply as a stream, because a long answer should be readable while it is still
+# arriving. `stream` is what makes `bytes_stream` exist; without it the reply is
+# one buffer at the end and the panel has nothing to show until the model is
+# already done.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls",
+  "http2",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process"] }
 
 # Windows keeps PATH in the registry, and reading it there is the only way a
 # toolchain installed after this process launched becomes visible to it. There is

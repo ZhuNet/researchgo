@@ -62,6 +62,7 @@ export const [railView, setRailViewRaw] = createSignal<'files' | 'search' | 'cha
 );
 export const [paletteOpen, setPaletteOpen] = createSignal(false);
 export const [paletteQuery, setPaletteQuery] = createSignal('');
+export const [settingsOpen, setSettingsOpen] = createSignal(false);
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuItem[] } | null>(
   null,
 );

@@ -83,6 +83,18 @@
   border-color: var(--bd-3);
 }
 
+/* No endpoint yet: the chip says so before the first prompt fails, and the
+   amber matches the composer banner rather than inventing a third state. */
+.modelbtn--unset {
+  color: var(--warn);
+  background: rgba(242, 169, 59, 0.08);
+  border-color: rgba(242, 169, 59, 0.24);
+}
+
+.modelbtn--unset:hover {
+  border-color: rgba(242, 169, 59, 0.4);
+}
+
 .modelbtn span {
   flex: 1;
   text-align: left;

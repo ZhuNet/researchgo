@@ -1,18 +1,12 @@
-import { createSignal, Show } from 'solid-js';
+import { createResource, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
-import { copyText, openMenu, toast } from '../../store/ui';
+import { copyText, openMenu, setSettingsOpen, toast } from '../../store/ui';
+import { agentApi } from '../../lib/agent';
 import type { Agent } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 import { AgentThread } from './AgentThread';
 import { Composer } from './Composer';
-
-const MODELS = [
-  'claude-sonnet-4.6',
-  'claude-opus-4.1',
-  'gpt-5.1-codex',
-  'qwen3-coder-30b',
-];
 
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -21,10 +15,19 @@ function compact(n: number): string {
 }
 
 export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
-  const [menuOpen, setMenuOpen] = createSignal(false);
+  const [config, { refetch }] = createResource(async () => {
+    try {
+      return await agentApi.getConfig();
+    } catch {
+      return { configs: [] };
+    }
+  });
   const usage = () => props.agent.usage();
   const total = () => usage().input + usage().output;
   const pct = () => Math.min(100, (total() / 200_000) * 100);
+
+  /** The entry the agent would call next, if any. */
+  const active = () => config()?.configs.find((c) => c.active);
 
   return (
     <aside class="agent">
@@ -40,14 +43,20 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
           <button
             class="icon-btn"
             title="New session"
-            onClick={() => toast('ok', 'Session started', 'sidecar spawned omp-sidecar')}
+            onClick={() => {
+              props.agent.clear();
+              toast('info', 'Session cleared', 'the next prompt starts a fresh transcript');
+            }}
           >
             <Icon name="plus" size={15} />
           </button>
           <button
             class="icon-btn"
             title="Session options"
-            onClick={(e) =>
+            onClick={(e) => {
+              // Re-read on the way in: a model may have been added or removed
+              // since the panel last looked.
+              refetch();
               openMenu(
                 e.clientX,
                 e.clientY,
@@ -55,10 +64,11 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
                   { label: 'Export transcript (jsonl)', run: () => toast('info', 'Export queued', 'researchgo.session.jsonl') },
                   { label: 'Copy session id', run: () => void copyText(props.agent.session().id, 'Session id copied') },
                   { separator: true, label: '' },
+                  { label: 'Settings…', run: () => setSettingsOpen(true) },
                   { label: 'Clear thread', danger: true, run: () => props.agent.clear() },
                 ],
-              )
-            }
+              );
+            }}
           >
             <Icon name="more" size={15} />
           </button>
@@ -66,30 +76,14 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
       </header>
 
       <div class="agent__meta">
-        <button
-          class="modelbtn"
-          onClick={(e) => {
-            setMenuOpen(!menuOpen());
-            if (!menuOpen()) return;
-            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-            openMenu(
-              rect.left,
-              rect.bottom + 6,
-              MODELS.map((m) => ({
-                label: m,
-                hint: m === props.agent.session().model ? '✓' : undefined,
-                run: () => {
-                  props.agent.session().model = m;
-                  toast('ok', 'Model switched', m);
-                },
-              })),
-            );
-          }}
-        >
+        {/* Not a menu. Switching models is a configuration change, and it lives
+            in Settings behind the overflow above — next to the thing it
+            changes, instead of duplicated as a shortcut here that would drift
+            from the list it mirrors. */}
+        <div class="modelbtn" classList={{ 'modelbtn--unset': !active() }}>
           <Icon name="cpu" size={12} />
-          <span class="truncate">{props.agent.session().model}</span>
-          <Icon name="chevronDown" size={12} />
-        </button>
+          <span class="truncate">{active()?.model ?? 'no model'}</span>
+        </div>
       </div>
 
       <div class="agent__usage">
@@ -110,7 +104,7 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
 
       <AgentThread agent={props.agent} ws={props.ws} />
 
-      <Composer agent={props.agent} />
+      <Composer agent={props.agent} ws={props.ws} />
     </aside>
   );
 }

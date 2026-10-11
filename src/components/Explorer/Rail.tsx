@@ -40,6 +40,9 @@ export function Rail() {
           <Icon name="sparkles" size={17} />
           <span class="rail__label">Agent</span>
         </button>
+        {/* Left alone for a global settings surface later; the agent's own
+            configuration lives behind the panel's overflow menu, where it is
+            next to the thing it configures. */}
         <button class="rail__btn" title="Settings">
           <span class="rail__indicator" />
           <Icon name="sliders" size={17} />
