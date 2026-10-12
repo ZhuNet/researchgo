@@ -119,12 +119,17 @@ describe('translate: 容错', () => {
     expect(message.length).toBeLessThanOrEqual('malformed jsonl: '.length + 120);
   });
 
-  it('未知事件类型被忽略（向前兼容）', () => {
-    expect(translate(JSON.stringify({ type: 'future.thing', payload: 1 }))).toEqual([]);
+  it('未知事件类型报错而不是被静默丢弃', () => {
+    // 静默丢弃曾让一次协议漂移（点号 → 下划线）无声地吞掉除 error/usage 外的
+    // 所有帧，每个 turn 都变成永不停止的转圈。漂移必须一出现就可见。
+    const ev = one(JSON.stringify({ type: 'future.thing', payload: 1 }));
+    expect(ev.kind).toBe('error');
+    expect(ev).toMatchObject({ message: expect.stringContaining('future.thing') });
   });
 
-  it('缺 type 的帧被忽略', () => {
-    expect(translate(JSON.stringify({ id: 'x' }))).toEqual([]);
+  it('缺 type 的帧报错', () => {
+    const ev = one(JSON.stringify({ id: 'x' }));
+    expect(ev.kind).toBe('error');
   });
 });
 

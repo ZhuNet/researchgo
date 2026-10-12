@@ -77,6 +77,7 @@ impl Session {
     // would leave a transcript stitched from two of them.
     let cfg = secret(app);
     self.model = cfg.model.clone();
+    log::info!("[agent] turn start: model={} root={}", cfg.model, self.root.display());
 
     if !cfg.is_ready() {
       emit(
@@ -125,6 +126,7 @@ impl Session {
       // One model call. This is the only await that can fail for reasons
       // outside the model's control, so it is the only place a turn reports an
       // error rather than a tool error.
+      log::info!("[agent] step {step}: calling model ({} messages)", self.messages.len());
       let reply = match call_model(&cfg, &self.messages).await {
         Ok(reply) => reply,
         Err(err) => {
@@ -132,6 +134,11 @@ impl Session {
           break TurnReason::Error;
         }
       };
+      log::info!(
+        "[agent] step {step}: reply text_len={} tool_calls={}",
+        reply.text.len(),
+        reply.tool_calls.len()
+      );
 
       if cancel.load(Ordering::Relaxed) {
         break TurnReason::Aborted;
@@ -194,6 +201,7 @@ impl Session {
 }
 
 fn finish(app: &AppHandle, reason: TurnReason) {
+  log::info!("[agent] turn end: {reason:?}");
   emit(app, Frame::TurnEnd { reason });
 }
 
@@ -226,6 +234,7 @@ async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCal
 
   let started = Instant::now();
   let outcome = tools::run(root, &call.name, &parse_args(&call.arguments), &call.id).await;
+  log::info!("[agent] tool `{}` finished in {:?}", call.name, started.elapsed());
 
   let (ok, content, summary, patch) = match outcome {
     Ok(out) => (true, out.content, out.summary, out.patch),
@@ -325,6 +334,7 @@ pub async fn call_model(
     .map_err(|e| format!("cannot reach {}: {e}", cfg.url))?;
 
   let status = response.status();
+  log::info!("[agent] POST {endpoint} -> {status}");
   if !status.is_success() {
     // The body carries the provider's own complaint, which is the only thing
     // that distinguishes a bad key from a bad model from a wrong URL.
@@ -368,27 +378,57 @@ pub async fn call_model(
   if content.is_empty() && tool_calls.is_empty() {
     return Err("the model returned an empty reply".into());
   }
-
-  let mut assistant_content = Vec::new();
-  if !content.is_empty() {
-    assistant_content.push(json!({ "type": "text", "text": content }));
-  }
-  for call in &tool_calls {
-    assistant_content.push(json!({
-      "type": "tool_calls",
-      "id": call.id,
-      "function": { "name": call.name, "arguments": call.arguments },
-    }));
-  }
+  log::info!(
+    "[agent] stream ended: content_len={} tool_calls={}",
+    content.len(),
+    tool_calls.len()
+  );
 
   Ok(Reply {
-    message: json!({ "role": "assistant", "content": assistant_content }),
+    message: assistant_message(&content, &tool_calls),
     text: content,
     tool_calls,
     input_tokens: usage.0,
     output_tokens: usage.1,
     cache_read_tokens: usage.2,
   })
+}
+
+/// The assistant message exactly as it goes back into the transcript.
+///
+/// Tool calls live in the top-level `tool_calls` field, never inside
+/// `content`: a `tool_calls` entry in the content array is a content part no
+/// OpenAI-compatible endpoint accepts, and the reply is a 400 naming the
+/// supported part types — the turn dies on the request after the first tool
+/// call. `content` is null rather than an empty string when the model went
+/// straight to a tool call, which is the shape the API itself sends back.
+fn assistant_message(text: &str, calls: &[ToolCall]) -> Value {
+  let mut message = json!({ "role": "assistant", "content": text });
+  if text.is_empty() {
+    message["content"] = Value::Null;
+  }
+  if calls.is_empty() {
+    return message;
+  }
+  message["tool_calls"] = Value::Array(
+    calls
+      .iter()
+      .map(|call| {
+        // Arguments are a JSON-encoded string on the wire — how they streamed
+        // in is how they must stream back out.
+        let arguments = match &call.arguments {
+          Value::String(raw) => raw.clone(),
+          other => other.to_string(),
+        };
+        json!({
+          "id": call.id,
+          "type": "function",
+          "function": { "name": call.name, "arguments": arguments },
+        })
+      })
+      .collect(),
+  );
+  message
 }
 
 /// Folds one SSE delta into the accumulating reply.
@@ -620,5 +660,49 @@ mod tests {
     absorb(&json!({ "something": "else" }), &mut content, &mut calls, &mut usage);
     assert!(content.is_empty());
     assert!(calls.is_empty());
+  }
+
+  #[test]
+  fn tool_calls_live_in_their_own_field_not_in_content() {
+    // The regression this guards: an assistant message with a `tool_calls`
+    // part inside `content` is rejected by the endpoint on the next request
+    // ("Invalid value: tool_calls"), and the turn dies right after the first
+    // tool call.
+    let calls = vec![ToolCall {
+      id: "call_1".into(),
+      name: "read".into(),
+      arguments: json!("{\"path\":\"a\"}"),
+    }];
+    let message = assistant_message("", &calls);
+
+    assert_eq!(message["content"], Value::Null);
+    let sent = message["tool_calls"].as_array().expect("a tool_calls field");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["id"], "call_1");
+    assert_eq!(sent[0]["type"], "function");
+    assert_eq!(sent[0]["function"]["name"], "read");
+    assert_eq!(
+      sent[0]["function"]["arguments"].as_str().expect("arguments are text"),
+      "{\"path\":\"a\"}"
+    );
+  }
+
+  #[test]
+  fn a_prose_reply_carries_text_and_no_tool_calls_field() {
+    let message = assistant_message("hello", &[]);
+    assert_eq!(message["content"], "hello");
+    assert!(message.get("tool_calls").is_none());
+  }
+
+  #[test]
+  fn text_and_tool_calls_share_one_message_without_mixing() {
+    let calls = vec![ToolCall {
+      id: "c".into(),
+      name: "bash".into(),
+      arguments: Value::String("{}".into()),
+    }];
+    let message = assistant_message("Running it.", &calls);
+    assert_eq!(message["content"], "Running it.");
+    assert_eq!(message["tool_calls"].as_array().expect("tool_calls").len(), 1);
   }
 }

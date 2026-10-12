@@ -78,8 +78,16 @@ export function translate(line: string): UiEvent[] {
       return [{ kind: 'turn.end', reason: raw.reason }];
     case 'error':
       return [{ kind: 'error', message: raw.message }];
-    default:
-      return [];
+    default: {
+      // A frame this switch does not know is protocol drift, and drift that
+      // is dropped silently is drift that ships: the tag vocabulary on the
+      // Rust side once drifted from dot-case to snake_case and every frame
+      // but `error` and `usage` vanished here without a trace, leaving turns
+      // that spun forever. Surfaced, the next drift is a visible error the
+      // moment it happens.
+      const unknown = (raw as { type: string }).type;
+      return [{ kind: 'error', message: `unrecognised frame type: ${unknown}` }];
+    }
   }
 }
 

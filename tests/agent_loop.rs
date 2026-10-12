@@ -126,10 +126,109 @@ async fn a_streamed_reply_reassembles_into_one_message() {
   // The message going back into the transcript must be the same assistant turn
   // the panels rendered, or the next request contradicts what the user saw.
   assert_eq!(reply.message["role"], "assistant");
+  // And it must be the shape the endpoint accepts on the way back in: text in
+  // `content`, tool calls in their own field. A `tool_calls` part inside
+  // `content` is a 400 on the next request — the turn dies right after the
+  // first tool call.
+  assert_eq!(reply.message["content"], "Reading.");
+  let sent = reply.message["tool_calls"]
+    .as_array()
+    .expect("tool calls in their own field");
+  assert_eq!(sent[0]["id"], "call_1");
+  assert_eq!(sent[0]["type"], "function");
+  assert_eq!(sent[0]["function"]["name"], "read");
+  assert_eq!(
+    sent[0]["function"]["arguments"].as_str().expect("arguments are text"),
+    "{\"path\":\"package.json\"}"
+  );
 
-  let second = agent_loop::call_model(&cfg, &messages)
+  // The second request carries the transcript the loop would really send:
+  // the assistant message above plus the tool's result. This is the request
+  // that failed with 400 before the message shape was fixed.
+  let mut transcript = messages.clone();
+  transcript.push(reply.message.clone());
+  transcript.push(json!({
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "1\t{\n2\t  \"name\": \"researchgo\"\n3\t}"
+  }));
+
+  let second = agent_loop::call_model(&cfg, &transcript)
     .await
     .expect("second turn");
   assert!(second.tool_calls.is_empty(), "the second turn is prose only");
   assert_eq!(second.text, "A SolidJS + Tauri app.");
+}
+
+/// Diagnostic against the real configured endpoint. Not part of the suite:
+/// run explicitly with `cargo test --test agent_loop -- --ignored diag`.
+///
+/// Reproduces the exact code path the app uses — same client, same timeout,
+/// same SSE parser — so a hang here is a hang in the app, and a return here
+/// means the app's turn loop is where to look next.
+#[tokio::test]
+#[ignore = "diagnostic: hits the real endpoint with the stored key"]
+async fn diag_real_endpoint() {
+  let path = std::env::var("APPDATA")
+    .map(|d| std::path::PathBuf::from(d).join("dev.researchgo.app").join("llm.json"))
+    .expect("APPDATA");
+  let raw = std::fs::read_to_string(&path).expect("llm.json");
+  let file: Value = serde_json::from_str(&raw).expect("config parses");
+  let active = file["active"].as_str().expect("an active entry");
+  let entry = file["configs"]
+    .as_array()
+    .expect("configs")
+    .iter()
+    .find(|c| c["name"].as_str() == Some(active))
+    .expect("active entry present");
+  let cfg: LlmConfig = serde_json::from_value(entry.clone()).expect("entry shape");
+
+  eprintln!("[diag] endpoint {} model {}", cfg.url, cfg.model);
+
+  let messages = vec![json!({
+    "role": "user",
+    "content": "Read the file package.json in the workspace and tell me the project name.",
+  })];
+
+  let started = std::time::Instant::now();
+  let first = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &messages)).await;
+  eprintln!("[diag] first call settled after {:?}", started.elapsed());
+  let reply = match first {
+    Err(_) => panic!("[diag] first call still running after 90s — reproduced the hang"),
+    Ok(Err(err)) => panic!("[diag] first call errored: {err}"),
+    Ok(Ok(reply)) => reply,
+  };
+
+  eprintln!("[diag] text: {:?}", reply.text);
+  eprintln!("[diag] tool_calls: {}", reply.tool_calls.len());
+  eprintln!("[diag] message: {}", serde_json::to_string(&reply.message).unwrap());
+  eprintln!("[diag] usage: {} in / {} out", reply.input_tokens, reply.output_tokens);
+
+  if reply.tool_calls.is_empty() {
+    eprintln!("[diag] first reply is prose only — the turn would end here");
+    return;
+  }
+
+  // The request shape that used to 400, now with the fixed assistant message.
+  let mut transcript = messages.clone();
+  transcript.push(reply.message.clone());
+  for call in &reply.tool_calls {
+    transcript.push(json!({
+      "role": "tool",
+      "tool_call_id": call.id,
+      "content": "1\t{\n2\t  \"name\": \"researchgo\"\n3\t}",
+    }));
+  }
+
+  let started = std::time::Instant::now();
+  let second = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &transcript)).await;
+  eprintln!("[diag] second call settled after {:?}", started.elapsed());
+  match second {
+    Err(_) => panic!("[diag] second call still running after 90s — the hang is in the tool-result round trip"),
+    Ok(Err(err)) => panic!("[diag] second call errored: {err}"),
+    Ok(Ok(reply)) => {
+      eprintln!("[diag] second text: {:?}", reply.text);
+      eprintln!("[diag] second tool_calls: {}", reply.tool_calls.len());
+    }
+  }
 }

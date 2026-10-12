@@ -1,8 +1,8 @@
-import { createResource, Show } from 'solid-js';
+import { createEffect, createResource, on, onCleanup, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
-import { copyText, openMenu, setSettingsOpen, toast } from '../../store/ui';
-import { agentApi } from '../../lib/agent';
+import { copyText, openMenu, setSettingsOpen, settingsOpen, toast } from '../../store/ui';
+import { agentApi, onLlmConfigChange } from '../../lib/agent';
 import type { Agent } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 import { AgentThread } from './AgentThread';
@@ -22,6 +22,22 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
       return { configs: [] };
     }
   });
+
+  // The config can change in two ways while this panel sits mounted: a save
+  // from Settings, or a hand edit of `llm.json` on disk. Closing the dialog
+  // covers the first even when the file watcher fails; the watcher covers the
+  // second even when the dialog was never opened.
+  createEffect(
+    on(
+      settingsOpen,
+      (open, wasOpen) => {
+        if (wasOpen && !open) refetch();
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(onLlmConfigChange(() => refetch()));
+
   const usage = () => props.agent.usage();
   const total = () => usage().input + usage().output;
   const pct = () => Math.min(100, (total() / 200_000) * 100);

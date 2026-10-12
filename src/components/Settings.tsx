@@ -1,8 +1,8 @@
-import { createResource, createSignal, For, Show } from 'solid-js';
+import { createResource, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { Icon } from './Icon';
 import { setSettingsOpen, toast } from '../store/ui';
-import { agentApi, type ConfigView, type LlmView } from '../lib/agent';
+import { agentApi, onLlmConfigChange, type ConfigView, type LlmView } from '../lib/agent';
 
 /**
  * The stored LLM endpoints, and the only place a key is ever typed.
@@ -18,11 +18,17 @@ import { agentApi, type ConfigView, type LlmView } from '../lib/agent';
  * makes it safe to open this dialog, read it, and close it.
  */
 export function Settings() {
-  const [store, { mutate }] = createResource(fetchConfigs);
+  const [store, { mutate, refetch }] = createResource(fetchConfigs);
   /** The row being edited, or null when the list is showing. */
   const [editing, setEditing] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+
+  // `llm.json` can be edited by hand while this dialog is open; the list
+  // should show that, not the snapshot from when it opened. A save from here
+  // also rewrites the file, which lands as the same event — a refetch of
+  // what `mutate` already applied, and nothing more.
+  onCleanup(onLlmConfigChange(() => refetch()));
 
   const close = () => {
     setSettingsOpen(false);

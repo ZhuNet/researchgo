@@ -21,6 +21,7 @@ use agent_loop::AgentState;
 /// Registers the state the commands share. Called once from `lib.rs`.
 pub fn init(app: &mut tauri::App) {
   app.manage(AgentState::new());
+  config::init(app.handle());
 }
 
 /// How long a new prompt waits for the previous turn to notice it was cancelled.

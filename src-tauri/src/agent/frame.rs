@@ -29,56 +29,75 @@ pub enum TurnReason {
   Error,
 }
 
+/// The tag vocabulary is dot-case (`session.start`, `tool.end`) because that
+/// is what `bridge.ts` parses — the renderer was written against this wire
+/// format, not the other way around. A broad `rename_all = "snake_case"`
+/// here once turned `TurnEnd` into `turn_end`, which the renderer silently
+/// dropped, and every turn looked like a spinner that never stopped while
+/// the backend had finished long before. The per-variant renames are
+/// deliberate: a tag is a contract, and contracts are spelled out, not
+/// derived by a case convention that happens to be wrong for nine of them.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum Frame {
+  #[serde(rename = "session.start")]
   SessionStart {
     session_id: String,
     model: String,
     cwd: String,
     tools: Vec<String>,
   },
+  #[serde(rename = "assistant.message")]
   AssistantMessage {
     id: String,
     text: String,
   },
+  #[serde(rename = "assistant.delta")]
   AssistantDelta {
     id: String,
     text: String,
   },
+  #[serde(rename = "assistant.done")]
   AssistantDone {
     id: String,
   },
+  #[serde(rename = "tool.start")]
   ToolStart {
     id: String,
     call_id: String,
     name: String,
     input: serde_json::Value,
   },
+  #[serde(rename = "tool.output")]
   ToolOutput {
     id: String,
     call_id: String,
     chunk: String,
   },
+  #[serde(rename = "tool.end")]
   ToolEnd {
     id: String,
     call_id: String,
     ok: bool,
     summary: String,
   },
+  #[serde(rename = "file.patch")]
   FilePatch {
     path: String,
     op: PatchOp,
     bytes: usize,
   },
+  #[serde(rename = "usage")]
   Usage {
     input: u64,
     output: u64,
     cache_read: u64,
   },
+  #[serde(rename = "turn.end")]
   TurnEnd {
     reason: TurnReason,
   },
+  #[serde(rename = "error")]
   Error {
     message: String,
   },
@@ -99,3 +118,97 @@ impl Frame {
 
 /// The event name the frontend listens on.
 pub const STREAM: &str = "agent:frame";
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// The wire tags the renderer parses. `bridge.ts` switches on these exact
+  /// strings, and a frame whose tag it does not recognise is dropped on the
+  /// floor — so a tag renamed by a broad `rename_all` here is a frame the
+  /// whole renderer never sees. This is the regression that made every turn
+  /// look like an endless spinner: `snake_case` turned `TurnEnd` into
+  /// `turn_end`, the renderer parsed only `turn.end`, and the panel stayed
+  /// "working" forever while the backend had finished long before.
+  #[test]
+  fn frame_tags_are_the_dot_case_the_renderer_parses() {
+    let cases: Vec<(Frame, &str)> = vec![
+      (
+        Frame::SessionStart {
+          session_id: "s".into(),
+          model: "m".into(),
+          cwd: "/".into(),
+          tools: vec![],
+        },
+        "session.start",
+      ),
+      (
+        Frame::AssistantMessage {
+          id: "m".into(),
+          text: "t".into(),
+        },
+        "assistant.message",
+      ),
+      (
+        Frame::AssistantDelta {
+          id: "m".into(),
+          text: "t".into(),
+        },
+        "assistant.delta",
+      ),
+      (Frame::AssistantDone { id: "m".into() }, "assistant.done"),
+      (
+        Frame::ToolStart {
+          id: "t".into(),
+          call_id: "c".into(),
+          name: "read".into(),
+          input: serde_json::json!({}),
+        },
+        "tool.start",
+      ),
+      (
+        Frame::ToolOutput {
+          id: "t".into(),
+          call_id: "c".into(),
+          chunk: "x".into(),
+        },
+        "tool.output",
+      ),
+      (
+        Frame::ToolEnd {
+          id: "t".into(),
+          call_id: "c".into(),
+          ok: true,
+          summary: "s".into(),
+        },
+        "tool.end",
+      ),
+      (
+        Frame::FilePatch {
+          path: "p".into(),
+          op: PatchOp::Create,
+          bytes: 1,
+        },
+        "file.patch",
+      ),
+      (
+        Frame::Usage {
+          input: 1,
+          output: 1,
+          cache_read: 1,
+        },
+        "usage",
+      ),
+      (Frame::TurnEnd { reason: TurnReason::Stop }, "turn.end"),
+      (Frame::Error { message: "e".into() }, "error"),
+    ];
+
+    for (frame, want) in cases {
+      let json = serde_json::to_value(&frame).unwrap();
+      assert_eq!(
+        json["type"], want,
+        "frame {json} carries a tag the renderer will not parse"
+      );
+    }
+  }
+}

@@ -42,6 +42,9 @@ export interface AgentInfo {
 /** The event the host emits every JSONL frame on. */
 const STREAM = 'agent:frame';
 
+/** The event the host emits when the on-disk config file changes. */
+const CONFIG_CHANGE = 'llm:change';
+
 interface Tauri {
   core: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
   event: {
@@ -119,6 +122,31 @@ export function onAgentEvent(handler: (event: UiEvent) => void): () => void {
       if (cancelled) un();
       else dispose = un;
     });
+
+  return () => {
+    cancelled = true;
+    dispose?.();
+  };
+}
+
+/**
+ * Subscribes to config-file changes.
+ *
+ * `llm.json` is the real configuration — Settings is only one of its editors,
+ * and a hand edit while the app runs is as much a change as a save. The host
+ * watches the file and says so here; the caller re-reads.
+ */
+export function onLlmConfigChange(handler: () => void): () => void {
+  const bridge = tauri();
+  if (!bridge) return () => {};
+
+  let dispose: (() => void) | undefined;
+  let cancelled = false;
+
+  void bridge.event.listen(CONFIG_CHANGE, () => handler()).then((un) => {
+    if (cancelled) un();
+    else dispose = un;
+  });
 
   return () => {
     cancelled = true;

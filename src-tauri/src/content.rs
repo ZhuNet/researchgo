@@ -770,7 +770,11 @@ mod tests {
     let s = Scratch::new("failing-build");
     s.write(
       ".rg/build.json",
-      br#"{"command":"sh","args":["-c","echo boom >&2; exit 3"]}"#,
+      &shell_plan(
+        "echo boom >&2; exit 3",
+        "[Console]::Error.WriteLine('boom'); exit 3",
+        None,
+      ),
     );
     let out = run_build(s.path().to_str().unwrap()).unwrap();
     assert!(!out.ok);
@@ -786,7 +790,12 @@ mod tests {
     let s = Scratch::new("good-build");
     s.write(
       ".rg/build.json",
-      br#"{"command":"sh","args":["-c","mkdir -p out; printf '%s' '%PDF-1.4 hi' > out/main.pdf"],"artifact":"/out/main.pdf"}"#,
+      &shell_plan(
+        "mkdir -p out; printf '%s' '%PDF-1.4 hi' > out/main.pdf",
+        "New-Item -ItemType Directory -Force out | Out-Null; \
+         [IO.File]::WriteAllText('out/main.pdf', '%PDF-1.4 hi')",
+        Some("/out/main.pdf"),
+      ),
     );
     let out = run_build(s.path().to_str().unwrap()).unwrap();
     assert!(out.ok, "output: {}", out.output);
@@ -805,7 +814,12 @@ mod tests {
     let s = Scratch::new("outdir");
     s.write(
       ".rg/build.json",
-      br#"{"command":"sh","args":["-c","test -d .rg/build && printf ok > .rg/build/probe && printf '%s' '%PDF-1.4' > .rg/build/main.pdf"],"artifact":"/.rg/build/main.pdf"}"#,
+      &shell_plan(
+        "test -d .rg/build && printf ok > .rg/build/probe && printf '%s' '%PDF-1.4' > .rg/build/main.pdf",
+        "if (Test-Path .rg/build) { Set-Content .rg/build/probe ok }; \
+         [IO.File]::WriteAllText('.rg/build/main.pdf', '%PDF-1.4')",
+        Some("/.rg/build/main.pdf"),
+      ),
     );
     let out = run_build(s.path().to_str().unwrap()).unwrap();
     assert!(out.ok, "output: {}", out.output);
@@ -814,6 +828,27 @@ mod tests {
       "the directory did not exist when the command started"
     );
     assert_eq!(out.artifact.map(|a| a.path), Some("/.rg/build/main.pdf".into()));
+  }
+
+  /// A `.rg/build.json` whose command runs in whichever shell this platform
+  /// actually has.
+  ///
+  /// The behaviour under test — a non-zero exit with stderr, a produced file,
+  /// a directory that existed before the command ran — is the same on every
+  /// platform; the shell that fakes it is not. `sh` on Unix, PowerShell on
+  /// Windows: a test that needs a POSIX shell to be installed is a test that
+  /// fails on the machine it was written on.
+  fn shell_plan(unix: &str, windows: &str, artifact: Option<&str>) -> Vec<u8> {
+    let (command, args): (&str, Vec<&str>) = if cfg!(windows) {
+      ("powershell", vec!["-NoProfile", "-Command", windows])
+    } else {
+      ("sh", vec!["-c", unix])
+    };
+    let mut plan = serde_json::json!({ "command": command, "args": args });
+    if let Some(artifact) = artifact {
+      plan["artifact"] = serde_json::json!(artifact);
+    }
+    serde_json::to_vec(&plan).unwrap()
   }
 
   #[test]

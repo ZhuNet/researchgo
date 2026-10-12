@@ -16,8 +16,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use notify::{Event, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// One endpoint plus one model served by it.
 ///
@@ -123,6 +124,65 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     .map_err(|e| format!("no config directory available: {e}"))?;
   fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
   Ok(dir.join("llm.json"))
+}
+
+/// The event the host emits when `llm.json` changes on disk.
+///
+/// Settings is one writer of that file; a text editor is the other, and the
+/// config is deliberately a plain file so that editing it by hand is possible.
+/// The renderer listens for this and re-reads, so a hand edit shows up without
+/// a restart.
+pub const CONFIG_CHANGE: &str = "llm:change";
+
+/// Owns the config-file watcher for the life of the app.
+///
+/// A `notify` watcher stops watching when dropped, so it has to live
+/// somewhere that outlives `init` — managed state is that somewhere, and it
+/// is exactly as long-lived as the app.
+struct ConfigWatch(Box<notify::RecommendedWatcher>);
+
+/// Watches the directory that holds `llm.json`.
+///
+/// The directory rather than the file: every save replaces the file by an
+/// atomic rename, and a watch on the file itself goes stale at the moment the
+/// file it named ceases to exist. The directory sees the rename as an event
+/// naming `llm.json`, which is the thing to react to.
+pub fn init(app: &AppHandle) {
+  let Ok(path) = config_path(app) else {
+    return;
+  };
+  let Some(dir) = path.parent().map(Path::to_path_buf) else {
+    return;
+  };
+  let handle = app.clone();
+
+  let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+    match res {
+      Ok(event) => {
+        // The atomic save renames `llm.json.tmp` over `llm.json`, so the
+        // event may name either path — or both. Either way it ends with an
+        // `llm.json` that differs from what the renderer last read.
+        if event
+          .paths
+          .iter()
+          .any(|p| p.file_name().is_some_and(|name| name == "llm.json"))
+        {
+          let _ = handle.emit(CONFIG_CHANGE, ());
+        }
+      }
+      Err(err) => log::warn!("config watcher error: {err}"),
+    }
+  });
+
+  match watcher {
+    Ok(mut watcher) => match watcher.watch(&dir, RecursiveMode::NonRecursive) {
+      Ok(()) => {
+        app.manage(ConfigWatch(Box::new(watcher)));
+      }
+      Err(err) => log::warn!("cannot watch {}: {err}", dir.display()),
+    },
+    Err(err) => log::warn!("cannot start a config watcher: {err}"),
+  }
 }
 
 fn read_from(path: &Path) -> ConfigFile {
