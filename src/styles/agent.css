@@ -235,6 +235,16 @@
   gap: var(--sp-5);
 }
 
+/* Rows of a transcript, not flex members to be squeezed. A tool card carries
+   `overflow: hidden`, which makes its automatic minimum size zero: once the
+   column is full the cards are shrunk to their own borders — horizontal
+   lines — instead of the pane growing a scrollbar, and opening one card
+   visibly crushes its neighbours. Every row keeps its natural height; the
+   pane scrolls. */
+.thread > * {
+  flex: none;
+}
+
 .thread__intro {
   padding-bottom: var(--sp-2);
 }

@@ -16,6 +16,44 @@ use serde_json::{json, Value};
 
 use researchgo_lib::agent::agent_loop;
 
+#[tokio::test]
+async fn workspace_tools_continue_after_a_nested_glob() {
+  let root = std::env::temp_dir().join(format!(
+    "researchgo-agent-tools-{}-{}",
+    std::process::id(),
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+  ));
+  std::fs::create_dir_all(&root).unwrap();
+  // Clean up only this test's fixture, including if an assertion fails.
+  struct Fixture(std::path::PathBuf);
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+  let _fixture = Fixture(root.clone());
+  let nested = root.join("long-directory/".repeat(20));
+  std::fs::create_dir_all(&nested).unwrap();
+  std::fs::write(nested.join("notes.txt"), "unrelated file").unwrap();
+  std::fs::write(root.join("package.json"), "{\"name\":\"fixture-project\"}").unwrap();
+
+  let started = std::time::Instant::now();
+  let found = researchgo_lib::agent::tools::run(
+    &root, "glob", &json!({ "pattern": "**/*.json" }), "glob-1"
+  ).await.expect("glob finishes even with nested nonmatching paths");
+  assert_eq!(found.content, "package.json");
+  assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+  let read = researchgo_lib::agent::tools::run(
+    &root, "read", &json!({ "path": found.content }), "read-1"
+  ).await.expect("next tool reads the discovered file");
+  assert!(read.content.contains("fixture-project"));
+  let searched = researchgo_lib::agent::tools::run(
+    &root, "grep", &json!({ "pattern": "fixture-project" }), "grep-1"
+  ).await.expect("analysis continues to search");
+  assert!(searched.content.contains("package.json:1:"));
+}
+
 /// Serves exactly two turns: one that asks for a tool, one that answers.
 ///
 /// A listener on a port the OS picked, served from a thread in this process.

@@ -59,6 +59,12 @@ export function createAgent() {
 
   let startedAt = 0;
   let tick: number | undefined;
+  let turnSerial = 0;
+  let activeTurn = 0;
+  const textIds = new Map<string, string>();
+  const toolIds = new Map<string, string>();
+
+  const frameKey = (id: string) => `${activeTurn}:${id}`;
 
   function apply(ev: UiEvent) {
     switch (ev.kind) {
@@ -66,13 +72,24 @@ export function createAgent() {
         setSession({ id: ev.sessionId, model: ev.model, cwd: ev.cwd, tools: ev.tools });
         break;
       case 'text.start':
-        setItems((prev) => [...prev, { kind: 'assistant', id: ev.id, text: '', streaming: true }]);
+        {
+          const key = frameKey(ev.id);
+          const id = uid('a');
+          textIds.set(key, id);
+          setItems((prev) => [...prev, { kind: 'assistant', id, text: '', streaming: true }]);
+        }
         break;
       case 'text.delta':
         setItems((prev) => {
-          const at = prev.findIndex((it) => it.kind === 'assistant' && it.id === ev.id);
+          const key = frameKey(ev.id);
+          let id = textIds.get(key);
+          if (!id) {
+            id = uid('a');
+            textIds.set(key, id);
+          }
+          const at = prev.findIndex((it) => it.kind === 'assistant' && it.id === id);
           if (at < 0) {
-            return [...prev, { kind: 'assistant', id: ev.id, text: ev.text, streaming: true }];
+            return [...prev, { kind: 'assistant', id, text: ev.text, streaming: true }];
           }
           return prev.map((it, i) =>
             i === at && it.kind === 'assistant' ? { ...it, text: it.text + ev.text } : it,
@@ -80,41 +97,60 @@ export function createAgent() {
         });
         break;
       case 'text.end':
-        setItems((prev) =>
-          prev.map((it) =>
-            it.kind === 'assistant' && it.id === ev.id ? { ...it, streaming: false } : it,
-          ),
-        );
+        {
+          const id = textIds.get(frameKey(ev.id));
+          if (id) {
+            setItems((prev) =>
+              prev.map((it) => it.kind === 'assistant' && it.id === id ? { ...it, streaming: false } : it),
+            );
+          }
+        }
         break;
       case 'tool.start':
-        setItems((prev) => [
-          ...prev,
-          {
-            kind: 'tool',
-            id: ev.id,
-            callId: ev.callId,
-            name: ev.name,
-            input: formatInput(ev.input),
-            output: '',
-            status: 'running',
-            summary: '',
-            ms: 0,
-          },
-        ]);
+        setItems((prev) => {
+          // Tool call ids can be reused by a later turn. Give each card a
+          // unique renderer id, while retaining a per-turn lookup for frames.
+          const key = frameKey(ev.callId);
+          const id = uid('t');
+          toolIds.set(key, id);
+          return [
+            ...prev,
+            {
+              kind: 'tool',
+              id,
+              callId: ev.callId,
+              name: ev.name,
+              input: formatInput(ev.input),
+              output: '',
+              status: 'running',
+              summary: '',
+              ms: 0,
+            },
+          ];
+        });
         break;
       case 'tool.output':
-        setItems((prev) =>
+        {
+          const id = toolIds.get(frameKey(ev.callId));
+          if (!id) break;
+          setItems((prev) =>
           prev.map((it) =>
-            it.kind === 'tool' && it.callId === ev.callId
+            it.kind === 'tool' && it.id === id
               ? { ...it, output: it.output + ev.chunk }
               : it,
           ),
-        );
+          );
+        }
         break;
       case 'tool.end':
-        setItems((prev) =>
+        {
+          const key = frameKey(ev.callId);
+          const id = toolIds.get(key);
+          if (!id) break;
+          toolIds.delete(key);
+          setItems((prev) =>
           prev.map((it) =>
-            it.kind === 'tool' && it.callId === ev.callId
+            it.kind === 'tool' && it.id === id
               ? {
                   ...it,
                   status: ev.ok ? 'ok' : 'error',
@@ -123,7 +159,8 @@ export function createAgent() {
                 }
               : it,
           ),
-        );
+          );
+        }
         break;
       case 'patch':
         setItems((prev) => [
@@ -162,6 +199,7 @@ export function createAgent() {
     const body = text.trim();
     if (!body || busy()) return;
     setItems((prev) => [...prev, { kind: 'user', id: uid('u'), text: body }]);
+    activeTurn = ++turnSerial;
     setBusy(true);
     startedAt = performance.now();
     try {
@@ -211,6 +249,8 @@ export function createAgent() {
   async function clear() {
     await agentApi.clear().catch(() => undefined);
     stopTimer();
+    textIds.clear();
+    toolIds.clear();
     setItems([]);
     setUsage({ input: 0, output: 0, cacheRead: 0 });
     setBusy(false);

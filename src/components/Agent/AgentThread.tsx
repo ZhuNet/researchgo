@@ -74,7 +74,11 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
 }
 
 function keyOf(item: Item): string {
-  return `${item.kind}:${item.id}`;
+  // A single assistant message can contain several tool calls, so its
+  // message id is deliberately not unique among tool cards.  Call ids are
+  // the stable identity used by all tool frames and must also own the local
+  // expanded state.
+  return item.kind === 'tool' ? `tool:${item.id}` : `${item.kind}:${item.id}`;
 }
 
 function ThinkingRow() {
