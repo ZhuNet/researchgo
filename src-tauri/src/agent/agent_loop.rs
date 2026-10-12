@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
-use super::config::secret;
+use super::config::{secret, ResolvedModel};
 use super::frame::{Frame, PatchOp, TurnReason, STREAM};
 use super::tools;
 
@@ -83,7 +83,7 @@ impl Session {
       emit(
         app,
         Frame::Error {
-          message: "No LLM endpoint configured. Open Settings and fill in the URL, API key and model.".into(),
+          message: "No model configured. Add an endpoint with a model in Settings.".into(),
         },
       );
       finish(app, TurnReason::Error);
@@ -306,7 +306,7 @@ pub struct Reply {
 /// complete tool-call arguments, and a tool call that has been truncated
 /// halfway is not an argument.
 pub async fn call_model(
-  cfg: &super::config::LlmConfig,
+  cfg: &ResolvedModel,
   messages: &[Value],
 ) -> Result<Reply, String> {
   let client = reqwest::Client::builder()

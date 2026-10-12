@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, onCleanup, Show } from 'solid-js';
+import { createResource, createSignal, For, Index, onCleanup, Show } from 'solid-js';
 
 import { Icon } from './Icon';
 import { setSettingsOpen, toast } from '../store/ui';
@@ -9,8 +9,8 @@ import { agentApi, onLlmConfigChange, type ConfigView, type LlmView } from '../l
  *
  * A list rather than a single endpoint, because "one URL, one key" does not
  * survive first contact with someone who has a subscription, a local Ollama,
- * and a gateway. Each row is one endpoint+model pair; the active row is the one
- * the agent calls.
+ * and a gateway. Each row is one endpoint with the models it serves; the
+ * active (name, model) pair is the one the agent calls.
  *
  * The key is write-only across this boundary: the host returns a fingerprint
  * rather than the secret, so the form shows what is stored without ever holding
@@ -117,7 +117,7 @@ export function Settings() {
                       onActivate={async () => {
                         setBusy(true);
                         try {
-                          mutate(await agentApi.setActive(c.name));
+                          mutate(await agentApi.setActive(c.name, c.models[0]));
                         } catch (err) {
                           toast('error', 'Could not switch', String(err));
                         } finally {
@@ -169,8 +169,14 @@ function ConfigRow(props: {
       <button
         class="model__pick"
         onClick={props.onActivate}
-        disabled={props.busy || props.config.active}
-        title={props.config.active ? 'In use' : 'Use this model'}
+        disabled={props.busy || props.config.active || props.config.models.length === 0}
+        title={
+          props.config.active
+            ? 'In use'
+            : props.config.models.length === 0
+              ? 'Add a model to this entry first'
+              : 'Use this model'
+        }
       >
         <span class="model__dot" classList={{ 'model__dot--on': props.config.active }} />
       </button>
@@ -178,7 +184,7 @@ function ConfigRow(props: {
       <button class="model__main" onClick={props.onEdit} disabled={props.busy}>
         <span class="model__name truncate">{props.config.name}</span>
         <span class="model__meta truncate">
-          {props.config.model} · {hostOf(props.config.url)}
+          {props.config.models.join(', ')} · {hostOf(props.config.url)}
         </span>
       </button>
 
@@ -210,19 +216,65 @@ function ConfigForm(props: {
   onBusy: (busy: boolean) => void;
 }) {
   const [url, setUrl] = createSignal(props.existing?.url ?? '');
-  const [model, setModel] = createSignal(props.existing?.model ?? '');
+  const [models, setModels] = createSignal<string[]>(
+    props.existing?.models.length ? [...props.existing.models] : [''],
+  );
   const [name, setName] = createSignal(props.existing?.name ?? '');
   const [key, setKey] = createSignal('');
   const [reveal, setReveal] = createSignal(false);
+  /** The entry being edited, which picking from history can change mid-form. */
+  const [current, setCurrent] = createSignal<LlmView | undefined>(props.existing);
+  /** Which history dropdown is open: the name field's, or a model row's. */
+  const [histAt, setHistAt] = createSignal<'name' | 'url' | number | null>(null);
 
-  /**
-   * Names already in use, offered as suggestions.
-   *
-   * Empty when the list is empty, which is the only time a first name has
-   * nothing to collide with — the dropdown appears as soon as there is
-   * something to pick and disappears when everything has been removed.
-   */
-  const known = () => props.taken.map((c) => c.name);
+  const setModel = (at: number, value: string) => {
+    setModels((prev) => prev.map((m, i) => (i === at ? value : m)));
+  };
+  const removeModel = (at: number) => {
+    // Rows shift when one goes, so any open history dropdown closes rather
+    // than follow an index that now names a different row.
+    setHistAt(null);
+    setModels((prev) => prev.filter((_, i) => i !== at));
+  };
+  const addModel = () => {
+    setHistAt(null);
+    setModels((prev) => [...prev, '']);
+  };
+
+  /** Every model id already saved somewhere, once each, in list order. */
+  const modelHistory = () => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of props.taken) {
+      for (const m of c.models) {
+        if (!seen.has(m)) {
+          seen.add(m);
+          out.push(m);
+        }
+      }
+    }
+    return out;
+  };
+
+  const suggestions = (values: string[], value: string) => {
+    const query = value.trim().toLowerCase();
+    return [...new Set(values)].filter(
+      (item) => item !== value && item.toLowerCase().includes(query),
+    );
+  };
+  const nameSuggestions = () => suggestions(props.taken.map((c) => c.name), name());
+  const urlSuggestions = () => suggestions(props.taken.map((c) => c.url).filter(Boolean), url());
+
+  /** Loads a saved entry into the form: picking history is choosing what to edit. */
+  const loadEntry = (entry: LlmView) => {
+    setCurrent(entry);
+    setName(entry.name);
+    setUrl(entry.url);
+    setModels(entry.models.length ? [...entry.models] : ['']);
+    // The key never crosses this boundary; the placeholder says one is stored.
+    setKey('');
+    setHistAt(null);
+  };
 
   const submit = async (e: Event) => {
     e.preventDefault();
@@ -230,12 +282,13 @@ function ConfigForm(props: {
     const payload = {
       url: url().trim(),
       name: name().trim(),
-      model: model().trim(),
+      models: models().map((m) => m.trim()).filter(Boolean),
       apiKey: key().trim(),
     };
     try {
-      const next = props.existing
-        ? await agentApi.updateConfig(props.existing.name, payload)
+      const target = current();
+      const next = target
+        ? await agentApi.updateConfig(target.name, payload)
         : await agentApi.addConfig(payload);
       props.onSaved(next);
     } catch (err) {
@@ -246,24 +299,38 @@ function ConfigForm(props: {
   };
 
   return (
-    <form class="modal__body" onSubmit={submit}>
+    <form class="modal__body" autocomplete="off" onSubmit={submit}>
       <section class="field">
         <label class="field__label" for="set-name">
           Name
         </label>
-        <input
-          id="set-name"
-          class="input"
-          list="rg-known-models"
-          placeholder="OpenAI"
-          value={name()}
-          onInput={(e) => setName(e.currentTarget.value)}
-        />
-        <datalist id="rg-known-models">
-          <For each={known()}>{(n) => <option value={n} />}</For>
-        </datalist>
+        <div class="hist">
+          <input
+            id="set-name"
+            class="input hist__input"
+            placeholder="OpenAI"
+            autocomplete="off"
+            value={name()}
+            onFocus={() => setHistAt('name')}
+            onBlur={() => setHistAt((at) => (at === 'name' ? null : at))}
+            onInput={(e) => {
+              setName(e.currentTarget.value);
+              setHistAt('name');
+            }}
+          />
+          <Show when={histAt() === 'name' && nameSuggestions().length > 0}>
+            <HistoryPop
+              items={nameSuggestions()}
+              onPick={(v) => {
+                const entry = props.taken.find((c) => c.name === v);
+                if (entry) loadEntry(entry);
+              }}
+              onClose={() => setHistAt(null)}
+            />
+          </Show>
+        </div>
         <p class="field__hint">
-          Unique, and case matters — <code>Prod</code> and <code>prod</code> are two models.
+          Unique, and case matters — <code>Prod</code> and <code>prod</code> are two entries.
         </p>
       </section>
 
@@ -271,14 +338,29 @@ function ConfigForm(props: {
         <label class="field__label" for="set-url">
           Base URL
         </label>
+        <div class="hist">
         <input
           id="set-url"
-          class="input"
+          class="input hist__input"
           type="url"
+          autocomplete="off"
           placeholder="https://api.openai.com/v1"
           value={url()}
-          onInput={(e) => setUrl(e.currentTarget.value)}
+          onFocus={() => setHistAt('url')}
+          onBlur={() => setHistAt((at) => at === 'url' ? null : at)}
+          onInput={(e) => {
+            setUrl(e.currentTarget.value);
+            setHistAt('url');
+          }}
         />
+        <Show when={histAt() === 'url' && urlSuggestions().length > 0}>
+          <HistoryPop
+            items={urlSuggestions()}
+            onPick={(value) => { setUrl(value); setHistAt(null); }}
+            onClose={() => setHistAt(null)}
+          />
+        </Show>
+        </div>
         <p class="field__hint">
           Any OpenAI-compatible endpoint. The <code>/chat/completions</code> suffix is added
           for you, so leave it off.
@@ -294,7 +376,7 @@ function ConfigForm(props: {
             id="set-key"
             class="input"
             type={reveal() ? 'text' : 'password'}
-            placeholder={props.existing?.keyHint ? `stored · ${props.existing.keyHint}` : 'sk-…'}
+            placeholder={current()?.keyHint ? `stored · ${current()?.keyHint}` : 'sk-…'}
             value={key()}
             autocomplete="off"
             spellcheck={false}
@@ -315,17 +397,56 @@ function ConfigForm(props: {
       </section>
 
       <section class="field">
-        <label class="field__label" for="set-model">
-          Model
-        </label>
-        <input
-          id="set-model"
-          class="input"
-          placeholder="gpt-4o"
-          value={model()}
-          onInput={(e) => setModel(e.currentTarget.value)}
-        />
-        <p class="field__hint">The model id the endpoint expects.</p>
+        <label class="field__label">Models</label>
+        {/* `Index`, not `For`: the rows are plain strings, and `For` keys by
+            reference — every keystroke replaces the row's string, which
+            remounts the input and eats the cursor. `Index` keys by position,
+            so the input the user is typing in is the input that stays. */}
+        <Index each={models()}>
+          {(m, i) => (
+            <div class="field__row hist">
+              <input
+                class="input hist__input"
+                autocomplete="off"
+                placeholder="gpt-4o"
+                value={m()}
+                onFocus={() => setHistAt(i)}
+                onBlur={() => setHistAt((at) => at === i ? null : at)}
+                onInput={(e) => {
+                  setModel(i, e.currentTarget.value);
+                  setHistAt(i);
+                }}
+              />
+              <Show when={histAt() === i && suggestions(modelHistory(), m()).length > 0}>
+                <HistoryPop
+                  items={suggestions(modelHistory(), m())}
+                  onPick={(v) => {
+                    setModel(i, v);
+                    setHistAt(null);
+                  }}
+                  onClose={() => setHistAt(null)}
+                />
+              </Show>
+              <button
+                type="button"
+                class="icon-btn icon-btn--danger"
+                title={models().length === 1 ? 'At least one model is required' : 'Remove model'}
+                disabled={models().length === 1}
+                onClick={() => removeModel(i)}
+              >
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+          )}
+        </Index>
+        <button type="button" class="btn" onClick={addModel}>
+          <Icon name="plus" size={13} />
+          Add model
+        </button>
+        <p class="field__hint">
+          The model ids this endpoint serves. The first one is the default when the entry is
+          activated.
+        </p>
       </section>
 
       <footer class="modal__foot modal__foot--inset">
@@ -349,6 +470,57 @@ async function fetchConfigs(): Promise<ConfigView> {
   } catch {
     return { configs: [] };
   }
+}
+
+/**
+ * A history dropdown: only what is already saved, nothing inferred.
+ *
+ * The browser's datalist was the alternative, and it is neither — it filters
+ * by whatever is typed, styles itself natively, and offers the typed text
+ * back as an option. This lists the saved values and picks one. Rendered only
+ * while open, so the listeners live exactly as long as the dropdown does.
+ */
+function HistoryPop(props: {
+  items: string[];
+  onPick: (value: string) => void;
+  onClose: () => void;
+}) {
+  // Keep suggestions open while interacting with their input or list.
+  const onDown = (e: PointerEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('.hist__pop, .hist__input')) return;
+    props.onClose();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onClose();
+    }
+  };
+  window.addEventListener('pointerdown', onDown, true);
+  window.addEventListener('keydown', onKey, true);
+  onCleanup(() => {
+    window.removeEventListener('pointerdown', onDown, true);
+    window.removeEventListener('keydown', onKey, true);
+  });
+
+  return (
+    <div class="hist__pop rise-in">
+      <For each={props.items}>
+        {(v) => (
+          <button
+            type="button"
+            class="hist__item"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => props.onPick(v)}
+          >
+            <span class="truncate">{v}</span>
+          </button>
+        )}
+      </For>
+    </div>
+  );
 }
 
 /** `https://api.openai.com/v1` → `api.openai.com`, enough to tell rows apart. */

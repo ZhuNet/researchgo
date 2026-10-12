@@ -13,20 +13,22 @@ import { translate, type UiEvent } from './bridge';
 export interface LlmView {
   name: string;
   url: string;
-  model: string;
+  models: string[];
   /** A fingerprint of the stored key, enough to tell two keys apart. */
   keyHint: string;
   /** Whether this entry could actually make a call. */
   ready: boolean;
-  /** Whether the agent is currently pointed at this one. */
+  /** Whether the agent is currently pointed at one of this entry's models. */
   active: boolean;
+  /** The model the agent is pointed at, when this entry is the active one. */
+  activeModel: string | null;
 }
 
 export interface LlmConfig {
   url: string;
   apiKey: string;
   name: string;
-  model: string;
+  models: string[];
 }
 
 export interface ConfigView {
@@ -80,7 +82,9 @@ export const agentApi = {
 
   deleteConfig: (name: string) => invoke<ConfigView>('delete_llm_config', { name }),
 
-  setActive: (name: string) => invoke<ConfigView>('set_active_llm_config', { name }),
+  /** Points the agent at one model of one stored entry. */
+  setActive: (name: string, model: string) =>
+    invoke<ConfigView>('set_active_llm_config', { name, model }),
 
   info: () => invoke<AgentInfo>('agent_info'),
 

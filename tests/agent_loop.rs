@@ -11,7 +11,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 
-use researchgo_lib::agent::config::LlmConfig;
+use researchgo_lib::agent::config::ResolvedModel;
 use serde_json::{json, Value};
 
 use researchgo_lib::agent::agent_loop;
@@ -98,7 +98,7 @@ fn frames(turn: usize) -> String {
 #[tokio::test]
 async fn a_streamed_reply_reassembles_into_one_message() {
   let port = spawn_mock();
-  let cfg = LlmConfig {
+  let cfg = ResolvedModel {
     url: format!("http://127.0.0.1:{port}/v1"),
     api_key: "sk-test".into(),
     name: "mock".into(),
@@ -174,14 +174,20 @@ async fn diag_real_endpoint() {
     .expect("APPDATA");
   let raw = std::fs::read_to_string(&path).expect("llm.json");
   let file: Value = serde_json::from_str(&raw).expect("config parses");
-  let active = file["active"].as_str().expect("an active entry");
+  let active_name = file["active"]["name"].as_str().expect("an active entry");
+  let active_model = file["active"]["model"].as_str().expect("an active model");
   let entry = file["configs"]
     .as_array()
     .expect("configs")
     .iter()
-    .find(|c| c["name"].as_str() == Some(active))
+    .find(|c| c["name"].as_str() == Some(active_name))
     .expect("active entry present");
-  let cfg: LlmConfig = serde_json::from_value(entry.clone()).expect("entry shape");
+  let cfg = ResolvedModel {
+    url: entry["url"].as_str().expect("url").to_string(),
+    api_key: entry["apiKey"].as_str().expect("apiKey").to_string(),
+    name: active_name.to_string(),
+    model: active_model.to_string(),
+  };
 
   eprintln!("[diag] endpoint {} model {}", cfg.url, cfg.model);
 

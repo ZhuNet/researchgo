@@ -7,6 +7,7 @@ import type { Agent } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 import { AgentThread } from './AgentThread';
 import { Composer } from './Composer';
+import { ModelMenu } from './ModelMenu';
 
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -15,7 +16,7 @@ function compact(n: number): string {
 }
 
 export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
-  const [config, { refetch }] = createResource(async () => {
+  const [config, { mutate, refetch }] = createResource(async () => {
     try {
       return await agentApi.getConfig();
     } catch {
@@ -42,8 +43,14 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
   const total = () => usage().input + usage().output;
   const pct = () => Math.min(100, (total() / 200_000) * 100);
 
-  /** The entry the agent would call next, if any. */
-  const active = () => config()?.configs.find((c) => c.active);
+  /** Points the agent at one model of one entry, and lands the result here. */
+  const switchModel = async (name: string, model: string) => {
+    try {
+      mutate(await agentApi.setActive(name, model));
+    } catch (err) {
+      toast('error', 'Could not switch', String(err));
+    }
+  };
 
   return (
     <aside class="agent">
@@ -92,14 +99,12 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
       </header>
 
       <div class="agent__meta">
-        {/* Not a menu. Switching models is a configuration change, and it lives
-            in Settings behind the overflow above — next to the thing it
-            changes, instead of duplicated as a shortcut here that would drift
-            from the list it mirrors. */}
-        <div class="modelbtn" classList={{ 'modelbtn--unset': !active() }}>
-          <Icon name="cpu" size={12} />
-          <span class="truncate">{active()?.model ?? 'no model'}</span>
-        </div>
+        <ModelMenu
+          configs={config()?.configs ?? []}
+          onOpen={() => void refetch()}
+          onPick={(name, model) => void switchModel(name, model)}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       </div>
 
       <div class="agent__usage">

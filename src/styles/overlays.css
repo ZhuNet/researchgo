@@ -337,6 +337,45 @@
   background: var(--bg-4);
 }
 
+/* History dropdowns in the settings form: the saved values, nothing else.
+   Same surface as every other menu in the app. */
+.hist {
+  position: relative;
+}
+
+.hist__pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: var(--z-menu);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--sp-2);
+  border-radius: var(--r-md);
+  background: var(--bg-3);
+  border: 1px solid var(--bd-2);
+  box-shadow: var(--sh-4);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+.hist__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  color: var(--tx-2);
+  text-align: left;
+}
+
+.hist__item:hover {
+  color: var(--tx-1);
+  background: var(--ac-soft);
+}
+
 .banner {
   display: flex;
   align-items: center;
