@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, Show } from 'solid-js';
+import { createEffect, createSignal, For, on, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { markdown } from '../../lib/markdown';
@@ -10,10 +10,45 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
   const [pinned, setPinned] = createSignal(true);
   const [expanded, setExpanded] = createSignal<Record<string, boolean>>({});
 
+  const jumpToLatest = () => {
+    if (!scroller) return;
+    // Pinning first, before the move: the scroll that lands here fires
+    // `onScroll`, and a pane that is still short of its bottom would
+    // un-pin itself again on the way down.
+    setPinned(true);
+    scroller.scrollTop = scroller.scrollHeight;
+  };
+
   createEffect(() => {
     props.agent.items().length;
     if (pinned() && scroller) scroller.scrollTop = scroller.scrollHeight;
   });
+
+  // Sending is the one moment the follow rule has to be overridden. Someone
+  // who scrolled back through the transcript to re-read an answer and then
+  // types a follow-up would otherwise sit at that answer while their own
+  // prompt, and the whole reply to it, arrive off-screen — the pane looks
+  // like it swallowed the prompt. Every turn starts at the bottom; from
+  // there the ordinary pinned-scroll carries the stream.
+  //
+  // `busy` dropping and lifting again is what a new turn looks like from
+  // here, and it is deliberately not a counter on the store: `createAgent()`
+  // runs once inside `App`, so a field added to it is a field a store instance
+  // created before the app last hot-reloaded does not have, and reading it
+  // from this effect throws and takes the whole thread down with it.
+  createEffect(
+    on(
+      () => props.agent.busy(),
+      (busy) => {
+        if (!busy) return;
+        jumpToLatest();
+        // The row is in the DOM by now, but its markdown has not been laid
+        // out yet, so a jump taken this frame can land a message short of
+        // the real bottom. Correct it once the frame is painted.
+        requestAnimationFrame(jumpToLatest);
+      },
+    ),
+  );
 
   const onScroll = () => {
     if (!scroller) return;
@@ -58,13 +93,7 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
       </div>
 
       <Show when={!pinned()}>
-        <button
-          class="thread__jump"
-          onClick={() => {
-            if (scroller) scroller.scrollTop = scroller.scrollHeight;
-            setPinned(true);
-          }}
-        >
+        <button class="thread__jump" onClick={jumpToLatest}>
           <Icon name="arrowRight" size={13} style={{ transform: 'rotate(90deg)' }} />
           Jump to latest
         </button>
