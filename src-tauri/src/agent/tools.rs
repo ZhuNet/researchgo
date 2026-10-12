@@ -36,6 +36,16 @@ impl std::fmt::Display for ToolError {
 pub struct ToolOutput {
   pub content: String,
   pub summary: String,
+  /// Whether the tool's *work* succeeded, which is not the same as whether the
+  /// call did.
+  ///
+  /// A command that ran and exited non-zero is the case this exists for:
+  /// collapsing it into a `ToolError` would throw away the stdout and stderr
+  /// the model needs in order to fix its own command, and reporting it as a
+  /// plain success is worse — the transcript claims a test suite passed that
+  /// failed, and the model has no reason to look again. So the call succeeds,
+  /// the content comes back whole, and the row is drawn as a failure.
+  pub ok: bool,
   /// Emitted as a `file_patch` frame when set, so the changes panel and any
   /// open editor learn about the write without polling.
   pub patch: Option<(String, bool)>,
@@ -124,11 +134,19 @@ pub fn tool_defs() -> Vec<Value> {
       "type": "function",
       "function": {
         "name": "bash",
-        "description": "Run a shell command in the workspace root. Use for builds, tests, git, and anything else that is genuinely a program. Prefer the dedicated tools for reading and searching.",
+        "description": format!(
+          "Run a shell command in the workspace root. {} \
+           Prefer the read, grep and glob tools over shelling out to cat, grep \
+           and find: they are not a shell, so they are unaffected by all of the \
+           above. A command that exits non-zero comes back as a failed call with \
+           its output attached rather than as an error — read that output before \
+           retrying.",
+          dialect()
+        ),
         "parameters": {
           "type": "object",
           "properties": {
-            "command": { "type": "string", "description": "The command line to run." }
+            "command": { "type": "string", "description": format!("The command line to run. {}", dialect()) }
           },
           "required": ["command"]
         }
@@ -306,6 +324,7 @@ fn read_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
 
   let lines = text.lines().count();
   Ok(ToolOutput {
+    ok: true,
     summary: format!("{} · {lines} lines", short_path(root, &path)),
     content: out,
     patch: None,
@@ -338,6 +357,7 @@ fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
       short_path(root, &path),
       content.len()
     ),
+    ok: true,
     // The boolean is "created": the renderer needs to distinguish an add from a
     // modify to label the row.
     patch: Some((path.display().to_string(), !existed)),
@@ -373,6 +393,7 @@ fn edit_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
 
   Ok(ToolOutput {
     content: format!("Edited {raw}"),
+    ok: true,
     summary: format!("edited {}", short_path(root, &path)),
     patch: Some((path.display().to_string(), false)),
   })
@@ -383,6 +404,42 @@ fn shell() -> &'static str {
     "cmd"
   } else {
     "sh"
+  }
+}
+
+/// The command dialect the model must write for the machine it is running on.
+///
+/// This is the single most valuable fact in the tool list and it was the one
+/// thing missing. A model asked to run a command has exactly one strong prior:
+/// `bash` on Linux, learned from a training set that is overwhelmingly
+/// POSIX. Nothing in the prompt contradicts it, so `ls -la`, `cat`, `rm -rf`,
+/// `$HOME` and `&&` go out unchanged — and on `cmd.exe` every one of them fails,
+/// with an error that names the command rather than the shell, so the model has
+/// no way to work out that the whole batch was written for the wrong machine and
+/// retries the same syntax until the turn is over.
+///
+/// So the dialect is stated where the model is already looking when it decides
+/// what to type, in the one tool it is about to call. The substitutions are
+/// named as pairs (`ls` → `dir`) rather than described, because a model copying
+/// a table acts on it and a model reading prose has to infer it.
+fn dialect() -> &'static str {
+  if cfg!(windows) {
+    "The command runs in cmd.exe on Windows, not PowerShell and not bash. \
+     Use dir instead of ls, type instead of cat, del and rmdir instead of rm, \
+     copy and move instead of cp and mv, findstr instead of grep, and \
+     xcopy or robocopy for a recursive copy. Variables expand as %VAR%, not \
+     $VAR. Quote paths containing spaces with double quotes. Chain with && or \
+     &, redirect stdout and stderr with > and 2>, and branch on failure with \
+     `if errorlevel 1`. There is no touch, no which, no heredoc, and no shell \
+     glob — dir /s and dir /b are the closest. Commands that ship their own \
+     executable (npm, cargo, git, python, node) are called by name and behave \
+     as they do elsewhere."
+  } else {
+    "The command runs in sh on a POSIX system. Use POSIX syntax only: && and | \
+     and > and 2> all work, but [[ ]], arrays, local, source, process \
+     substitution <(...) and $(< file) do not — use [ ], plain variables, \
+     `. file` and $(cat file). Commands that ship their own executable (npm, \
+     cargo, git, python) are called by name and behave as they do elsewhere."
   }
 }
 
@@ -448,20 +505,29 @@ async fn bash_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
 
   let code = output.status.code().unwrap_or(-1);
   let ok = output.status.success();
-  if text.is_empty() {
-    text = if ok {
-      "(no output)".to_string()
+
+  // A non-zero exit is reported to the model as output, because that is the
+  // only channel it reads. Without the line a command that printed a
+  // reassuring log and then died — `npm test` with two failing cases, a
+  // `git diff --quiet` finding changes — looks byte-identical to one that
+  // worked, and the model moves on believing a failing build passed.
+  if !ok {
+    text = if text.is_empty() {
+      format!("command failed with status {code}")
     } else {
-      format!("exited with code {code}")
+      format!("command failed with status {code}\n{text}")
     };
+  } else if text.is_empty() {
+    text = "(no output)".to_string();
   }
 
   Ok(ToolOutput {
-    summary: if ok {
-      format!("exit {code}")
-    } else {
-      format!("exit {code} · failed")
-    },
+    ok,
+    // No exit code in the row: the tick or the cross beside the tool name
+    // already says whether the command worked, and restating it as `exit 0`
+    // on every successful row is noise between the reader and the output.
+    // The code is still in the content, where the model needs it.
+    summary: String::new(),
     content: text,
     patch: None,
   })
@@ -494,6 +560,7 @@ fn glob_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   };
   let content = if truncated { format!("{content}\n[results truncated by workspace limits]") } else { content };
   Ok(ToolOutput {
+    ok: true,
     summary: format!("{} match{} · {pattern}", hits.len(), if truncated { " · truncated" } else { "" }),
     content,
     patch: None,
@@ -602,6 +669,7 @@ fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   let content = if skipped_large > 0 { format!("{content}\n[skipped {skipped_large} files over 2 MiB]") } else { content };
   let content = if shortened { format!("{content}\n[matching lines shortened to 200 characters]") } else { content };
   Ok(ToolOutput {
+    ok: true,
     summary: format!("{} match{} · {needle}", hits.len(), if truncated { " · truncated" } else { "" }),
     content,
     patch: None,
@@ -732,6 +800,17 @@ mod tests {
     PathBuf::from("/work")
   }
 
+  /// Exits non-zero. No shell is named here: `bash_tool` spawns the right one,
+  /// and nesting a second `cmd` inside the `cmd` it already started is how the
+  /// quotes go wrong.
+  fn failing_command() -> &'static str {
+    "exit 1"
+  }
+
+  fn succeeding_command() -> &'static str {
+    "echo ok"
+  }
+
   #[test]
   fn traversal_is_refused() {
     // The check the whole sandbox exists for: a model that decides to read
@@ -796,6 +875,51 @@ mod tests {
     assert!(!matches_glob(&path, "**/*.tex"));
     assert!(!matches_glob(&path, "**/**/**/missing.*"));
     assert!(matches_glob(&path, "**/*.txt"));
+  }
+
+  #[tokio::test]
+  async fn a_failed_command_is_a_failure_and_keeps_its_output() {
+    // The regression this guards: a non-zero exit was returned as a successful
+    // tool call, so the transcript drew a tick beside a failed command and the
+    // model read a failing test run as a passing one.
+    let fixture = Fixture::new();
+    let out = bash_tool(&fixture.0, &json!({ "command": failing_command() })).await.unwrap();
+
+    assert!(!out.ok, "a command that exits non-zero is not a success");
+    // The output is the whole point of the call. Turning the failure into a
+    // `ToolError` would have kept the tick honest but thrown away everything the
+    // model needs in order to fix its own command.
+    assert!(out.content.contains("failed"), "the exit status must reach the model: {}", out.content);
+  }
+
+  #[tokio::test]
+  async fn a_successful_command_reports_success_and_no_summary() {
+    let fixture = Fixture::new();
+    let out = bash_tool(&fixture.0, &json!({ "command": succeeding_command() })).await.unwrap();
+
+    assert!(out.ok);
+    // `cmd` writes CRLF, so the content is compared on the line, not the byte.
+    assert_eq!(out.content.trim(), "ok");
+    // `exit 0` beside a tick says the same thing twice; the timing the row
+    // already carries is the only summary a shell call should contribute.
+    assert_eq!(out.summary, "");
+  }
+
+  #[test]
+  fn the_bash_description_states_the_dialect_of_the_host() {
+    // A model with no idea it is on cmd.exe writes `ls -la` and fails. The
+    // description is the only place it looks before typing, so the host's own
+    // dialect has to be in it.
+    let defs = tool_defs();
+    let bash = defs
+      .iter()
+      .find(|d| d["function"]["name"] == "bash")
+      .expect("the bash tool is in the list the model sees");
+    let description = bash["function"]["description"].as_str().unwrap_or_default();
+
+    let expected = if cfg!(windows) { "cmd.exe" } else { "POSIX" };
+    assert!(description.contains(expected), "description omits the host dialect: {description}");
+    assert!(description.contains(shell()), "the description names a different shell than the one spawned");
   }
 
   #[tokio::test]

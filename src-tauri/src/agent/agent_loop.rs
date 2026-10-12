@@ -237,7 +237,10 @@ async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCal
   log::info!("[agent] tool `{}` finished in {:?}", call.name, started.elapsed());
 
   let (ok, content, summary, patch) = match outcome {
-    Ok(out) => (true, out.content, out.summary, out.patch),
+    // `out.ok`, not an unconditional `true`: a tool that ran but whose work
+    // failed — a shell command with a non-zero exit — is not a success, and
+    // reporting it as one draws a tick beside a failed build.
+    Ok(out) => (out.ok, out.content, out.summary, out.patch),
     Err(err) => (false, format!("Error: {err}"), err.0.clone(), None),
   };
 
@@ -253,16 +256,24 @@ async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCal
   }
 
   let elapsed = started.elapsed().as_millis() as u64;
+  let timing = if elapsed > 1000 {
+    format!("{}s", elapsed / 1000)
+  } else {
+    format!("{elapsed}ms")
+  };
   emit(
     app,
     Frame::ToolEnd {
       id: msg_id.to_string(),
       call_id: call.id.clone(),
       ok,
-      summary: if elapsed > 1000 {
-        format!("{summary} · {}s", elapsed / 1000)
-      } else {
-        format!("{summary} · {elapsed}ms")
+      // Joined only when the tool had something of its own to say. `bash` has
+      // no summary by design — its outcome is the icon beside it — and
+      // concatenating unconditionally left every shell row starting with a
+      // bare " · ", which reads like a missing value rather than a timing.
+      summary: match summary.trim() {
+        "" => timing,
+        part => format!("{part} · {timing}"),
       },
     },
   );
