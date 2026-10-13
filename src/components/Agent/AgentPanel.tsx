@@ -64,16 +64,6 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
         <div class="agent__actions">
           <button
             class="icon-btn"
-            title="New session"
-            onClick={() => {
-              props.agent.clear();
-              toast('info', 'Session cleared', 'the next prompt starts a fresh transcript');
-            }}
-          >
-            <Icon name="plus" size={15} />
-          </button>
-          <button
-            class="icon-btn"
             title="Session options"
             onClick={(e) => {
               // Re-read on the way in: a model may have been added or removed
@@ -87,7 +77,14 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
                   { label: 'Copy session id', run: () => void copyText(props.agent.session().id, 'Session id copied') },
                   { separator: true, label: '' },
                   { label: 'Settings…', run: () => setSettingsOpen(true) },
-                  { label: 'Clear thread', danger: true, run: () => props.agent.clear() },
+                  {
+                    label: 'Clear session',
+                    danger: true,
+                    run: () => {
+                      props.agent.clear();
+                      toast('info', 'Session cleared', 'the next prompt starts a fresh transcript');
+                    },
+                  },
                 ],
               );
             }}
