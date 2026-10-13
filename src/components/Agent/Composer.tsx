@@ -143,10 +143,6 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
         <span>
           <span class="kbd">⇧⏎</span> newline
         </span>
-        <span class="composer__foot-right">
-          <Icon name="cpu" size={11} />
-          {props.agent.session().model}
-        </span>
       </div>
     </div>
   );

@@ -42,12 +42,6 @@
   color: var(--tx-1);
 }
 
-.agent__sess {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--tx-3);
-}
-
 .agent__actions {
   display: flex;
   align-items: center;
@@ -246,21 +240,6 @@
    pane scrolls. */
 .thread > * {
   flex: none;
-}
-
-.thread__intro {
-  padding-bottom: var(--sp-2);
-}
-
-.thread__sess {
-  font-size: 10px;
-  font-family: var(--font-mono);
-  color: var(--tx-4);
-  overflow-wrap: anywhere;
-}
-
-.thread__sess code {
-  color: var(--tx-3);
 }
 
 .thread__working {
@@ -831,9 +810,4 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-}
-
-.composer__foot-right {
-  margin-left: auto;
-  font-family: var(--font-mono);
 }

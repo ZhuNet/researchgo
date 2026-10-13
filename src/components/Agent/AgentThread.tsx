@@ -59,12 +59,6 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
   return (
     <div class="thread-wrap">
       <div class="thread scroll" ref={scroller} onScroll={onScroll}>
-        <div class="thread__intro">
-          <span class="thread__sess">
-            session <code>{props.agent.session().id}</code> · {props.agent.session().cwd}
-          </span>
-        </div>
-
         <For each={props.agent.items()}>
           {(item) => (
             <>

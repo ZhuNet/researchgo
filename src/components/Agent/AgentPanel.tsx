@@ -60,7 +60,6 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
             <Icon name="sparkles" size={13} />
           </span>
           <h2>Agent</h2>
-          <span class="chip agent__sess">{props.agent.session().id}</span>
         </div>
         <div class="agent__actions">
           <button
