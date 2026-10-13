@@ -285,6 +285,82 @@ describe('编译：结果与原因都在预览里', () => {
     });
   });
 
+  it('切换目标只预检，旧响应不能覆盖当前目标，也不清空预览', async () => {
+    const fs = new FakeFs({ '/': [] });
+    const backend = fakeBackend(fs);
+    type Plan = Awaited<ReturnType<typeof backend.buildPlan>>;
+    const first = deferred<Plan>();
+    const second = deferred<Plan>();
+    backend.buildPlan = (path) => path === '/a/main.tex' ? first.promise : second.promise;
+    const editor = createEditor(backend);
+    fs.buildResults.push({
+      ok: true, command: 'xelatex', code: 0, output: '', durationMs: 5,
+      artifact: { path: '/main.pdf', absPath: '/a/main.pdf', size: 10, builtMs: 5 },
+    });
+    await editor.build('/a');
+    const artifact = editor.artifact();
+    const state = editor.buildState();
+    const old = editor.loadPlan('/a/main.tex');
+    const current = editor.loadPlan('/b');
+    expect(editor.buildTarget()).toBe('/b');
+    expect(editor.planPending()).toBe(true);
+    expect(editor.plan()).toBeNull();
+    first.resolve({ buildable: true, command: 'old', reason: null, artifact: null, passes: 2, detail: null });
+    await old;
+    expect(editor.plan()).toBeNull();
+    expect(editor.planPending()).toBe(true);
+    second.resolve({ buildable: false, command: null, reason: null, artifact: null, passes: 1, detail: 'Multiple .tex files' });
+    await current;
+    expect(editor.plan()?.detail).toBe('Multiple .tex files');
+    expect(editor.planPending()).toBe(false);
+    expect(editor.artifact()).toBe(artifact);
+    expect(editor.buildState()).toBe(state);
+    expect(fs.buildCalls).toEqual([{ root: '/a' }]);
+  });
+
+  it('预检期间保留旧结果及其可构建颜色依据，完成后直接替换', async () => {
+    const backend = fakeBackend(new FakeFs({ '/': [] }));
+    type Plan = Awaited<ReturnType<typeof backend.buildPlan>>;
+    const editor = createEditor(backend);
+    const valid: Plan = { buildable: true, command: 'xelatex main.tex', reason: 'XeLaTeX', artifact: '/main.pdf', passes: 2, detail: null };
+    const invalid: Plan = { buildable: false, command: null, reason: null, artifact: null, passes: 1, detail: 'No .tex file' };
+    backend.buildPlan = async () => valid;
+    await editor.loadPlan('/a');
+
+    const first = deferred<Plan>();
+    backend.buildPlan = () => first.promise;
+    const checkingInvalid = editor.loadPlan('/b');
+    expect(editor.planPending()).toBe(true);
+    expect(editor.plan()).toBe(valid);
+    first.resolve(invalid);
+    await checkingInvalid;
+    expect(editor.plan()).toBe(invalid);
+
+    const second = deferred<Plan>();
+    backend.buildPlan = () => second.promise;
+    const checkingValid = editor.loadPlan('/c');
+    expect(editor.planPending()).toBe(true);
+    expect(editor.plan()).toBe(invalid);
+    second.resolve(valid);
+    await checkingValid;
+    expect(editor.plan()).toBe(valid);
+    expect(editor.planPending()).toBe(false);
+  });
+
+  it('清空项目后，旧预检响应不能重新填入构建状态', async () => {
+    const backend = fakeBackend(new FakeFs({ '/': [] }));
+    const held = deferred<Awaited<ReturnType<typeof backend.buildPlan>>>();
+    backend.buildPlan = () => held.promise;
+    const editor = createEditor(backend);
+    const pending = editor.loadPlan('/old');
+    editor.clearAll();
+    held.resolve({ buildable: true, command: 'old', reason: null, artifact: null, passes: 2, detail: null });
+    await pending;
+    expect(editor.buildTarget()).toBeNull();
+    expect(editor.plan()).toBeNull();
+    expect(editor.planPending()).toBe(false);
+  });
+
   it('没有可执行的构建时，占位直说而不是给一个会失败的按钮', async () => {
     await withEditor(async (editor, fs) => {
       fs.plan = {

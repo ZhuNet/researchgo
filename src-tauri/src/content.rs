@@ -141,13 +141,14 @@ fn one() -> u32 {
   1
 }
 
-/// What to run for this project: XeLaTeX over the project's main document.
+/// What to run in this directory: an override or its unique TeX document.
 ///
 /// The preview exists to show what the sources compile to, so the build is the
 /// project's LaTeX toolchain and nothing else — no guessing a build script out of
 /// whichever marker happens to be present. An explicit `.rg/build.json` still
 /// wins when the document needs a command this cannot know.
-pub fn detect_build(root: &Path) -> Option<BuildPlan> {
+#[cfg(test)]
+fn detect_build(root: &Path) -> Option<BuildPlan> {
   if let Some(plan) = override_from_file(root) {
     return Some(plan);
   }
@@ -160,61 +161,47 @@ fn tex_out_dir(root: &Path) -> PathBuf {
   root.join(".rg").join("build")
 }
 
-/// The document to compile: `main.tex` first, then the shallowest source.
-///
-/// A project with several documents is ambiguous, and picking the alphabetically
-/// first would compile an appendix half the time. `main` is the convention, and
-/// the chosen file is reported so a wrong guess is visible rather than silent.
-fn tex_main(root: &Path) -> Option<PathBuf> {
-  let mut candidates: Vec<(usize, String, PathBuf)> = Vec::new();
-  let mut stack = vec![(root.to_path_buf(), 0usize)];
-  while let Some((dir, depth)) = stack.pop() {
-    if depth > 3 {
-      continue;
-    }
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-      continue;
-    };
-    for entry in entries.flatten() {
-      let path = entry.path();
-      let name = entry.file_name().to_string_lossy().into_owned();
-      if path.is_dir() {
-        // Source directories only; a vendor tree is somebody else's document.
-        if name.starts_with('.') || NOISE.contains(&name.as_str()) {
-          continue;
-        }
-        stack.push((path, depth + 1));
-        continue;
+/// Only a single direct child is unambiguous. Never guess or search subfolders.
+fn unique_tex(dir: &Path) -> Result<PathBuf, String> {
+  let entries = std::fs::read_dir(dir).map_err(|e| format!("Cannot inspect {}: {e}", dir.display()))?;
+  let mut found = None;
+  for entry in entries {
+    let path = entry.map_err(|e| format!("Cannot inspect {}: {e}", dir.display()))?.path();
+    if path.is_file() && path.extension().is_some_and(|x| x.eq_ignore_ascii_case("tex")) {
+      if found.is_some() {
+        return Err(format!("Multiple .tex files in {}. Select a directory containing exactly one .tex file.", dir.display()));
       }
-      if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("tex")) {
-        candidates.push((depth, name, path));
-      }
+      found = Some(path);
     }
   }
-  if candidates.is_empty() {
-    return None;
+  found.ok_or_else(|| format!("No .tex file in {}. Select a directory containing exactly one .tex file.", dir.display()))
+}
+
+/// Resolve selections on the host, not from the frontend's partial tree cache.
+fn selection_dir(selection: &str) -> Result<PathBuf, String> {
+  let path = PathBuf::from(selection);
+  if path.is_dir() {
+    Ok(path)
+  } else if path.is_file() {
+    path.parent().map(Path::to_path_buf).ok_or_else(|| format!("No parent directory: {selection}"))
+  } else {
+    Err(format!("Selected path no longer exists: {selection}"))
   }
-  let main = candidates
-    .iter()
-    .find(|(_, name, _)| name.eq_ignore_ascii_case("main.tex"))
-    .or_else(|| {
-      candidates
-        .iter()
-        .filter(|(depth, _, _)| *depth == 0)
-        .min_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
-    })
-    .or_else(|| candidates.iter().min_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase())))?;
-  Some(main.2.clone())
 }
 
 /// XeLaTeX, because the preview is for documents that need it: XeLaTeX handles
 /// the system fonts and Unicode a paper actually contains, where pdflatex stops at
 /// the first character it cannot map.
+#[cfg(test)]
 fn tex_plan(root: &Path) -> Option<BuildPlan> {
-  let main = tex_main(root)?;
+  let main = unique_tex(root).ok()?;
+  tex_plan_for(root, &main)
+}
+
+fn tex_plan_for(root: &Path, main: &Path) -> Option<BuildPlan> {
   let out = tex_out_dir(root);
   let stem = main.file_stem()?.to_string_lossy().into_owned();
-  let rel = main.strip_prefix(root).unwrap_or(&main);
+  let rel = main.strip_prefix(root).unwrap_or(main);
   Some(BuildPlan {
     command: "xelatex".into(),
     args: vec![
@@ -228,6 +215,16 @@ fn tex_plan(root: &Path) -> Option<BuildPlan> {
     passes: 2,
     artifact: Some(out.join(format!("{stem}.pdf"))),
   })
+}
+
+/// Precheck and execution share validation, without scanning the directory twice.
+fn preview_plan(selection: &str) -> Result<(PathBuf, BuildPlan), String> {
+  let dir = selection_dir(selection)?;
+  let main = unique_tex(&dir)?;
+  let plan = override_from_file(&dir)
+    .or_else(|| tex_plan_for(&dir, &main))
+    .ok_or_else(missing_build_message)?;
+  Ok((dir, plan))
 }
 
 fn override_from_file(root: &Path) -> Option<BuildPlan> {
@@ -270,12 +267,17 @@ fn pump<R: Read + Send + 'static>(stream: R, sink: Arc<Mutex<String>>) -> std::t
 /// thread (a chatty compiler fills a 64 KiB pipe and would deadlock against a
 /// reader that waits for exit), and a hung build is killed rather than left to
 /// spin.
-pub fn run_build(root: &str) -> Result<BuildOutcome, String> {
+#[cfg(test)]
+fn run_build(root: &str) -> Result<BuildOutcome, String> {
   let dir = PathBuf::from(root);
   if !dir.is_dir() {
     return Err(format!("not a directory: {root}"));
   }
   let plan = detect_build(&dir).ok_or_else(missing_build_message)?;
+  run_build_plan(&dir, &plan)
+}
+
+fn run_build_plan(dir: &Path, plan: &BuildPlan) -> Result<BuildOutcome, String> {
   let started = Instant::now();
   let mut output = String::new();
   let mut code: Option<i32> = None;
@@ -286,7 +288,7 @@ pub fn run_build(root: &str) -> Result<BuildOutcome, String> {
   // depended on it. Stopping at the first failure keeps the error the reader
   // needs rather than the success of a later pass over a broken document.
   for pass in 1..=plan.passes.max(1) {
-    let run = run_pass(&dir, &plan)?;
+    let run = run_pass(dir, plan)?;
     output = run.output;
     code = run.code;
     ok = run.ok;
@@ -301,7 +303,7 @@ pub fn run_build(root: &str) -> Result<BuildOutcome, String> {
     plan.artifact
       .as_ref()
       .filter(|p| p.is_file())
-      .and_then(|p| artifact_info(&dir, p))
+      .and_then(|p| artifact_info(dir, p))
   } else {
     None
   };
@@ -319,7 +321,7 @@ pub fn run_build(root: &str) -> Result<BuildOutcome, String> {
 
   Ok(BuildOutcome {
     ok,
-    command: describe(&plan),
+    command: describe(plan),
     code,
     output,
     duration_ms: started.elapsed().as_millis() as u64,
@@ -511,9 +513,6 @@ fn artifact_info(root: &Path, path: &Path) -> Option<ArtifactInfo> {
   })
 }
 
-/// Directories that hold scratch, never source worth compiling.
-const NOISE: &[&str] = &["node_modules", "target", ".git", ".rg", "dist"];
-
 fn relative(root: &Path, path: &Path) -> String {
   match path.strip_prefix(root) {
     Ok(rest) => format!("/{}", rest.to_string_lossy().replace('\\', "/")),
@@ -524,7 +523,10 @@ fn relative(root: &Path, path: &Path) -> String {
 /// Builds the open project with XeLaTeX and reports the PDF it produced.
 #[tauri::command]
 pub async fn build_project(root: String) -> Result<BuildOutcome, String> {
-  tauri::async_runtime::spawn_blocking(move || run_build(&root))
+  tauri::async_runtime::spawn_blocking(move || {
+    let (dir, plan) = preview_plan(&root)?;
+    run_build_plan(&dir, &plan)
+  })
     .await
     .map_err(|e| format!("build task failed: {e}"))?
 }
@@ -576,41 +578,19 @@ pub struct BuildPlanInfo {
 #[tauri::command]
 pub async fn build_plan(root: String) -> Result<BuildPlanInfo, String> {
   tauri::async_runtime::spawn_blocking(move || {
-    let dir = PathBuf::from(&root);
-    if !dir.is_dir() {
-      return Err(format!("not a directory: {root}"));
-    }
+    let (dir, plan) = preview_plan(&root)?;
     // Checked before the reader presses Build, because a desktop launcher hands a
     // desktop app a much smaller PATH than a shell does — `xelatex` is usually
     // somewhere the shell has and the launcher does not, and finding that out by
     // pressing the button is a waste of the reader's time.
-    let Some(plan) = detect_build(&dir) else {
-      return Ok(BuildPlanInfo {
-        buildable: false,
-        command: None,
-        reason: None,
-        artifact: None,
-        passes: 1,
-        detail: Some(missing_build_message()),
-      });
-    };
-    if let Some(problem) = toolchain_problem(&dir, &plan) {
-      return Ok(BuildPlanInfo {
-        buildable: false,
-        command: Some(describe(&plan)),
-        reason: Some(plan.reason.to_string()),
-        artifact: plan.artifact.as_deref().map(|p| relative(&dir, p)),
-        passes: plan.passes.max(1),
-        detail: Some(problem),
-      });
-    }
+    let problem = toolchain_problem(&dir, &plan);
     Ok(BuildPlanInfo {
-      buildable: true,
+      buildable: problem.is_none(),
       command: Some(describe(&plan)),
       reason: Some(plan.reason.to_string()),
       artifact: plan.artifact.as_deref().map(|p| relative(&dir, p)),
       passes: plan.passes.max(1),
-      detail: None,
+      detail: problem,
     })
   })
   .await
@@ -714,12 +694,45 @@ mod tests {
   }
 
   #[test]
-  fn the_main_document_wins_over_an_alphabetically_earlier_appendix() {
+  fn multiple_documents_are_ambiguous_even_with_main_tex() {
     let s = Scratch::new("tex-main");
     s.write("appendix.tex", b"appendix");
     s.write("main.tex", b"documentclass");
-    let plan = detect_build(s.path()).unwrap();
-    assert_eq!(plan.args.last().unwrap(), "main.tex");
+    assert!(detect_build(s.path()).is_none());
+    assert!(unique_tex(s.path()).unwrap_err().contains("Multiple .tex"));
+  }
+
+  #[test]
+  fn selection_resolves_files_and_folders_without_searching_descendants() {
+    let s = Scratch::new("selection-dir");
+    let file = s.write("paper/document.TEX", b"documentclass");
+    let folder = file.parent().unwrap();
+    assert_eq!(selection_dir(file.to_str().unwrap()).unwrap(), folder);
+    assert_eq!(selection_dir(folder.to_str().unwrap()).unwrap(), folder);
+    assert!(unique_tex(s.path()).unwrap_err().contains("No .tex"));
+    assert_eq!(unique_tex(folder).unwrap(), file);
+    let plan = detect_build(folder).unwrap();
+    assert_eq!(plan.args.last().unwrap(), "document.TEX");
+    assert_eq!(plan.artifact.as_ref().unwrap(), &folder.join(".rg/build/document.pdf"));
+    let (selected_dir, selected_plan) = preview_plan(file.to_str().unwrap()).unwrap();
+    assert_eq!(selected_dir, folder);
+    assert_eq!(selected_plan, plan);
+    assert_eq!(preview_plan(folder.to_str().unwrap()).unwrap().1, plan);
+    // A folder named like a source is not a source file.
+    std::fs::create_dir(folder.join("other.tex")).unwrap();
+    assert!(unique_tex(folder).is_ok());
+  }
+
+  #[tokio::test]
+  async fn preview_precheck_rejects_ambiguous_sources_even_with_an_override() {
+    let s = Scratch::new("selection-override");
+    s.write(".rg/build.json", br#"{"command":"xelatex","args":["main.tex"]}"#);
+    assert!(build_plan(s.path().to_string_lossy().into_owned()).await.unwrap_err().contains("No .tex"));
+    s.write("main.tex", b"main");
+    s.write("second.tex", b"second");
+    let path = s.path().to_string_lossy().into_owned();
+    assert!(build_plan(path.clone()).await.unwrap_err().contains("Multiple .tex"));
+    assert!(build_project(path).await.unwrap_err().contains("Multiple .tex"));
   }
 
   #[test]

@@ -31,6 +31,26 @@ const paths = (ws: Workspace) => {
 };
 
 describe('打开文件夹', () => {
+  it('选择文件和目录都交由后端预检，不自动构建，工具链变化仍检查当前选择', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/');
+      ws.setSelected(['/docs']);
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/docs');
+      ws.setSelected(['/src', '/docs/guide.md']);
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/docs/guide.md');
+      emitToolchainChange(fs);
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/docs/guide.md');
+      expect(fs.buildCalls).toEqual([]);
+      ws.closeFolder();
+      await flush();
+      expect(ws.editor.buildTarget()).toBeNull();
+    });
+  });
   it('读盘途中关闭 tab，旧结果不会留下孤儿内容', async () => {
     const fs = new FakeFs(SAMPLE_TREE);
     const backend = fakeBackend(fs);

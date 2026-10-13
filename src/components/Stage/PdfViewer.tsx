@@ -48,28 +48,18 @@ import type { BuildPlan } from '../../store/editor';
  */
 export function PdfViewer(props: { ws: Workspace }) {
   const editor = () => props.ws.editor;
-  const root = () => props.ws.root();
-
-  /**
-   * Ask what Build would run, once a root exists.
-   *
-   * Deliberately not "find a PDF that is already there": the preview is empty
-   * until the reader compiles something, and a document left in the tree from
-   * last week is not what this project builds today.
-   */
-  createEffect(() => {
-    const dir = root();
-    if (!dir) return;
-    void editor().loadPlan(dir);
-  });
-
   const building = createMemo(() => editor().buildState()?.phase === 'running');
   const state = createMemo(() => editor().buildState());
   const plan = createMemo(() => editor().plan());
+  const disabled = createMemo(() => building() || editor().planPending() ||
+    !editor().buildTarget() || plan()?.buildable !== true);
+  // While checking, retain the previous plan's colour rather than turning every
+  // disabled button light (or forcing every checking button dark).
+  const undimmed = createMemo(() => !building() && plan()?.buildable === true);
 
   async function build() {
-    const dir = root();
-    if (!dir || building()) return;
+    const dir = editor().buildTarget();
+    if (!dir || disabled()) return;
     const outcome = await editor().build(dir);
     if (!outcome) {
       toast('error', 'Build failed', editor().buildState()?.error ?? 'unknown error');
@@ -151,6 +141,9 @@ export function PdfViewer(props: { ws: Workspace }) {
       #toolbarViewerRight .rg-build:disabled {
         opacity: 0.45;
         cursor: default;
+      }
+      #toolbarViewerRight .rg-build.rg-undimmed:disabled {
+        opacity: 1;
       }
       #toolbarViewerRight .rg-build svg {
         width: 14px;
@@ -393,9 +386,9 @@ export function PdfViewer(props: { ws: Workspace }) {
    */
   createEffect(() => {
     const button = buildButton();
-    const busy = building();
     if (!button) return;
-    button.disabled = busy || !root();
+    button.disabled = disabled();
+    button.classList.toggle('rg-undimmed', undimmed());
   });
 
   return (
@@ -413,8 +406,9 @@ export function PdfViewer(props: { ws: Workspace }) {
               <PlanHint plan={plan()} />
               <button
                 class="btn btn--solid"
+                classList={{ 'pdf__undimmed': undimmed() }}
                 onClick={() => void build()}
-                disabled={building() || !root() || plan()?.buildable === false}
+                disabled={disabled()}
               >
                 <Icon name={building() ? 'refresh' : 'zap'} size={13} class={building() ? 'spin' : ''} />
                 {building() ? 'Building…' : 'Build'}
@@ -445,8 +439,9 @@ export function PdfViewer(props: { ws: Workspace }) {
                 </div>
                 <button
                   class="btn btn--solid"
+                  classList={{ 'pdf__undimmed': undimmed() }}
                   onClick={() => void build()}
-                  disabled={building() || !root()}
+                  disabled={disabled()}
                 >
                   <Icon name="refresh" size={13} class={building() ? 'spin' : ''} />
                   {building() ? 'Building…' : 'Try again'}
@@ -579,7 +574,7 @@ function toolbarDocument(viewer: PdfjsViewerElement, deadlineMs: number): Promis
  */
 function PlanHint(props: { plan: BuildPlan | null }) {
   return (
-    <Switch fallback={<p class="pdf__hint">Looking for a build command…</p>}>
+    <Switch>
       <Match when={props.plan === null}>
         <p class="pdf__hint">Looking for a build command…</p>
       </Match>

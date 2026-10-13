@@ -132,6 +132,9 @@ export function createEditor(
    * needs.
    */
   const [plan, setPlan] = createSignal<BuildPlan | null>(null);
+  const [planPending, setPlanPending] = createSignal(false);
+  const [buildTarget, setBuildTarget] = createSignal<string | null>(null);
+  let planGeneration = 0;
 
   const bump = () => setRevision((n) => n + 1);
 
@@ -145,14 +148,17 @@ export function createEditor(
     // The build preview is as much "the last project's" as a resident buffer:
     // left alone, opening a new folder keeps showing the old project's PDF
     // next to the new project's sources. The plan is dropped too — the
-    // preview re-asks it for the new root, and until then "looking for a
-    // build command" is the honest message.
+    // workspace re-asks it for the new selection, and until then there is no
+    // published precheck result.
     setArtifact(null);
     setBuildState(null);
     setBuildOutput('');
     setBuildCommand('');
     setBuildDuration(null);
     setPlan(null);
+    planGeneration += 1;
+    setPlanPending(false);
+    setBuildTarget(null);
     bump();
   }
 
@@ -385,11 +391,14 @@ export function createEditor(
   }
 
   async function build(root: string): Promise<BuildOutcome | null> {
+    if (buildState()?.phase === 'running') return null;
+    const buildEpoch = epoch;
     setBuildState({ phase: 'running', error: null });
     setBuildOutput('');
     setBuildDuration(null);
     try {
       const outcome = await backend.buildProject(root);
+      if (epoch !== buildEpoch) return null;
       setBuildOutput(outcome.output);
       setBuildCommand(outcome.command);
       setBuildDuration(outcome.durationMs);
@@ -402,6 +411,7 @@ export function createEditor(
       }
       return outcome;
     } catch (err) {
+      if (epoch !== buildEpoch) return null;
       const message = String((err as Error)?.message ?? err);
       setBuildOutput(message);
       setBuildState({ phase: 'failed', error: message });
@@ -413,12 +423,23 @@ export function createEditor(
    * Asks what building would run. Never sets an artifact: the preview is empty
    * until something is actually compiled.
    */
-  async function loadPlan(root: string): Promise<BuildPlan | null> {
+  async function loadPlan(root: string | null): Promise<BuildPlan | null> {
+    const generation = ++planGeneration;
+    setBuildTarget(root);
+    setPlanPending(root !== null);
+    // Keep the last published result visible until the host replaces it. Pending
+    // only blocks clicks; it is not a new visual state of the build target.
+    if (!root) {
+      setPlan(null);
+      return null;
+    }
     try {
       const found = await backend.buildPlan(root);
+      if (generation !== planGeneration) return null;
       setPlan(found);
       return found;
     } catch (err) {
+      if (generation !== planGeneration) return null;
       setPlan({
         buildable: false,
         command: null,
@@ -428,6 +449,8 @@ export function createEditor(
         detail: String((err as Error)?.message ?? err),
       });
       return null;
+    } finally {
+      if (generation === planGeneration) setPlanPending(false);
     }
   }
 
@@ -456,6 +479,8 @@ export function createEditor(
     artifact,
     plan,
     loadPlan,
+    planPending,
+    buildTarget,
   };
 }
 

@@ -627,3 +627,6 @@
   font-size: 11.5px;
   color: var(--tx-2);
 }
+.pdf .pdf__undimmed:disabled {
+  opacity: 1;
+}

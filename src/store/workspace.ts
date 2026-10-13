@@ -1,4 +1,4 @@
-import { batch, createEffect, createMemo, createSignal } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, untrack } from 'solid-js';
 
 import {
   PAGE,
@@ -100,6 +100,12 @@ export function createWorkspace(
   const [active, setActive] = createSignal<string | null>(restored.active ?? null);
   const [stageMode, setStageModeRaw] = createSignal<StageMode>(restored.stageMode ?? 'code');
   const [selected, setSelected] = createSignal<string[]>([]);
+  // The host resolves file versus directory and validates the direct TeX children.
+  createEffect(() => {
+    const base = root();
+    const selection = base ? (selected().at(-1) ?? active() ?? base) : null;
+    untrack(() => { void editor.loadPlan(selection); });
+  });
   const [renaming, setRenaming] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal<{ dir: string; kind: 'file' | 'dir' } | null>(null);
   const [dirty, setDirty] = createSignal<ReadonlySet<string>>(new Set<string>());
@@ -985,7 +991,7 @@ export function createWorkspace(
   /**
    * A toolchain is installed from a terminal, not from this window, so PATH can
    * go from "no xelatex" to "xelatex" while the app sits open. The build plan is
-   * asked once per project and cached, so without this the preview goes on
+   * refreshed on selection changes, so without this the preview goes on
    * reporting a toolchain that is now installed, and leaves Build disabled on a
    * machine where the command runs fine.
    *
@@ -994,7 +1000,7 @@ export function createWorkspace(
    * that pane happens to be showing.
    */
   const stopToolchainWatch = backend.onToolchainChange(() => {
-    const dir = root();
+    const dir = editor.buildTarget();
     if (dir) void editor.loadPlan(dir);
   });
 
@@ -1052,6 +1058,12 @@ export function createWorkspace(
     if (!base || (change.dir !== base && !change.dir.startsWith(base === '/' ? '/' : `${base}/`))) return;
     const touched = joinPath(change.dir, change.name);
     const old = change.from ? joinPath(change.dir, change.from) : touched;
+    const target = editor.buildTarget();
+    if (target && change.kind !== 'changed' &&
+        (change.name.toLowerCase().endsWith('.tex') || change.from?.toLowerCase().endsWith('.tex') ||
+         target === touched || target.startsWith(`${touched}/`) || target === old || target.startsWith(`${old}/`))) {
+      void editor.loadPlan(target);
+    }
     for (const path of monitoredTabs()) {
       if (path === touched || path.startsWith(`${touched}/`) || path === old || path.startsWith(`${old}/`)) {
         void checkTab(path, true);
