@@ -155,7 +155,19 @@ export class DirCache {
   patchCreate(dir: string, name: string, kind: 'dir' | 'file'): void {
     const listing = this.listings.get(dir);
     if (!listing) return;
-    if (listing.entries.some((e) => e.name === name)) return;
+    const existing = listing.entries.find((e) => e.name === name);
+    if (existing) {
+      // Duplicate events are harmless, but a later event with a known type must
+      // be allowed to correct an earlier stale or ambiguous entry.
+      if (existing.kind !== kind) {
+        if (existing.kind === 'dir') listing.dirs = Math.max(0, listing.dirs - 1);
+        else listing.files = Math.max(0, listing.files - 1);
+        existing.kind = kind;
+        if (kind === 'dir') listing.dirs += 1;
+        else listing.files += 1;
+      }
+      return;
+    }
     listing.total += 1;
     if (kind === 'dir') listing.dirs += 1;
     else listing.files += 1;

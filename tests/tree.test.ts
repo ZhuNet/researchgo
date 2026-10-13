@@ -248,6 +248,15 @@ describe('DirCache', () => {
     expect(cache.stats().entries).toBe(4);
   });
 
+  it('同名创建事件可以纠正旧缓存中的文件类型且不重复计数', () => {
+    const cache = new DirCache();
+    cache.set('/r', [dirEntry('/r/item')]);
+    cache.patchCreate('/r', 'item', 'file');
+    expect(cache.get('/r')).toEqual([file('/r/item')]);
+    expect(cache.listing('/r')).toMatchObject({ total: 1, dirs: 0, files: 1 });
+    expect(cache.stats().entries).toBe(1);
+  });
+
   it('排序位置落在已取回范围之外时只增加 total', () => {
     // 前缀之外的行不能插进来：它是别人尚未请求的那一页的索引。
     const cache = new DirCache();
@@ -380,6 +389,20 @@ describe('RowIndex', () => {
     expect(index.indexOf('/r/nope')).toBe(-1);
   });
 
+  it('重建后 indexOf 不信任旧树形留下的行号', () => {
+    const cache = new DirCache();
+    const rows = new Map<string, Row>();
+    cache.set('/r', [dirEntry('/r/a'), file('/r/z')]);
+    cache.set('/r/a', [file('/r/a/child')]);
+    const expanded = new Set(['/r/a']);
+    const first = new RowIndex('/r', expanded, viewOf(cache), rows);
+    expect(first.rowAt(2)?.path).toBe('/r/z');
+    expect(first.indexOf('/r/z')).toBe(2);
+    cache.set('/r/a', []);
+    const second = new RowIndex('/r', expanded, viewOf(cache), rows);
+    expect(second.indexOf('/r/z')).toBe(1);
+  });
+
   it('未加载的子目录视为叶子（懒加载）', () => {
     const cache = new DirCache();
     cache.set('/r', [dirEntry('/r/lazy')]);
@@ -392,6 +415,15 @@ describe('RowIndex', () => {
     const { lookup } = build();
     const index = new RowIndex('/r', new Set(['/r/src']), lookup);
     expect(index.expandedDirs()).toEqual(['/r', '/r/src']);
+  });
+
+  it('已加载但为空的展开目录仍属于监听集合', () => {
+    const cache = new DirCache();
+    cache.set('/r', [dirEntry('/r/empty')]);
+    cache.set('/r/empty', []);
+    const index = new RowIndex('/r', new Set(['/r/empty']), viewOf(cache));
+    expect(index.length).toBe(1);
+    expect(index.expandedDirs()).toEqual(['/r', '/r/empty']);
   });
 
   it('百万行规模下索引本身很小', () => {
@@ -428,6 +460,28 @@ describe('RowIndex', () => {
     const second = new RowIndex('/r', new Set(['/r/a']), viewOf(cache), shared);
     expect(second.rowAt(0)).toBe(rowA); // 身份复用
     expect(rowA.expanded).toBe(true); // 状态最新
+  });
+
+  it('遍历巨大目录时共享行缓存保持有界', () => {
+    const cache = new DirCache({ maxDirs: 2, maxEntries: 60_000 });
+    cache.set('/r', files('/r', 50_100));
+    const shared = new Map<string, Row>();
+    const index = new RowIndex('/r', new Set(), viewOf(cache), shared);
+    for (let i = 0; i < index.length; i++) index.rowAt(i);
+    expect(shared.size).toBeLessThanOrEqual(50_000);
+    expect(index.rowAt(index.length - 1)?.path).toBe(cache.get('/r')!.at(-1)!.path);
+  });
+
+  it('has 只报告当前树中的行，不把历史缓存当成存在', () => {
+    const cache = new DirCache();
+    const rows = new Map<string, Row>();
+    cache.set('/r', [file('/r/gone')]);
+    const first = new RowIndex('/r', new Set(), viewOf(cache), rows);
+    first.rowAt(0);
+    expect(first.has('/r/gone')).toBe(true);
+    cache.set('/r', []);
+    const second = new RowIndex('/r', new Set(), viewOf(cache), rows);
+    expect(second.has('/r/gone')).toBe(false);
   });
 
   it('被淘汰的展开目录降级为 pending 单行，不会让行号错位', () => {

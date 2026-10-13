@@ -59,6 +59,13 @@ interface Span {
   branches: Branch[];
 }
 
+// Row objects are shared by successive RowIndex instances. The generation must
+// be shared too; otherwise every new instance starts at one and trusts positions
+// recorded against a different tree shape.
+let nextGeneration = 0;
+/** Enough for many screens, bounded so scrolling a million-entry tree is not a leak. */
+const MAX_ROW_CACHE = 50_000;
+
 /**
  * Flattens the expanded part of the tree lazily into one addressable row space.
  *
@@ -136,7 +143,7 @@ export class RowIndex {
   }
 
   private rebuild(): void {
-    this.generation += 1;
+    this.generation = ++nextGeneration;
     this.spans = [];
     this.spanByDir.clear();
     const view = this.lookup(this.root);
@@ -197,7 +204,7 @@ export class RowIndex {
         continue;
       }
       const view = this.lookup(entry.path);
-      if (!view || !view.entries.length) {
+      if (!view) {
         f.rows += 1;
         f.i += 1;
         continue;
@@ -271,6 +278,7 @@ export class RowIndex {
         index,
       };
       this.byPath.set(path, row);
+      this.trimRows();
     }
     row.index = index;
     row.gen = this.generation;
@@ -281,6 +289,15 @@ export class RowIndex {
     row.more = false;
     row.moreCount = undefined;
     return row;
+  }
+
+  private trimRows(): void {
+    if (this.byPath.size <= MAX_ROW_CACHE) return;
+    // Removing the map reference does not mutate a Row already held by Solid.
+    // The oldest materialised rows are far outside any realistic viewport and
+    // can be recreated if the reader scrolls back to them.
+    const oldest = this.byPath.keys().next().value;
+    if (oldest !== undefined) this.byPath.delete(oldest);
   }
 
   private moreRow(span: Span, index: number): Row {
@@ -296,6 +313,8 @@ export class RowIndex {
         more: true,
       };
       this.byMore.set(span.dir, row);
+      const oldest = this.byMore.keys().next().value;
+      if (this.byMore.size > MAX_ROW_CACHE && oldest !== undefined) this.byMore.delete(oldest);
     }
     row.index = index;
     row.gen = this.generation;
@@ -337,7 +356,8 @@ export class RowIndex {
   }
 
   has(path: string): boolean {
-    return this.byPath.has(path);
+    const row = this.byPath.get(path);
+    return row?.gen === this.generation;
   }
 }
 

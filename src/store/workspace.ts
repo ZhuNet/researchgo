@@ -830,6 +830,7 @@ export function createWorkspace(
     batch(() => {
       remap(path, target);
       cache.delete(path);
+      forgetRows(path);
     });
     await refresh(parent);
     setActive(target);
@@ -845,6 +846,7 @@ export function createWorkspace(
     batch(() => {
       for (const p of doomed) {
         cache.delete(p);
+        forgetRows(p);
       }
       setMissingTabs((prev) => {
         const next = new Set(prev);
@@ -881,6 +883,7 @@ export function createWorkspace(
     batch(() => {
       remap(from, target);
       cache.delete(from);
+      forgetRows(from);
     });
     // A move crosses directories, and a watcher only reports the destination, so
     // the source listing has to be told explicitly.
@@ -929,6 +932,15 @@ export function createWorkspace(
     setDirty((prev) => new Set([...prev].map(apply)));
     setSelected((prev) => prev.map(apply));
     syncWatch();
+  }
+
+  function forgetRows(path: string): void {
+    for (const key of rowCache.keys()) {
+      if (key === path || key.startsWith(`${path}/`)) rowCache.delete(key);
+    }
+    for (const key of moreCache.keys()) {
+      if (key === path || key.startsWith(`${path}/`)) moreCache.delete(key);
+    }
   }
 
   async function refresh(dir: string): Promise<void> {
