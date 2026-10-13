@@ -10,8 +10,9 @@
 //! * Tools run one at a time. Parallel tool calls are a large win in wall-clock
 //!   and a large loss in a UI where every result mutates the file tree; the
 //!   sequential version is what a reader can follow.
-//! * Every frame leaves through one emitter, so ordering is whatever the loop
-//!   did, not whatever the transport did.
+//! * Every frame leaves through one emitter, and so does every record on its
+//!   way to the log: the order is whatever the loop did, not whatever the
+//!   transport or the filesystem did.
 //! * The turn ends on a budget as well as on the model. A model that has
 //!   decided to keep editing is indistinguishable from one that is stuck, and
 //!   the difference is only visible in the count.
@@ -27,10 +28,11 @@ use tauri::{AppHandle, Emitter};
 
 use super::config::{secret, ResolvedModel};
 use super::frame::{Frame, PatchOp, TurnReason, STREAM};
+use super::log::{Recorder, Store, ToolRecord};
 use super::tools;
 
 /// Ceiling on model round-trips per turn. Generous for real work, and finite so
-/// a loop the model cannot exit costs a turn rather than the session.
+/// a loop the model cannot exit costs a turn rather than the conversation.
 const MAX_STEPS: usize = 48;
 /// Longer than any reasonable first token, short enough that a dead endpoint
 /// reports itself instead of leaving the panel spinning.
@@ -40,40 +42,45 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 // that every tool starts inside the folder currently open in the app.
 const WORKSPACE_INSTRUCTIONS: &str = "Your working directory is the currently open project folder. All file paths in read, write, edit, grep and glob, and paths in shell commands, are relative to that folder. For a file directly inside the open folder use its filename (e.g. `1.txt`), not the folder name followed by the filename (e.g. `paper/1.txt` when the open folder is `paper`). Use glob to discover paths when unsure. Do not guess or prepend the open folder's name.";
 
-/// The transcript, kept across turns so the model remembers what it did.
-#[derive(Clone)]
-pub struct Session {
-  pub id: String,
+/// The conversation, kept across turns so the model remembers what it did.
+///
+/// There is no session and no session id: one panel, one transcript, and the
+/// log beside it. What a session id used to identify — which conversation these
+/// records belong to — is the answer to a question nobody asks once there is
+/// only ever one conversation, and carrying it meant the renderer had to be
+/// told about it and had to keep track of it.
+pub struct Conversation {
   pub root: PathBuf,
   pub model: String,
   messages: Vec<Value>,
+  /// Opened on the first turn rather than in `new`, because where the log lives
+  /// is only known once there is an app to ask.
+  log: Option<Recorder>,
 }
 
-impl Session {
+impl Conversation {
   pub fn new(root: PathBuf, model: String) -> Self {
     Self {
-      // A sortable-ish id the way the renderer expects to see one: short, and
-      // distinguishable between sessions in a transcript.
-      id: format!("{:x}", now_millis()),
       root,
       model,
       messages: Vec::new(),
+      log: None,
     }
   }
 
   /// The one method that runs a whole turn.
   ///
-  /// Emits `session.start` if this is the first thing said, then loops until the
-  /// model answers without asking for a tool or the step budget runs out. The
-  /// transcript is appended to as it goes rather than assembled at the end, so
-  /// a turn that is aborted mid-way leaves usable context behind.
+  /// Loops until the model answers without asking for a tool or the step budget
+  /// runs out. The transcript is appended to as it goes rather than assembled
+  /// at the end, so a turn that is aborted mid-way leaves usable context
+  /// behind.
   pub async fn turn(&mut self, app: &AppHandle, prompt: &str, cancel: &AtomicBool, root: PathBuf) {
-    // The workspace can change under a session that was kept alive across a
-    // folder switch. Re-pointing here rather than at construction keeps a
+    // The workspace can change under a conversation that was kept alive across
+    // a folder switch. Re-pointing here rather than at construction keeps a
     // conversation that is still relevant while still refusing to hand the new
     // folder the old folder's history.
     if self.root != root {
-      *self = Session::new(root, String::new());
+      *self = Conversation::new(root, String::new());
     }
 
     // Read once per turn, not per request: switching models in Settings takes
@@ -94,22 +101,16 @@ impl Session {
       return;
     }
 
-    if self.messages.is_empty() {
-      emit(
-        app,
-        Frame::SessionStart {
-          session_id: self.id.clone(),
-          model: self.model.clone(),
-          cwd: self.root.display().to_string(),
-          tools: tool_names(),
-        },
-      );
-    }
+    self.open_log(app);
+    self.begin_turn();
 
-    self.messages.push(json!({
-      "role": "user",
-      "content": prompt,
-    }));
+    self.record(
+      &json!({
+        "role": "user",
+        "content": prompt,
+      }),
+      None,
+    );
 
     let mut step = 0usize;
     let reason = loop {
@@ -165,7 +166,7 @@ impl Session {
       }
       emit(app, Frame::AssistantDone { id: id.clone() });
 
-      self.messages.push(reply.message.clone());
+      self.record(&reply.message, None);
 
       if reply.tool_calls.is_empty() {
         emit(
@@ -183,12 +184,22 @@ impl Session {
         if cancel.load(Ordering::Relaxed) {
           break;
         }
-        let result = run_one_tool(app, &self.root, &id, &call).await;
-        self.messages.push(json!({
-          "role": "tool",
-          "tool_call_id": call.id,
-          "content": result,
-        }));
+        let outcome = run_one_tool(app, &self.root, &id, &call).await;
+        self.record(
+          &json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": outcome.content,
+          }),
+          Some(ToolRecord {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            input: outcome.input,
+            ok: outcome.ok,
+            summary: outcome.summary,
+            ms: outcome.elapsed,
+          }),
+        );
       }
 
       if cancel.load(Ordering::Relaxed) {
@@ -196,11 +207,56 @@ impl Session {
       }
     };
 
+    // The turn is over, so the records it could not write get their one retry
+    // as a whole — before `turn.end`, so that frame still means what it says.
+    self.end_turn();
     finish(app, reason);
   }
 
+  /// Drops the transcript. The log is not cleared with it: a turn the user
+  /// cleared from the panel still happened, and the log is a record of what
+  /// happened rather than of what is on screen.
   pub fn clear(&mut self) {
     self.messages.clear();
+  }
+
+  /// Opens the log the first time a turn needs it.
+  fn open_log(&mut self, app: &AppHandle) {
+    if self.log.is_some() {
+      return;
+    }
+    match Store::open(app) {
+      Ok(store) => self.log = Some(Recorder::new(store)),
+      // A log that cannot be opened is not a reason to refuse the turn: the
+      // model still has the transcript to read, and the warning says what is
+      // missing from disk.
+      Err(err) => log::warn!("[agent] no interaction log: {err}"),
+    }
+  }
+
+  fn begin_turn(&mut self) {
+    if let Some(rec) = self.log.as_mut() {
+      rec.begin_turn();
+    }
+  }
+
+  fn end_turn(&mut self) {
+    if let Some(rec) = self.log.as_mut() {
+      rec.end_turn();
+    }
+  }
+
+  /// One interaction: the transcript the model reads next, and the log, in the
+  /// same order.
+  ///
+  /// Both from one call, because a record the model saw but the log did not —
+  /// or the reverse — is a conversation that cannot be read back from disk.
+  fn record(&mut self, message: &Value, tool: Option<ToolRecord>) {
+    let model = self.model.clone();
+    self.messages.push(message.clone());
+    if let Some(rec) = self.log.as_mut() {
+      rec.push(model, message.clone(), tool);
+    }
   }
 }
 
@@ -209,35 +265,28 @@ fn finish(app: &AppHandle, reason: TurnReason) {
   emit(app, Frame::TurnEnd { reason });
 }
 
-fn tool_names() -> Vec<String> {
-  vec![
-    "read".into(),
-    "write".into(),
-    "edit".into(),
-    "bash".into(),
-    "glob".into(),
-    "grep".into(),
-  ]
-}
-
-/// Runs one tool call and emits its frames. Always returns text for the model.
+/// Runs one tool call and emits its frames. Always returns a result for the
+/// model.
 ///
 /// An error is not an exception here: a tool that failed is information the
 /// model needs in order to try something else, and a turn that dies on a failed
 /// read is a turn that never gets to the second attempt.
-async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCall) -> String {
+async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCall) -> ToolOutcome {
+  // Parsed once: the frame and the log record both want the arguments as JSON,
+  // while the transcript has them as the text the endpoint streamed.
+  let input = parse_args(&call.arguments);
   emit(
     app,
     Frame::ToolStart {
       id: msg_id.to_string(),
       call_id: call.id.clone(),
       name: call.name.clone(),
-      input: parse_args(&call.arguments),
+      input: input.clone(),
     },
   );
 
   let started = Instant::now();
-  let outcome = tools::run(root, &call.name, &parse_args(&call.arguments), &call.id).await;
+  let outcome = tools::run(root, &call.name, &input, &call.id).await;
   log::info!("[agent] tool `{}` finished in {:?}", call.name, started.elapsed());
 
   let (ok, content, summary, patch) = match outcome {
@@ -293,7 +342,28 @@ async fn run_one_tool(app: &AppHandle, root: &Path, msg_id: &str, call: &ToolCal
     );
   }
 
-  content.to_string()
+  ToolOutcome {
+    content,
+    input,
+    ok,
+    summary,
+    elapsed,
+  }
+}
+
+/// What one tool call produced: the text the model gets, and what the panel
+/// showed for it.
+///
+/// Both halves, because they are two different readings of one event — the
+/// result the model reads is a file's contents, the row the user reads is
+/// "Read · 1 line · 4ms" — and the log is the only place they can be kept
+/// together.
+struct ToolOutcome {
+  content: String,
+  input: Value,
+  ok: bool,
+  summary: String,
+  elapsed: u64,
 }
 
 pub struct ToolCall {
@@ -543,20 +613,12 @@ fn emit(app: &AppHandle, frame: Frame) {
   }
 }
 
-fn now_millis() -> u128 {
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .map(|d| d.as_millis())
-    .unwrap_or(0)
-}
-
-/// Live agent state: the transcript plus the flag that stops it.
-/// Live agent state: the transcript plus the flag that stops it.
+/// Live agent state: the conversation plus the flag that stops it.
 ///
-/// The session lives on the app rather than inside a spawned task so a second
-/// prompt can find the first and cancel it. Two turns writing the same
+/// The conversation lives on the app rather than inside a spawned task so a
+/// second prompt can find the first and cancel it. Two turns writing the same
 /// transcript would interleave their tool calls into a history the model then
-/// reads as one conversation - a session that makes sense in no order at all.
+/// reads as one conversation - a thread that makes sense in no order at all.
 ///
 /// A `tokio` mutex, not `std::sync::Mutex`: the transcript is held across
 /// awaits while the model streams, and a blocking lock across an await point
@@ -567,7 +629,7 @@ fn now_millis() -> u128 {
 /// task would be one the command can no longer set, which is an abort button
 /// that does nothing.
 pub struct AgentState {
-  pub(crate) session: tokio::sync::Mutex<Session>,
+  pub(crate) conversation: tokio::sync::Mutex<Conversation>,
   /// Set by `agent_abort`, checked by the loop at every point where stopping is
   /// safe. Not a kill: the turn unwinds, so the transcript keeps the work it did
   /// and the next prompt has context to continue from.
@@ -577,8 +639,8 @@ pub struct AgentState {
 impl AgentState {
   pub fn new() -> Self {
     Self {
-      // A placeholder root; `prepare` installs the real one on first use.
-      session: tokio::sync::Mutex::new(Session::new(
+      // A placeholder root; the first turn installs the real one.
+      conversation: tokio::sync::Mutex::new(Conversation::new(
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         String::new(),
       )),

@@ -1,5 +1,4 @@
 export type RawEvent =
-  | { type: 'session.start'; session_id: string; model: string; cwd: string; tools: string[] }
   | { type: 'assistant.message'; id: string; role: 'assistant'; text: string }
   | { type: 'assistant.delta'; id: string; text: string }
   | { type: 'assistant.done'; id: string }
@@ -12,7 +11,6 @@ export type RawEvent =
   | { type: 'error'; message: string };
 
 export type UiEvent =
-  | { kind: 'session'; sessionId: string; model: string; cwd: string; tools: string[] }
   | { kind: 'text.start'; id: string }
   | { kind: 'text.delta'; id: string; text: string }
   | { kind: 'text.end'; id: string }
@@ -32,16 +30,6 @@ export function translate(line: string): UiEvent[] {
     return [{ kind: 'error', message: `malformed jsonl: ${line.slice(0, 120)}` }];
   }
   switch (raw.type) {
-    case 'session.start':
-      return [
-        {
-          kind: 'session',
-          sessionId: raw.session_id,
-          model: raw.model,
-          cwd: raw.cwd,
-          tools: raw.tools ?? [],
-        },
-      ];
     case 'assistant.message':
       return [
         { kind: 'text.start', id: raw.id },

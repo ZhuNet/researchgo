@@ -1,7 +1,7 @@
 import { createEffect, createResource, on, onCleanup, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
-import { copyText, openMenu, setSettingsOpen, settingsOpen, toast } from '../../store/ui';
+import { openMenu, setSettingsOpen, settingsOpen, toast } from '../../store/ui';
 import { agentApi, onLlmConfigChange } from '../../lib/agent';
 import type { Agent } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
@@ -64,7 +64,7 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
         <div class="agent__actions">
           <button
             class="icon-btn"
-            title="Session options"
+            title="Agent options"
             onClick={(e) => {
               // Re-read on the way in: a model may have been added or removed
               // since the panel last looked.
@@ -73,16 +73,24 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
                 e.clientX,
                 e.clientY,
                 [
-                  { label: 'Export transcript (jsonl)', run: () => toast('info', 'Export queued', 'researchgo.session.jsonl') },
-                  { label: 'Copy session id', run: () => void copyText(props.agent.session().id, 'Session id copied') },
+                  // Placeholders for now: the log is on disk either way, but
+                  // neither of these moves a byte yet.
+                  {
+                    label: 'Import transcript',
+                    run: () => toast('info', 'Import', 'a jsonl file back into the log'),
+                  },
+                  {
+                    label: 'Export transcript (jsonl)',
+                    run: () => toast('info', 'Export', 'the interaction log as one jsonl file'),
+                  },
                   { separator: true, label: '' },
                   { label: 'Settings…', run: () => setSettingsOpen(true) },
                   {
-                    label: 'Clear session',
+                    label: 'Clear thread',
                     danger: true,
                     run: () => {
                       props.agent.clear();
-                      toast('info', 'Session cleared', 'the next prompt starts a fresh transcript');
+                      toast('info', 'Thread cleared', 'the next prompt starts a fresh transcript');
                     },
                   },
                 ],

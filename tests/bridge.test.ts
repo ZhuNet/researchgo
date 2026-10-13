@@ -8,31 +8,6 @@ const one = (line: unknown): UiEvent => {
   return events[0];
 };
 
-describe('translate: 会话', () => {
-  it('session.start 的 snake_case 字段映射成 camelCase', () => {
-    expect(
-      one({
-        type: 'session.start',
-        session_id: 'abc',
-        model: 'claude-sonnet-4.6',
-        cwd: '~/researchgo',
-        tools: ['Shell', 'Read'],
-      }),
-    ).toEqual({
-      kind: 'session',
-      sessionId: 'abc',
-      model: 'claude-sonnet-4.6',
-      cwd: '~/researchgo',
-      tools: ['Shell', 'Read'],
-    });
-  });
-
-  it('tools 缺失时降级为空数组而不是崩', () => {
-    const ev = one({ type: 'session.start', session_id: 'x', model: 'm', cwd: '/' });
-    expect(ev).toMatchObject({ tools: [] });
-  });
-});
-
 describe('translate: 文本流', () => {
   it('assistant.message 展开为 start/delta/end 三帧', () => {
     const events = translate(
@@ -131,18 +106,25 @@ describe('translate: 容错', () => {
     const ev = one(JSON.stringify({ id: 'x' }));
     expect(ev.kind).toBe('error');
   });
+
+  it('被删掉的会话帧现在是响亮的协议漂移', () => {
+    // 后端已经没有会话这个概念了，`session.start` 也就不存在了。它要是还从
+    // 哪条路径发出来，这里必须是看得见的错误，而不是被静默吞掉的一帧。
+    const ev = one(JSON.stringify({ type: 'session.start', session_id: 's' }));
+    expect(ev.kind).toBe('error');
+    expect(ev).toMatchObject({ message: expect.stringContaining('session.start') });
+  });
 });
 
 describe('translate: 一行一帧的线协议假设', () => {
   it('多行 JSONL 逐行独立解析', () => {
     const stream = [
-      JSON.stringify({ type: 'session.start', session_id: 's', model: 'm', cwd: '/', tools: [] }),
       JSON.stringify({ type: 'assistant.delta', id: 'a', text: 'he' }),
       JSON.stringify({ type: 'assistant.delta', id: 'a', text: 'llo' }),
       JSON.stringify({ type: 'turn.end', reason: 'stop' }),
     ].join('\n');
     const events = stream.split('\n').flatMap((line) => translate(line));
-    expect(events.map((e) => e.kind)).toEqual(['session', 'text.delta', 'text.delta', 'turn.end']);
+    expect(events.map((e) => e.kind)).toEqual(['text.delta', 'text.delta', 'turn.end']);
     const text = events
       .filter((e) => e.kind === 'text.delta')
       .map((e) => (e as { text: string }).text)

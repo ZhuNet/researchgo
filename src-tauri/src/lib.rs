@@ -32,7 +32,6 @@ pub fn run() {
       agent::agent_send,
       agent::agent_abort,
       agent::agent_clear,
-      agent::agent_info,
       content::file_info,
       content::build_project,
       content::build_plan,

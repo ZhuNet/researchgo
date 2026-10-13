@@ -152,13 +152,22 @@ fn key_hint(key: &str) -> String {
   format!("{head}…{tail}")
 }
 
-fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+/// The directory the app keeps its own state in, created if it is not there.
+///
+/// `llm.json` lives here, and so does everything else the app would rather not
+/// lose: the interaction log reads this rather than deriving the path again,
+/// so the two cannot drift apart by being spelled two different ways.
+pub fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
   let dir = app
     .path()
     .app_config_dir()
     .map_err(|e| format!("no config directory available: {e}"))?;
   fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-  Ok(dir.join("llm.json"))
+  Ok(dir)
+}
+
+fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(config_dir(app)?.join("llm.json"))
 }
 
 /// The event the host emits when `llm.json` changes on disk.

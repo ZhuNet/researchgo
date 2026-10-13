@@ -3,11 +3,18 @@
 //! Everything here runs on the host. The renderer's CSP has no outbound
 //! `connect-src`, so it could not call a model even if it wanted to, and the
 //! API key should not sit anywhere the webview can read. The frontend sends a
-//! prompt, receives JSONL frames on one event, and renders them.
+//! prompt, receives JSONL frames on one event, and renders them; the host keeps
+//! the transcript and writes every interaction to the log beside `llm.json`.
+//!
+//! There is no session. One panel is one conversation, so there is nothing for
+//! an id to identify, and the id used to have to travel out to the renderer,
+//! be stored there, and be handed back to say which conversation a frame
+//! belonged to — all of it naming a distinction that is not there any more.
 
 pub mod agent_loop;
 pub mod config;
 pub mod frame;
+pub mod log;
 pub mod tools;
 
 use std::path::PathBuf;
@@ -60,7 +67,7 @@ pub async fn agent_send(
   // the lock is free, the old turn has passed its last check and cannot take
   // it again.
   {
-    let _held = tokio::time::timeout(HANDOFF_TIMEOUT, state.session.lock())
+    let _held = tokio::time::timeout(HANDOFF_TIMEOUT, state.conversation.lock())
       .await
       .map_err(|_| {
         "the previous turn did not stop; press stop again or wait for it to finish".to_string()
@@ -79,8 +86,8 @@ pub async fn agent_send(
     // at nothing.
     let handle = app.clone();
     let shared = handle.state::<AgentState>();
-    let mut session = shared.session.lock().await;
-    session.turn(&handle, &prompt, &cancel, root).await;
+    let mut conversation = shared.conversation.lock().await;
+    conversation.turn(&handle, &prompt, &cancel, root).await;
   });
 
   Ok(())
@@ -93,29 +100,11 @@ pub fn agent_abort(state: State<'_, AgentState>) {
   state.cancel.store(true, Ordering::Relaxed);
 }
 
-/// Drops the transcript. The next prompt starts a fresh session.
+/// Drops the transcript the model reads. The log is untouched: a turn the user
+/// cleared from the panel still happened, and the log is a record of what
+/// happened rather than of what is on screen.
 #[tauri::command]
 pub async fn agent_clear(state: State<'_, AgentState>) -> Result<(), String> {
-  state.session.lock().await.clear();
+  state.conversation.lock().await.clear();
   Ok(())
-}
-
-/// The session id, model and workspace, for a panel that reopened before any
-/// prompt had been sent.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentInfo {
-  pub id: String,
-  pub model: String,
-  pub root: String,
-}
-
-#[tauri::command]
-pub async fn agent_info(state: State<'_, AgentState>) -> Result<AgentInfo, String> {
-  let session = state.session.lock().await;
-  Ok(AgentInfo {
-    id: session.id.clone(),
-    model: session.model.clone(),
-    root: session.root.display().to_string(),
-  })
 }

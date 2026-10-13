@@ -5,6 +5,10 @@
  * the host to run a turn and receives the same JSONL frames the renderer was
  * written against before any of this existed — `translate()` in `bridge.ts` is
  * the boundary, and it has not changed.
+ *
+ * There is no session on this side either. The host keeps the conversation and
+ * writes every interaction to its log; the renderer shows what arrives, in the
+ * order it arrives.
  */
 
 import { translate, type UiEvent } from './bridge';
@@ -33,12 +37,6 @@ export interface LlmConfig {
 
 export interface ConfigView {
   configs: LlmView[];
-}
-
-export interface AgentInfo {
-  id: string;
-  model: string;
-  root: string;
 }
 
 /** The event the host emits every JSONL frame on. */
@@ -86,15 +84,17 @@ export const agentApi = {
   setActive: (name: string, model: string) =>
     invoke<ConfigView>('set_active_llm_config', { name, model }),
 
-  info: () => invoke<AgentInfo>('agent_info'),
-
   /** Starts a turn. Resolves once the host has accepted it, not when it ends. */
   send: (prompt: string, root: string) => invoke<void>('agent_send', { prompt, root }),
 
   /** Asks the running turn to stop. The transcript survives. */
   abort: () => invoke<void>('agent_abort'),
 
-  /** Drops the transcript. The next prompt starts a fresh session. */
+  /**
+   * Drops the transcript the model reads.
+   *
+   * The host's log is untouched: a turn cleared from the panel still happened.
+   */
   clear: () => invoke<void>('agent_clear'),
 };
 

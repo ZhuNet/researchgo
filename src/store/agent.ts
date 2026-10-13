@@ -49,12 +49,6 @@ export function createAgent() {
   const [items, setItems] = createSignal<Item[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [usage, setUsage] = createSignal<Usage>({ input: 0, output: 0, cacheRead: 0 });
-  const [session, setSession] = createSignal<{
-    id: string;
-    model: string;
-    cwd: string;
-    tools: string[];
-  }>({ id: '—', model: '', cwd: '', tools: Object.keys(TOOL_META) });
   const [elapsed, setElapsed] = createSignal(0);
 
   let startedAt = 0;
@@ -64,13 +58,14 @@ export function createAgent() {
   const textIds = new Map<string, string>();
   const toolIds = new Map<string, string>();
 
+  // The host numbers its own frames per turn (`a1`, `a2`, …) and reuses those
+  // numbers on the next one, so the turn they belong to is part of the key
+  // here. Without it a second turn's answer appends to the first turn's
+  // message and its cards land on rows that are already on screen.
   const frameKey = (id: string) => `${activeTurn}:${id}`;
 
   function apply(ev: UiEvent) {
     switch (ev.kind) {
-      case 'session':
-        setSession({ id: ev.sessionId, model: ev.model, cwd: ev.cwd, tools: ev.tools });
-        break;
       case 'text.start':
         {
           const key = frameKey(ev.id);
@@ -245,7 +240,8 @@ export function createAgent() {
     setElapsed(Math.round(performance.now() - startedAt));
   }
 
-  /** Drops the thread on both sides: the transcript the host keeps, and this one. */
+  /** Drops the thread on screen and the transcript behind it. The host's log of
+   * what happened is not part of either. */
   async function clear() {
     await agentApi.clear().catch(() => undefined);
     stopTimer();
@@ -271,7 +267,6 @@ export function createAgent() {
     items,
     busy,
     usage,
-    session,
     elapsed,
     send,
     abort,

@@ -50,7 +50,6 @@ describe('agent store: 轮次身份', () => {
     const agent = createAgent();
 
     await turn(agent, 'first', [
-      { type: 'session.start', session_id: 's', model: 'm', cwd: '/root', tools: ['read'] },
       { type: 'assistant.delta', id: 'a1', text: '你好' },
       { type: 'assistant.done', id: 'a1' },
       { type: 'tool.start', id: 'a1', call_id: 'call_0', name: 'read', input: { path: 'x' } },

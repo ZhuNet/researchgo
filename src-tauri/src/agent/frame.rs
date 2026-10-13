@@ -29,24 +29,17 @@ pub enum TurnReason {
   Error,
 }
 
-/// The tag vocabulary is dot-case (`session.start`, `tool.end`) because that
-/// is what `bridge.ts` parses — the renderer was written against this wire
-/// format, not the other way around. A broad `rename_all = "snake_case"`
-/// here once turned `TurnEnd` into `turn_end`, which the renderer silently
-/// dropped, and every turn looked like a spinner that never stopped while
-/// the backend had finished long before. The per-variant renames are
-/// deliberate: a tag is a contract, and contracts are spelled out, not
-/// derived by a case convention that happens to be wrong for nine of them.
+/// The tag vocabulary is dot-case (`tool.end`, `turn.end`) because that is what
+/// `bridge.ts` parses — the renderer was written against this wire format, not
+/// the other way around. A broad `rename_all = "snake_case"` here once turned
+/// `TurnEnd` into `turn_end`, which the renderer silently dropped, and every
+/// turn looked like a spinner that never stopped while the backend had finished
+/// long before. The per-variant renames are deliberate: a tag is a contract,
+/// and contracts are spelled out, not derived by a case convention that happens
+/// to be wrong for most of them.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum Frame {
-  #[serde(rename = "session.start")]
-  SessionStart {
-    session_id: String,
-    model: String,
-    cwd: String,
-    tools: Vec<String>,
-  },
   #[serde(rename = "assistant.message")]
   AssistantMessage {
     id: String,
@@ -106,11 +99,11 @@ pub enum Frame {
 impl Frame {
   /// Frames the renderer must see in order.
   ///
-  /// `usage` is the exception: it reports the running total for the session
-  /// rather than something that happened at a point in the transcript, so a late
-  /// arrival corrects the number instead of corrupting the ordering. The
-  /// renderer treats the stream as append-only and never assumes ordering
-  /// beyond what a single `id` implies, which is what makes that safe.
+  /// `usage` is the exception: it reports a running total rather than something
+  /// that happened at a point in the transcript, so a late arrival corrects the
+  /// number instead of corrupting the ordering. The renderer treats the stream
+  /// as append-only and never assumes ordering beyond what a single `id`
+  /// implies, which is what makes that safe.
   pub fn is_ordered(&self) -> bool {
     !matches!(self, Frame::Usage { .. })
   }
@@ -133,15 +126,6 @@ mod tests {
   #[test]
   fn frame_tags_are_the_dot_case_the_renderer_parses() {
     let cases: Vec<(Frame, &str)> = vec![
-      (
-        Frame::SessionStart {
-          session_id: "s".into(),
-          model: "m".into(),
-          cwd: "/".into(),
-          tools: vec![],
-        },
-        "session.start",
-      ),
       (
         Frame::AssistantMessage {
           id: "m".into(),

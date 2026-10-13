@@ -1,13 +1,13 @@
 //! The tools the model can call, and the boundary they run inside.
 //!
-//! Every path a tool touches is resolved against the session root first. A
-//! model asked to edit `../../.ssh/authorized_keys` will try, because the
-//! instruction that stops it is prose in a prompt and prose loses to a
+//! Every path a tool touches is resolved against the conversation's root
+//! first. A model asked to edit `../../.ssh/authorized_keys` will try, because
+//! the instruction that stops it is prose in a prompt and prose loses to a
 //! plausible-sounding task. The check is here, in code, where it does not.
 //!
 //! Reads are bounded for the same reason the search panel bounds its walk: a
 //! tool that can read 4 GB into the context window is a tool that ends the
-//! session, and it usually does so by accident rather than by choice.
+//! turn, and it usually does so by accident rather than by choice.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -192,8 +192,9 @@ pub fn tool_defs() -> Vec<Value> {
 
 /// Runs one tool call.
 ///
-/// `root` is the session's workspace. `call_id` is echoed in every frame for the
-/// call so a late chunk cannot be attributed to the wrong tool.
+/// `root` is the workspace the conversation is running in. `call_id` is echoed
+/// in every frame for the call so a late chunk cannot be attributed to the
+/// wrong tool.
 pub async fn run(root: &Path, name: &str, args: &Value, call_id: &str) -> Result<ToolOutput, ToolError> {
   if matches!(name, "glob" | "grep") {
     let root = root.to_path_buf();
