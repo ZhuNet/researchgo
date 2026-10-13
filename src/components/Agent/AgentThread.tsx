@@ -174,7 +174,7 @@ function ThreadItem(props: {
       <Show when={props.item.kind === 'notice'}>
         <div class="notice" classList={{ 'notice--error': (props.item as any).tone === 'error' }}>
           <Icon name="alert" size={13} />
-          {(props.item as any).text}
+          <span class="notice__text">{(props.item as any).text}</span>
         </div>
       </Show>
     </>
