@@ -120,6 +120,10 @@ export function createEditor(
   const [buildState, setBuildState] = createSignal<
     { phase: 'idle' | 'running' | 'ok' | 'failed'; error: string | null } | null
   >(null);
+  // Published page changes only when a build finishes, never when one starts.
+  const [previewState, setPreviewState] = createSignal<
+    { page: 'pdf' | 'failed'; error: string | null } | null
+  >(null);
   const [buildOutput, setBuildOutput] = createSignal<string>('');
   const [buildCommand, setBuildCommand] = createSignal<string>('');
   const [buildDuration, setBuildDuration] = createSignal<number | null>(null);
@@ -152,6 +156,7 @@ export function createEditor(
     // published precheck result.
     setArtifact(null);
     setBuildState(null);
+    setPreviewState(null);
     setBuildOutput('');
     setBuildCommand('');
     setBuildDuration(null);
@@ -394,27 +399,28 @@ export function createEditor(
     if (buildState()?.phase === 'running') return null;
     const buildEpoch = epoch;
     setBuildState({ phase: 'running', error: null });
-    setBuildOutput('');
-    setBuildDuration(null);
     try {
       const outcome = await backend.buildProject(root);
       if (epoch !== buildEpoch) return null;
-      setBuildOutput(outcome.output);
-      setBuildCommand(outcome.command);
-      setBuildDuration(outcome.durationMs);
-      setBuildState({ phase: outcome.ok ? 'ok' : 'failed', error: null });
-      if (outcome.ok) {
-        // Only a build that actually succeeded puts something on screen. A PDF
-        // left over from an earlier compile is not the result of this one, and
-        // showing it next to a failed build would be a lie twice over.
-        setArtifact(outcome.artifact);
-      }
+      batch(() => {
+        setBuildOutput(outcome.output);
+        setBuildCommand(outcome.command);
+        setBuildDuration(outcome.durationMs);
+        setBuildState({ phase: outcome.ok ? 'ok' : 'failed', error: null });
+        if (outcome.ok) setArtifact(outcome.artifact);
+        setPreviewState({ page: outcome.ok ? 'pdf' : 'failed', error: null });
+      });
       return outcome;
     } catch (err) {
       if (epoch !== buildEpoch) return null;
       const message = String((err as Error)?.message ?? err);
-      setBuildOutput(message);
-      setBuildState({ phase: 'failed', error: message });
+      batch(() => {
+        setBuildOutput(message);
+        setBuildCommand('');
+        setBuildDuration(null);
+        setBuildState({ phase: 'failed', error: message });
+        setPreviewState({ page: 'failed', error: message });
+      });
       return null;
     }
   }
@@ -473,6 +479,7 @@ export function createEditor(
     stats,
     build,
     buildState,
+    previewState,
     buildOutput,
     buildCommand,
     buildDuration,

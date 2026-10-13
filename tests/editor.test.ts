@@ -405,6 +405,46 @@ describe('编译：结果与原因都在预览里', () => {
     });
   });
 
+  it('重试保留失败页和旧错误，完成后才发布新页面', async () => {
+    const fs = new FakeFs({ '/': [] });
+    const backend = fakeBackend(fs);
+    const editor = createEditor(backend);
+    const success = {
+      ok: true, command: 'xelatex', code: 0, output: 'done', durationMs: 10,
+      artifact: { path: '/main.pdf', absPath: '/a/main.pdf', size: 10, builtMs: 5 },
+    };
+    fs.buildResults.push(success);
+    await editor.build('/a');
+    expect(editor.previewState()?.page).toBe('pdf');
+    fs.buildThrows = 'original error';
+    await editor.build('/a');
+    const previous = editor.previewState();
+    expect(previous).toEqual({ page: 'failed', error: 'original error' });
+    expect(editor.artifact()).not.toBeNull();
+
+    const held = deferred<typeof success>();
+    backend.buildProject = () => held.promise;
+    const retry = editor.build('/a');
+    expect(editor.buildState()?.phase).toBe('running');
+    expect(editor.previewState()).toBe(previous);
+    expect(editor.buildOutput()).toBe('original error');
+    held.resolve(success);
+    await retry;
+    expect(editor.previewState()).toEqual({ page: 'pdf', error: null });
+    expect(editor.buildOutput()).toBe('done');
+
+    const failed = deferred<typeof success>();
+    backend.buildProject = () => failed.promise;
+    const rebuild = editor.build('/a');
+    expect(editor.previewState()?.page).toBe('pdf');
+    failed.resolve({ ...success, ok: false, code: 1, output: 'new error' });
+    await rebuild;
+    expect(editor.previewState()?.page).toBe('failed');
+    expect(editor.buildOutput()).toBe('new error');
+    editor.clearAll();
+    expect(editor.previewState()).toBeNull();
+  });
+
   it('每次成功编译都换上新的 artifact 对象：预览的重开靠它触发', async () => {
     await withEditor(async (editor, fs) => {
       const artifact = () => ({

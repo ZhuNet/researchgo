@@ -49,7 +49,7 @@ import type { BuildPlan } from '../../store/editor';
 export function PdfViewer(props: { ws: Workspace }) {
   const editor = () => props.ws.editor;
   const building = createMemo(() => editor().buildState()?.phase === 'running');
-  const state = createMemo(() => editor().buildState());
+  const preview = createMemo(() => editor().previewState());
   const plan = createMemo(() => editor().plan());
   const disabled = createMemo(() => building() || editor().planPending() ||
     !editor().buildTarget() || plan()?.buildable !== true);
@@ -416,7 +416,7 @@ export function PdfViewer(props: { ws: Workspace }) {
             </div>
           }
         >
-          <Match when={state()?.phase === 'failed'}>
+          <Match when={preview()?.page === 'failed'}>
             {/*
              * The whole pane, not a strip under it.
              *
@@ -449,14 +449,14 @@ export function PdfViewer(props: { ws: Workspace }) {
               </div>
               <div class="pdf__loghead">
                 <span class="truncate">{editor().buildCommand() || 'build'} failed</span>
-                <Show when={editor().buildState()?.error}>
-                  <span class="chip chip--warn">{editor().buildState()!.error}</span>
+                <Show when={preview()?.error}>
+                  <span class="chip chip--warn">{preview()!.error}</span>
                 </Show>
               </div>
               <pre class="pdf__logbody">{editor().buildOutput() || 'No output was captured.'}</pre>
             </div>
           </Match>
-          <Match when={editor().artifact()}>
+          <Match when={preview()?.page === 'pdf'}>
             <div class="pdf__host" ref={mount} />
             <Show when={loadError()}>
               <div class="pdf__empty">
