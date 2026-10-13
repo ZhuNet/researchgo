@@ -174,7 +174,12 @@ pub const CONFIG_CHANGE: &str = "llm:change";
 /// A `notify` watcher stops watching when dropped, so it has to live
 /// somewhere that outlives `init` — managed state is that somewhere, and it
 /// is exactly as long-lived as the app.
-struct ConfigWatch(Box<notify::RecommendedWatcher>);
+///
+/// The field is never read, and that is the point: owning it is the whole
+/// job. The leading underscore says so to the reader and to `dead_code`.
+struct ConfigWatch {
+  _watcher: Box<notify::RecommendedWatcher>,
+}
 
 /// Watches the directory that holds `llm.json`.
 ///
@@ -212,7 +217,9 @@ pub fn init(app: &AppHandle) {
   match watcher {
     Ok(mut watcher) => match watcher.watch(&dir, RecursiveMode::NonRecursive) {
       Ok(()) => {
-        app.manage(ConfigWatch(Box::new(watcher)));
+        app.manage(ConfigWatch {
+          _watcher: Box::new(watcher),
+        });
       }
       Err(err) => log::warn!("cannot watch {}: {}", dir.display(), err),
     },
