@@ -448,7 +448,10 @@ export function PdfViewer(props: { ws: Workspace }) {
                 </button>
               </div>
               <div class="pdf__loghead">
-                <span class="truncate">{editor().buildCommand() || 'build'} failed</span>
+                <h4>Build output</h4>
+                <Show when={editor().buildCommand()}>
+                  <code class="pdf__logcommand">{editor().buildCommand()}</code>
+                </Show>
                 <Show when={preview()?.error}>
                   <span class="chip chip--warn">{preview()!.error}</span>
                 </Show>
@@ -592,7 +595,7 @@ function PlanHint(props: { plan: BuildPlan | null }) {
         <dl class="pdf__plan">
           <div class="pdf__planrow">
             <dt>Command</dt>
-            <dd class="truncate" title={props.plan!.command ?? undefined}>
+            <dd title={props.plan!.command ?? undefined}>
               {props.plan!.command}
             </dd>
           </div>
@@ -605,7 +608,7 @@ function PlanHint(props: { plan: BuildPlan | null }) {
           <Show when={props.plan!.artifact}>
             <div class="pdf__planrow">
               <dt>Result</dt>
-              <dd class="truncate" title={props.plan!.artifact ?? undefined}>
+              <dd title={props.plan!.artifact ?? undefined}>
                 {props.plan!.artifact}
               </dd>
             </div>
