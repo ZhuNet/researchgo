@@ -72,7 +72,7 @@ impl WatchState {
     // through the app state, so no per-watcher registry is required.
     let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
       if let Ok(event) = res {
-        if let Some(change) = normalize(&event) {
+        for change in normalize_all(&event) {
           let state = handle.state::<WatchState>();
           if state.is_watched(&change.dir) {
             // The dir changed, so its cached pages describe a filesystem that no
@@ -106,7 +106,7 @@ impl WatchState {
       let want: HashSet<PathBuf> = wanted.iter().map(PathBuf::from).collect();
       let mut to_remove = Vec::new();
       dirs.retain(|d| {
-        let keep = want.contains(d);
+        let keep = want.contains(d) && d.is_dir();
         if !keep {
           to_remove.push(d.clone());
         }
@@ -159,7 +159,7 @@ fn is_dir_of(path: &Path) -> Option<bool> {
 
 fn change(dir: &Path, name: String, kind: ChangeKind) -> Option<Change> {
   Some(Change {
-    dir: dir.to_string_lossy().to_string(),
+    dir: dir.to_string_lossy().replace('\\', "/"),
     name,
     kind,
     is_dir: None,
@@ -194,6 +194,10 @@ fn normalize(event: &Event) -> Option<Change> {
   let kind = match event.kind {
     EventKind::Create(_) => ChangeKind::Created,
     EventKind::Remove(_) => ChangeKind::Removed,
+    EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::From)) => ChangeKind::Removed,
+    EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::To)) => ChangeKind::Created,
+    EventKind::Modify(notify::event::ModifyKind::Name(_)) => ChangeKind::Renamed,
+    EventKind::Access(_) => return None,
     _ => ChangeKind::Changed,
   };
   let mut out = change(dir, name, kind)?;
@@ -205,13 +209,29 @@ fn normalize(event: &Event) -> Option<Change> {
   Some(out)
 }
 
+fn normalize_all(event: &Event) -> Vec<Change> {
+  if matches!(event.kind, EventKind::Modify(notify::event::ModifyKind::Name(_)))
+    && event.paths.len() >= 2 && event.paths[0].parent() != event.paths[1].parent()
+  {
+    return event.paths.iter().take(2).enumerate().filter_map(|(i, path)| {
+      let mut out = change(path.parent()?, path.file_name()?.to_string_lossy().into_owned(),
+        if i == 0 { ChangeKind::Removed } else { ChangeKind::Created })?;
+      if i == 1 { out.is_dir = is_dir_of(path); }
+      Some(out)
+    }).collect();
+  }
+  normalize(event).into_iter().collect()
+}
+
 #[tauri::command]
 pub async fn sync_watch(app: tauri::AppHandle, dirs: Vec<String>) -> Result<Vec<String>, String> {
   // Off the UI thread: `watch()` waits for the watcher's event thread to
   // acknowledge, which takes as long as any in-flight event callback.
   tauri::async_runtime::spawn_blocking(move || {
     app.state::<WatchState>().sync(&dirs);
-    dirs
+    app.state::<WatchState>().dirs.lock()
+      .map(|dirs| dirs.iter().map(|path| path.to_string_lossy().replace('\\', "/")).collect())
+      .unwrap_or_default()
   })
   .await
   .map_err(|e| format!("sync_watch task failed: {e}"))
@@ -229,6 +249,27 @@ pub fn init(app: &mut tauri::App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn split_rename_events_update_both_listings() {
+    let dir = std::env::temp_dir();
+    let event = Event {
+      kind: EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::From)),
+      paths: vec![dir.join("old.rs")],
+      attrs: Default::default(),
+    };
+    assert_eq!(normalize(&event).unwrap().kind, ChangeKind::Removed);
+    let event = Event {
+      kind: EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::Both)),
+      paths: vec![dir.join("source/old.rs"), dir.join("dest/new.rs")],
+      attrs: Default::default(),
+    };
+    let changes = normalize_all(&event);
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].kind, ChangeKind::Removed);
+    assert_eq!(changes[1].kind, ChangeKind::Created);
+    assert!(!changes[0].dir.contains('\\'));
+  }
 
   #[test]
   fn a_created_event_carries_the_kind_the_row_sorts_by() {

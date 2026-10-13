@@ -156,6 +156,11 @@
   letter-spacing: -0.005em;
 }
 
+.tab--missing .tab__name {
+  color: var(--danger, #e05252);
+  text-decoration: line-through;
+}
+
 .tab__dirty {
   width: 6px;
   height: 6px;

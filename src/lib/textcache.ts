@@ -22,6 +22,8 @@ export interface TextCacheOptions {
   maxBytes: number;
   /** Files kept even when over budget, on top of the pinned ones. */
   maxEntries?: number;
+  /** Called only for budget eviction, not explicit deletion or replacement. */
+  onEvict?: (key: string) => void;
 }
 
 export const DEFAULT_TEXT_BUDGET = 48 * 1024 * 1024;
@@ -47,10 +49,12 @@ export class TextCache<T> {
   private seq = 0;
   private live = 0;
   private readonly pinned = new Set<string>();
+  private readonly onEvict?: (key: string) => void;
 
   constructor(options: TextCacheOptions) {
     this.maxBytes = Math.max(0, options.maxBytes);
     this.maxEntries = Math.max(1, options.maxEntries ?? 32);
+    this.onEvict = options.onEvict;
   }
 
   /** Bytes currently held. */
@@ -165,7 +169,7 @@ export class TextCache<T> {
         continue;
       }
       const doomed = this.queue.shift();
-      if (doomed) this.drop(doomed.key);
+      if (doomed && this.drop(doomed.key)) this.onEvict?.(doomed.key);
     }
   }
 

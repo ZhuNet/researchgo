@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { batch, createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import type * as Monaco from 'monaco-editor';
 
 import { Icon } from '../Icon';
@@ -32,6 +32,7 @@ function languageFor(path: string): string {
  */
 const models = new Map<string, Monaco.editor.ITextModel>();
 const views = new Map<string, Monaco.editor.ICodeEditorViewState>();
+const externalModels = new Set<Monaco.editor.ITextModel>();
 
 /**
  * Above this many characters the editor turns off the parts that cost the most per
@@ -46,9 +47,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   let editor: Monaco.editor.IStandaloneCodeEditor | undefined;
   let current = '';
   /** Set while this app writes to a model, so a write is not mistaken for an edit. */
-  let external = false;
-  /** True once the reader has typed in the current model. */
-  let touched = false;
   /** Whether the file on screen is big enough that the heavy options are off. */
   let large = false;
 
@@ -90,9 +88,11 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     if (!model) {
       model = monaco.editor.createModel(content, languageFor(path), monaco.Uri.file(path));
       model.onDidChangeContent(() => {
-        if (external) return;
-        touched = true;
-        markDirty(path);
+        if (externalModels.has(model!)) return;
+        batch(() => {
+          markDirty(path);
+          props.ws.editor.setContent(path, model!.getValue());
+        });
       });
       models.set(path, model);
     }
@@ -109,9 +109,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
    *
    * The two cases are separated on purpose. A different path is a different model,
    * and keeps whatever the reader left in the last one. The same path with different
-   * content is a change from outside — the file was edited on disk — and is applied
-   * only when nothing here is unsaved, because an external change is not a reason to
-   * throw away what someone is in the middle of typing.
+    * content is a change from outside. Disk content replaces even unsaved edits.
    */
   function adopt(path: string, content: string, loaded: boolean): void {
     if (!editor) return;
@@ -121,7 +119,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         if (saved) views.set(current, saved as Monaco.editor.ICodeEditorViewState);
       }
       current = path;
-      touched = false;
       editor.setModel(modelFor(path, content));
       const view = views.get(path);
       if (view) editor.restoreViewState(view);
@@ -131,16 +128,16 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       return;
     }
     const model = editor.getModel();
-    if (!model || touched) return;
+    if (!model) return;
     // The buffer is dropped before every re-read (save, external change), so for a
     // moment `content` is empty because the fresh copy is on its way, not because
     // the file is empty. Applying that empty string is what blanked and refilled
     // the editor — once per reload. Skip until the content is actually resident.
     if (!loaded && content === '') return;
     if (model.getValue() === content) return;
-    external = true;
+    externalModels.add(model);
     model.setValue(content);
-    external = false;
+    externalModels.delete(model);
     density(content.length);
     countLines();
   }
@@ -149,7 +146,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     if (!editor || !current) return;
     const value = editor.getValue();
     void props.ws.saveFile(current, value).then(() => {
-      touched = false;
       toast('ok', 'Saved', current);
     });
   }
@@ -225,10 +221,17 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   createEffect(() => {
     const open = new Set(props.ws.tabs());
     for (const [path, model] of models) {
-      if (open.has(path)) continue;
-      model.dispose();
-      models.delete(path);
-      views.delete(path);
+      const content = props.ws.editor.contentOf(path);
+      if (!open.has(path) || (content === undefined && path !== props.ws.active() && !props.ws.dirty().has(path))) {
+        if (editor?.getModel() === model) editor.setModel(null);
+        model.dispose();
+        models.delete(path);
+        if (!open.has(path)) views.delete(path);
+      } else if (content !== undefined && model.getValue() !== content) {
+        externalModels.add(model);
+        model.setValue(content);
+        externalModels.delete(model);
+      }
     }
   });
 

@@ -18,6 +18,12 @@ function withWs(
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 const paths = (ws: Workspace) => {
   const out: string[] = [];
   for (let i = 0; i < ws.rowCount(); i++) out.push(ws.rowAt(i)?.path ?? '?');
@@ -25,6 +31,42 @@ const paths = (ws: Workspace) => {
 };
 
 describe('打开文件夹', () => {
+  it('读盘途中关闭 tab，旧结果不会留下孤儿内容', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const held = deferred<string>();
+    const originalRead = backend.readFile;
+    backend.readFile = (path) => path === '/README.md' ? held.promise : originalRead(path);
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        const opening = ws.openFile('/README.md');
+        for (let i = 0; i < 10 && !ws.tabs().includes('/README.md'); i++) await flush();
+        expect(ws.tabs()).toContain('/README.md');
+        ws.closeTab('/README.md');
+        held.resolve('late text');
+        await opening;
+        expect(ws.tabs()).not.toContain('/README.md');
+        expect(ws.editor.contentOf('/README.md')).toBeUndefined();
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('二进制和超大文件没有字符串缓存，也不会误关 tab', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.binaryFiles.add('/README.md');
+      fs.oversized.add('/docs/guide.md');
+      await ws.openFile('/README.md');
+      await ws.openFile('/docs/guide.md');
+      expect(ws.tabs()).toEqual(['/README.md', '/docs/guide.md']);
+      expect(ws.isLoaded('/README.md')).toBe(false);
+      expect(ws.isLoaded('/docs/guide.md')).toBe(false);
+      expect(ws.editor.modeOf('/README.md')).toBe('binary');
+      expect(ws.editor.modeOf('/docs/guide.md')).toBe('oversized');
+    });
+  });
   it('openFolder 装载根目录并默认展开', async () => {
     await withWs(async (ws) => {
       await ws.openFolder('/');
@@ -231,13 +273,15 @@ describe('文件操作', () => {
     });
   });
 
-  it('删除文件会从树和 tab 中移除', async () => {
+  it('删除文件移除树行，但保留失效 tab 与内容', async () => {
     await withWs(async (ws) => {
       await ws.openFolder('/');
       await ws.openFile('/README.md');
       await ws.removeEntry('/README.md');
       expect(paths(ws)).not.toContain('/README.md');
-      expect(ws.tabs()).toHaveLength(0);
+      expect(ws.tabs()).toEqual(['/README.md']);
+      expect(ws.missingTabs().has('/README.md')).toBe(true);
+      expect(ws.contentOf('/README.md')).toBe('placeholder\n');
     });
   });
 
@@ -342,6 +386,67 @@ describe('拖入文件', () => {
 });
 
 describe('磁盘同步', () => {
+  it('目录列表不在缓存中时，活动 tab 仍同步 dirty 内容', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/docs/guide.md');
+      ws.editor.setContent('/docs/guide.md', 'local edits');
+      ws.setDirty(new Set(['/docs/guide.md']));
+      fs.files.set('/docs/guide.md', 'disk wins');
+      fs.emit({ dir: '/docs', name: 'guide.md', kind: 'changed' });
+      await flush();
+      expect(ws.contentOf('/docs/guide.md')).toBe('disk wins');
+      expect(ws.dirty().has('/docs/guide.md')).toBe(false);
+    });
+  });
+
+  it('外部重命名保留原路径失效 tab，保存恢复它', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      fs.rename('/README.md', '/renamed.md');
+      fs.emit({ dir: '/', name: 'renamed.md', from: 'README.md', kind: 'renamed', isDir: false });
+      await flush();
+      expect(ws.missingTabs().has('/README.md')).toBe(true);
+      expect(ws.contentOf('/README.md')).toBe('placeholder\n');
+      await ws.saveFile('/README.md', 'restored');
+      expect(ws.missingTabs().has('/README.md')).toBe(false);
+      expect(fs.files.get('/README.md')).toBe('restored');
+    });
+  });
+
+  it('裁掉的目录停止监听，重新进入窗口时校准缓存', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.toggleDir('/src');
+      await ws.toggleDir('/src/util');
+      ws.protectWindow(0, ws.rowCount());
+      await flush();
+      expect(fs.watching).toContain('/src/util');
+      ws.protectWindow(0, 1);
+      await flush();
+      expect(fs.watching).not.toContain('/src/util');
+      fs.addEntry('/src/util', 'outside.rs', 'file');
+      ws.protectWindow(0, ws.rowCount());
+      await flush();
+      await flush();
+      expect(paths(ws)).toContain('/src/util/outside.rs');
+    });
+  });
+
+  it('裁掉的 tab 再次可见时检查原路径', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/docs/guide.md');
+      await ws.openFile('/README.md');
+      fs.removeEntry('/docs/guide.md');
+      ws.protectTabs(['/docs/guide.md']);
+      await flush();
+      expect(ws.missingTabs().has('/docs/guide.md')).toBe(true);
+      expect(fs.watching).toContain('/docs');
+    });
+  });
+
   it('展开目录会注册 watcher', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');
@@ -613,7 +718,7 @@ describe('新建条目的输入校验', () => {
 });
 
 describe('钉住：活动文件不会被淘汰', () => {
-  it('文本缓冲按 FIFO 淘汰，但活动文件与未保存的留在内存里', async () => {
+  it('文本缓冲按 FIFO 原子淘汰普通 tab，活动、脏 tab 保留', async () => {
     const tree: Record<string, string[]> = { '/': [] };
     for (let i = 0; i < 200; i++) tree['/'].push(`f${i}.rs`);
     await withWs(async (ws) => {
@@ -629,7 +734,46 @@ describe('钉住：活动文件不会被淘汰', () => {
       expect(ws.isLoaded('/f1.rs')).toBe(true);
       // 早就打开、又不活动也没改的：按 FIFO 让位。
       expect(ws.isLoaded('/f0.rs')).toBe(false);
+      expect(ws.tabs()).not.toContain('/f0.rs');
+      expect(ws.tabs()).toContain('/f1.rs');
+      expect(ws.tabs()).toContain('/f159.rs');
     }, tree, { maxBytes: 400 });
+  });
+
+  it('划线 tab 的文本受保护，淘汰其他普通 tab 也不会拆散内容', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      fs.removeEntry('/README.md');
+      fs.emit({ dir: '/', name: 'README.md', kind: 'removed' });
+      await flush();
+      expect(ws.missingTabs().has('/README.md')).toBe(true);
+      await ws.openFile('/docs/guide.md');
+      for (let i = 0; i < 20; i++) {
+        fs.addEntry('/', `f${i}.txt`, 'file');
+        await ws.openFile(`/f${i}.txt`);
+      }
+      expect(ws.tabs()).toContain('/README.md');
+      expect(ws.contentOf('/README.md')).toBe('placeholder\n');
+      expect(ws.isLoaded('/README.md')).toBe(true);
+      expect(ws.tabs()).not.toContain('/docs/guide.md');
+    }, SAMPLE_TREE, { maxBytes: 48 });
+  });
+
+  it('关闭 tab 同时移除文本、dirty 和划线状态', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.setDirty(new Set(['/README.md']));
+      fs.removeEntry('/README.md');
+      fs.emit({ dir: '/', name: 'README.md', kind: 'removed' });
+      await flush();
+      ws.closeTab('/README.md');
+      expect(ws.tabs()).not.toContain('/README.md');
+      expect(ws.isLoaded('/README.md')).toBe(false);
+      expect(ws.dirty().has('/README.md')).toBe(false);
+      expect(ws.missingTabs().has('/README.md')).toBe(false);
+    });
   });
 
   it('活动文件的祖先目录在大量加载中留在内存里', async () => {

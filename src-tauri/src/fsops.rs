@@ -97,6 +97,7 @@ pub async fn open_folder(
   path: String,
   limit: Option<usize>,
 ) -> Result<OpenedFolder, String> {
+  let path = path.replace('\\', "/");
   let index = dirindex::shared(&app);
   tauri::async_runtime::spawn_blocking(move || {
     let dir = PathBuf::from(&path);
@@ -136,6 +137,9 @@ pub async fn read_file(path: String, max_bytes: Option<u64>) -> Result<String, S
 
 #[tauri::command]
 pub fn write_file(path: String, content: String) -> Result<u64, String> {
+  if let Some(parent) = Path::new(&path).parent() {
+    fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+  }
   let bytes = content.into_bytes();
   let len = bytes.len() as u64;
   fs::write(&path, bytes).map_err(|e| format!("write failed: {e}"))?;

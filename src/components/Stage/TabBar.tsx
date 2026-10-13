@@ -6,6 +6,7 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
 } from 'solid-js';
 
 import { FileGlyph, Icon } from '../Icon';
@@ -52,6 +53,12 @@ export function TabBar(props: { ws: Workspace }) {
       .slice(start, end)
       .map((path, i) => ({ path, index: start + i }));
   });
+
+  createEffect(() => {
+    const paths = slice().map((item) => item.path);
+    untrack(() => props.ws.protectTabs(paths));
+  });
+  onCleanup(() => props.ws.protectTabs([]));
 
   createMemo(() => {
     const el = strip;
@@ -192,6 +199,7 @@ export function TabBar(props: { ws: Workspace }) {
                   style={{ width: `${TAB_WIDTH}px` }}
                   classList={{
                     'tab--on': props.ws.active() === item.path,
+                    'tab--missing': props.ws.missingTabs().has(item.path),
                     'tab--dragging': dragFrom() === item.path,
                     'tab--dropbefore': dropAt() === item.index && dragFrom() !== item.path,
                     'tab--dropafter':

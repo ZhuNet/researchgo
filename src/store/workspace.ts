@@ -32,8 +32,6 @@ const ls = typeof localStorage !== 'undefined' ? localStorage : null;
 const RELOAD_PAGES = 64;
 /** Disk events are coalesced for this long before anything is re-read. */
 const RECONCILE_DELAY_MS = 120;
-/** A watcher event for a write we just made is ignored for this long. */
-const SELF_WRITE_MS = 400;
 
 interface Session {
   root: string | null;
@@ -78,7 +76,16 @@ export function createWorkspace(
   editorLimits: Partial<EditorLimits> = {},
 ) {
   const cache = new DirCache({ ...DEFAULT_LIMITS, ...limits });
-  const editor = createEditor(backend, editorLimits);
+  const editor = createEditor(backend, editorLimits, (path) => {
+    // The text cache and tab list are one lifecycle for editable, unprotected
+    // files. A budget eviction must not leave an empty tab or an orphaned model.
+    if (!tabs().includes(path)) return;
+    if (active() === path || dirty().has(path) || missingTabs().has(path)) {
+      console.warn(`[tabs] protected buffer evicted: ${path}`);
+      return;
+    }
+    closeTab(path);
+  });
   const rowCache = new Map<string, Row>();
   const moreCache = new Map<string, Row>();
   const loading = new Map<string, Promise<void>>();
@@ -96,6 +103,10 @@ export function createWorkspace(
   const [renaming, setRenaming] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal<{ dir: string; kind: 'file' | 'dir' } | null>(null);
   const [dirty, setDirty] = createSignal<ReadonlySet<string>>(new Set<string>());
+  const [missingTabs, setMissingTabs] = createSignal<ReadonlySet<string>>(new Set());
+  let visibleTabs = new Set<string>();
+  let treeWindowKnown = false;
+  let disposed = false;
   const [version, setVersion] = createSignal(0);
   const [fileCount, setFileCount] = createSignal<number | null>(null);
   const [countTruncated, setCountTruncated] = createSignal(false);
@@ -126,14 +137,15 @@ export function createWorkspace(
   const bump = () => setVersion((v) => v + 1);
 
   /**
-   * The file on screen and anything unsaved are kept out of content eviction.
+   * The file on screen, anything unsaved and struck-through tabs are kept out
+   * of content eviction.
    *
    * Driven by an effect rather than by each call site that changes the active tab
    * or marks a buffer dirty: a missed call here does not fail loudly, it leaves a
    * buffer pinned forever, or drops an edit the next time a large file lands.
    */
   createEffect(() => {
-    editor.syncPins(active(), dirty());
+    editor.syncPins(active(), dirty(), missingTabs());
   });
 
   const viewOf = (dir: string): DirView | undefined => {
@@ -194,6 +206,7 @@ export function createWorkspace(
   }
 
   function protectWindow(start: number, end: number): void {
+    treeWindowKnown = true;
     cache.protect(protectedDirs(start, end));
     // Recomputed here, from rows this call has just re-read, so what the UI shows
     // is never a frame behind what the store knows.
@@ -222,6 +235,7 @@ export function createWorkspace(
       }
     }
     publishWindowState(gaps, failed, more);
+    syncWatch();
   }
 
   /** Republishes only what actually changed: an identical set must not wake rows. */
@@ -495,18 +509,70 @@ export function createWorkspace(
 
   let watchQueued = false;
   let lastWatched = '';
+  let watchedTree = new Set<string>();
+  let syncingWatch = false;
+
+  function visibleTreeDirs(): Set<string> {
+    const dirs = new Set<string>();
+    const base = root();
+    const idx = index();
+    if (!base || !idx) return dirs;
+    dirs.add(base);
+    if (!treeWindowKnown) {
+      for (const dir of idx.expandedDirs()) if (cache.has(dir)) dirs.add(dir);
+      return dirs;
+    }
+    for (let i = windowRange.start; i < windowRange.end; i++) {
+      const row = idx.rowAt(i);
+      if (!row) break;
+      const parent = parentOf(row.path, base);
+      if (parent) for (const dir of [parent, ...ancestorsOf(parent, base)]) dirs.add(dir);
+      if (row.kind === 'dir' && row.expanded && cache.has(row.path)) dirs.add(row.path);
+    }
+    return dirs;
+  }
+
+  function monitoredTabs(): Set<string> {
+    const paths = new Set([...visibleTabs].filter((path) => tabs().includes(path)));
+    const path = active();
+    if (path) paths.add(path);
+    return paths;
+  }
+
+  function protectTabs(paths: string[]): void {
+    const previous = visibleTabs;
+    visibleTabs = new Set(paths);
+    for (const path of monitoredTabs()) if (!previous.has(path)) void checkTab(path, true);
+    syncWatch();
+  }
 
   function syncWatch(): void {
-    if (watchQueued) return;
+    if (watchQueued || disposed) return;
     watchQueued = true;
     queueMicrotask(() => {
       watchQueued = false;
-      const dirs = index()?.expandedDirs() ?? [];
+      if (disposed || syncingWatch) return;
+      const tree = visibleTreeDirs();
+      const entering = [...tree].filter((dir) => !watchedTree.has(dir));
+      for (const dir of watchedTree) if (!tree.has(dir)) cache.markStale(dir);
+      watchedTree = tree;
+      const wanted = new Set(tree);
+      const base = root();
+      if (base) for (const path of monitoredTabs()) {
+        for (const dir of ancestorsOf(path, base)) wanted.add(dir);
+      }
+      const dirs = [...wanted].sort();
       const key = dirs.join('\u0000');
       if (key === lastWatched) return;
-      lastWatched = key;
-      void backend.syncWatch(dirs).catch(() => {
-        /* watching is best effort */
+      syncingWatch = true;
+      void backend.syncWatch(dirs).then((installed) => {
+        lastWatched = [...installed].sort().join('\u0000');
+        for (const dir of entering) if (cache.listing(dir)?.stale) {
+          void backend.invalidateDir(dir).then(() => refreshStale(dir));
+        }
+      }).catch((err) => console.warn('[watch]', err)).finally(() => {
+        syncingWatch = false;
+        if (lastWatched === key) syncWatch();
       });
     });
   }
@@ -576,6 +642,13 @@ export function createWorkspace(
     const base = root();
     if (!base) return;
     if (path === base) return;
+    if (tabs().includes(path)) {
+      setActive(path);
+      setStageMode('code');
+      await checkTab(path, !missingTabs().has(path));
+      syncWatch();
+      return;
+    }
     let kind: 'dir' | 'file' | null = isDir(path) ? 'dir' : exists(path) ? 'file' : null;
     if (kind === null) {
       const parent = parentOf(path, base);
@@ -605,6 +678,9 @@ export function createWorkspace(
     // they just asked for is hidden behind another pane, and click their way back.
     setStageMode('code');
     await loadText(path);
+    if (!tabs().includes(path) || root() !== base) return;
+    await checkTab(path, false);
+    syncWatch();
   }
 
   /**
@@ -626,56 +702,50 @@ export function createWorkspace(
     return editor.isResident(path);
   }
 
-  /**
-   * Writes this app made, and when, so the watcher's echo of them is not read back.
-   *
-   * Saving a file produces a disk event for that very file a moment later. Without
-   * this the editor would re-read what it just wrote — a redundant scan, and back
-   * when a reload blanked the buffer, a visible flicker.
-   */
-  const selfWrites = new Map<string, number>();
-
-  function isSelfWrite(path: string): boolean {
-    const at = selfWrites.get(path);
-    if (at === undefined) return false;
-    if (Date.now() - at > SELF_WRITE_MS) {
-      selfWrites.delete(path);
-      return false;
-    }
-    return true;
-  }
-
   async function saveFile(path: string, content: string): Promise<void> {
     await backend.writeFile(path, content);
-    // The buffer already holds exactly these bytes, so there is nothing to re-read;
-    // record them and note the time so the watcher's echo is not read back either.
+    if (disposed || !tabs().includes(path)) return;
+    // Record the bytes written; the watcher can still report a subsequent change.
     editor.setContent(path, content);
-    selfWrites.set(path, Date.now());
+    setMissingTabs((prev) => { const next = new Set(prev); next.delete(path); return next; });
     setDirty((prev) => {
       if (!prev.has(path)) return prev;
       const next = new Set(prev);
       next.delete(path);
       return next;
     });
+    await checkTab(path, true);
+    const base = root();
+    if (base) for (const dir of ancestorsOf(path, base)) {
+      if (cache.has(dir)) await refresh(dir);
+    }
+    syncWatch();
   }
 
   function closeTab(path: string): void {
-    setTabs((prev) => {
-      const next = prev.filter((p) => p !== path);
-      if (active() === path) setActive(next.length ? next[next.length - 1] : null);
-      return next;
-    });
+    closeTabs([path]);
   }
 
   function closeTabs(paths: Iterable<string>): void {
     const doomed = new Set(paths);
-    setTabs((prev) => {
-      const next = prev.filter((p) => !doomed.has(p));
-      if (active() && doomed.has(active() as string)) {
-        setActive(next.length ? next[next.length - 1] : null);
+    if (!doomed.size) return;
+    batch(() => {
+      setTabs((prev) => {
+        const next = prev.filter((p) => !doomed.has(p));
+        if (active() && doomed.has(active() as string)) {
+          setActive(next.length ? next[next.length - 1] : null);
+        }
+        return next;
+      });
+      setDirty((prev) => new Set([...prev].filter((p) => !doomed.has(p))));
+      setMissingTabs((prev) => new Set([...prev].filter((p) => !doomed.has(p))));
+      for (const path of doomed) {
+        editor.forget(path);
+        tabStamps.delete(path);
+        visibleTabs.delete(path);
       }
-      return next;
     });
+    syncWatch();
   }
 
   function moveBy(path: string, delta: number): void {
@@ -728,7 +798,6 @@ export function createWorkspace(
     if (exists(target)) return null;
     await backend.renameEntry(path, target);
     batch(() => {
-      editor.moveBuffer(path, target);
       remap(path, target);
       cache.delete(path);
     });
@@ -746,10 +815,12 @@ export function createWorkspace(
     batch(() => {
       for (const p of doomed) {
         cache.delete(p);
-        editor.invalidate(p);
       }
-      closeTabs(doomed);
-      if (active() && doomed.has(active() as string)) setActive(null);
+      setMissingTabs((prev) => {
+        const next = new Set(prev);
+        for (const p of tabs()) if (p === path || p.startsWith(`${path}/`)) next.add(p);
+        return next;
+      });
       setExpandedRaw((prev) => {
         const next = new Set<string>();
         for (const dir of prev) {
@@ -761,6 +832,7 @@ export function createWorkspace(
     });
     if (parent) await refresh(parent);
     recount();
+    syncWatch();
   }
 
   async function removeEntries(paths: Iterable<string>): Promise<void> {
@@ -818,11 +890,15 @@ export function createWorkspace(
   function remap(from: string, to: string): void {
     const apply = (p: string) =>
       p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p;
+    for (const path of tabs()) if (apply(path) !== path) editor.moveBuffer(path, apply(path));
+    setMissingTabs((prev) => new Set([...prev].map(apply)));
+    visibleTabs = new Set([...visibleTabs].map(apply));
     setTabs((prev) => prev.map(apply));
     setActive((prev) => (prev ? apply(prev) : prev));
     setExpandedRaw((prev) => new Set([...prev].map(apply)));
     setDirty((prev) => new Set([...prev].map(apply)));
     setSelected((prev) => prev.map(apply));
+    syncWatch();
   }
 
   async function refresh(dir: string): Promise<void> {
@@ -849,6 +925,11 @@ export function createWorkspace(
       rowCache.clear();
       moreCache.clear();
       lastWatched = '';
+      watchedTree.clear();
+      visibleTabs.clear();
+      tabStamps.clear();
+      setMissingTabs(new Set<string>());
+      treeWindowKnown = false;
       failedDirs.clear();
       setRoot(opened.path);
       setRootName(opened.name);
@@ -881,6 +962,11 @@ export function createWorkspace(
       moreCache.clear();
       editor.clearAll();
       lastWatched = '';
+      watchedTree.clear();
+      visibleTabs.clear();
+      tabStamps.clear();
+      setMissingTabs(new Set<string>());
+      treeWindowKnown = false;
       failedDirs.clear();
       setRoot(null);
       setRootName('');
@@ -891,6 +977,7 @@ export function createWorkspace(
       bump();
     });
     void backend.clearDirIndex().catch(() => {});
+    syncWatch();
   }
 
   const stopWatch = backend.onChange((change: Change) => onDiskChange(change));
@@ -962,7 +1049,14 @@ export function createWorkspace(
 
   function onDiskChange(change: Change): void {
     const base = root();
-    if (!base || !change.dir.startsWith(base)) return;
+    if (!base || (change.dir !== base && !change.dir.startsWith(base === '/' ? '/' : `${base}/`))) return;
+    const touched = joinPath(change.dir, change.name);
+    const old = change.from ? joinPath(change.dir, change.from) : touched;
+    for (const path of monitoredTabs()) {
+      if (path === touched || path.startsWith(`${touched}/`) || path === old || path.startsWith(`${old}/`)) {
+        void checkTab(path, true);
+      }
+    }
     // Nothing resident for that directory: no rows to fix, nothing to re-read.
     if (!cache.has(change.dir)) return;
     const list = queued.get(change.dir);
@@ -995,9 +1089,9 @@ export function createWorkspace(
         scheduleRepaint();
         return;
       case 'changed':
-        // Content only: the listing is unaffected, only an open buffer is. A change
-        // we just made ourselves is not re-read.
-        if (!isSelfWrite(touched) && editor.isResident(touched)) void reloadText(touched);
+        // Content only: open buffers are checked above; only an unopened
+        // cached probe needs to be discarded here.
+        if (!tabs().includes(touched)) editor.invalidate(touched);
         return;
     }
     // The event could not be expressed as a patch (an atomic save looks exactly
@@ -1021,14 +1115,80 @@ export function createWorkspace(
     reconcileQueued = true;
     setTimeout(() => {
       reconcileQueued = false;
-      void reconcile();
+      void reconcile().catch((err) => console.warn('[watch] reconciliation failed', err));
     }, RECONCILE_DELAY_MS);
   }
 
   async function reloadText(path: string): Promise<void> {
-    const fresh = await loadText(path, true);
-    if (fresh !== undefined) bump();
+    await editor.refresh(path);
+    bump();
   }
+
+  const checkingTabs = new Map<string, Promise<void>>();
+  const tabAgain = new Set<string>();
+  const tabStamps = new Map<string, string>();
+  async function checkTab(path: string, content: boolean): Promise<void> {
+    const pending = checkingTabs.get(path);
+    if (pending) { if (content) tabAgain.add(path); return pending; }
+    const work = (async () => {
+      do {
+        tabAgain.delete(path);
+        let present = false;
+        try { present = await backend.pathKind(path) === 'file'; } catch { /* gone */ }
+        if (disposed || !tabs().includes(path)) return;
+        const wasMissing = missingTabs().has(path);
+        if (present) {
+          try {
+            const info = await backend.fileInfo(path);
+            if (disposed || !tabs().includes(path)) return;
+            const stamp = `${info.size}:${info.mtimeMs}:${info.binary}`;
+            const previous = tabStamps.get(path);
+            if (previous !== undefined && previous !== stamp) content = true;
+            tabStamps.set(path, stamp);
+          } catch { /* Keep existence separate from read permission. */ }
+        } else tabStamps.delete(path);
+        if (disposed || !tabs().includes(path)) return;
+        setMissingTabs((prev) => {
+          if (prev.has(path) === !present) return prev;
+          const next = new Set(prev);
+          if (present) next.delete(path); else next.add(path);
+          return next;
+        });
+        if (present && (content || wasMissing)) {
+          if (editor.isResident(path) || active() === path) {
+            await reloadText(path);
+            if (disposed || !tabs().includes(path)) return;
+            if (editor.modeOf(path) !== 'missing') {
+              setDirty((prev) => { const next = new Set(prev); next.delete(path); return next; });
+            }
+          } else editor.invalidate(path);
+        }
+        // Do not probe an absent path in the editor: its resident text is now
+        // the only copy from which a struck-through tab can be restored.
+        content = true;
+      } while (tabAgain.has(path));
+    })().finally(() => checkingTabs.delete(path));
+    checkingTabs.set(path, work);
+    return work;
+  }
+
+  // Native events are hints; this bounded pass also repairs missed events and
+  // watches lost when an ancestor was moved. It never loads an invisible tree.
+  let auditing = false;
+  const auditTimer = setInterval(() => {
+    if (disposed || auditing || !root()) return;
+    auditing = true;
+    syncWatch();
+    void (async () => {
+      for (const dir of visibleTreeDirs()) {
+        if (!cache.has(dir)) continue;
+        try {
+          await reload(dir);
+        } catch { cache.markStale(dir); }
+      }
+      for (const path of monitoredTabs()) await checkTab(path, false);
+    })().finally(() => { auditing = false; });
+  }, 2000);
 
   async function reconcile(): Promise<void> {
     const batched = [...queued.entries()];
@@ -1046,6 +1206,7 @@ export function createWorkspace(
       }
     }
     for (const dir of recheck) {
+      if (!watchedTree.has(dir)) continue;
       if (cache.listing(dir)?.stale) await reload(dir);
     }
     if (recheck.size) syncWatch();
@@ -1089,6 +1250,8 @@ export function createWorkspace(
     missing,
     unreadable,
     pageable,
+    missingTabs,
+    protectTabs,
     reasonOf,
     /** Bumped on every change to the row space; lets effects depend on "anything
      *  about the tree changed" without watching a dozen signals. */
@@ -1135,6 +1298,9 @@ export function createWorkspace(
     refresh,
     stats: () => cache.stats(),
     dispose: () => {
+      disposed = true;
+      clearInterval(auditTimer);
+      void backend.syncWatch([]).catch(() => {});
       stopWatch();
       stopToolchainWatch();
     },

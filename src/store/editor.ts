@@ -1,4 +1,4 @@
-import { createSignal } from 'solid-js';
+import { batch, createSignal } from 'solid-js';
 
 import { bytesOf, DEFAULT_TEXT_BUDGET, TextCache } from '../lib/textcache';
 import { tauriBackend, type Backend } from '../lib/backend';
@@ -98,13 +98,23 @@ export const DEFAULT_EDITOR_LIMITS: EditorLimits = {
 export function createEditor(
   backend: Backend = tauriBackend,
   limits: Partial<EditorLimits> = {},
+  onEvict?: (path: string) => void,
 ) {
   const opts: EditorLimits = { ...DEFAULT_EDITOR_LIMITS, ...limits };
 
   /** Whole-file contents, bounded by bytes and evicted FIFO. */
-  const texts = new TextCache<string>({ maxBytes: opts.maxBytes });
+  const texts = new TextCache<string>({ maxBytes: opts.maxBytes, onEvict: (path) => {
+    cancelReads(path);
+    probes.delete(path);
+    reasons.delete(path);
+    onEvict?.(path);
+  } });
   /** Probed shape of each file, small and cheap; not budgeted by bytes. */
   const probes = new Map<string, ContentProbe>();
+  let epoch = 0;
+  const generations = new Map<string, number>();
+  const tokenOf = (path: string) => `${epoch}:${generations.get(path) ?? 0}`;
+  const cancelReads = (path: string) => generations.set(path, (generations.get(path) ?? 0) + 1);
 
   const [revision, setRevision] = createSignal(0);
   const [buildState, setBuildState] = createSignal<
@@ -127,6 +137,8 @@ export function createEditor(
 
   /** Everything held, so switching projects cannot show the last one's buffers. */
   function clearAll(): void {
+    epoch += 1;
+    generations.clear();
     texts.clear();
     probes.clear();
     reasons.clear();
@@ -160,27 +172,55 @@ export function createEditor(
   /** Drops every cached thing about a file. Used by the workspace when it knows
    *  the file changed underneath us. */
   function invalidate(path: string): void {
+    cancelReads(path);
     texts.delete(path);
     probes.delete(path);
     bump();
   }
 
+  async function refresh(path: string): Promise<ContentMode> {
+    cancelReads(path);
+    const token = tokenOf(path);
+    probes.delete(path);
+    const mode = await open(path);
+    if (token !== tokenOf(path)) return modeOf(path);
+    if (mode === 'text') await loadWhole(path, true);
+    else if (mode !== 'missing' && token === tokenOf(path)) {
+      texts.delete(path);
+      bump();
+    }
+    return mode;
+  }
+
+  function forget(path: string): void {
+    cancelReads(path);
+    texts.delete(path);
+    probes.delete(path);
+    reasons.delete(path);
+    bump();
+  }
+
   /**
-   * Pins whatever must not be evicted: the file on screen and anything unsaved.
+   * Pins the active file, unsaved files and struck-through tabs. The latter
+   * cannot be reconstructed from disk once their path has disappeared.
    *
    * One function rather than a pin per call site, because "forgot to unpin the
    * previous file" is exactly the kind of bug that shows up as a buffer that never
    * goes away, or an edit that vanishes on the next big file.
    */
-  function syncPins(active: string | null, unsaved: ReadonlySet<string>): void {
+  function syncPins(active: string | null, unsaved: ReadonlySet<string>, missing: ReadonlySet<string> = new Set()): void {
     const wanted = new Set<string>();
     if (active) wanted.add(active);
     for (const path of unsaved) wanted.add(path);
-    for (const held of pins) if (!wanted.has(held)) texts.unpin(held);
     for (const path of wanted) {
       if (pins.has(path)) continue;
       texts.pin(path);
     }
+    for (const path of missing) {
+      wanted.add(path);
+      if (!pins.has(path)) texts.pin(path);
+    }
+    for (const held of pins) if (!wanted.has(held)) texts.unpin(held);
     pins.clear();
     for (const path of wanted) pins.add(path);
   }
@@ -198,6 +238,9 @@ export function createEditor(
    */
   function modeOf(path: string): ContentMode {
     revision();
+    // A removed file may still have the only surviving copy of its text in a
+    // struck-through tab. Never let an unsuccessful probe hide that copy.
+    if (texts.has(path)) return 'text';
     if (notTextReason(path)) return 'binary';
     const probe = probes.get(path);
     if (!probe) return 'probing';
@@ -219,6 +262,7 @@ export function createEditor(
    * decides whether reading the content at all is safe.
    */
   async function open(path: string): Promise<ContentMode> {
+    const token = tokenOf(path);
     const notText = notTextReason(path);
     if (notText) {
       setReason(path, notText);
@@ -239,6 +283,7 @@ export function createEditor(
     if (!probe) {
       try {
         const info = await backend.fileInfo(path);
+        if (token !== tokenOf(path)) return modeOf(path);
         probe = {
           path,
           size: info.size,
@@ -248,6 +293,7 @@ export function createEditor(
           failed: false,
         };
       } catch (err) {
+        if (token !== tokenOf(path)) return modeOf(path);
         // Recorded as a failed probe rather than merely absent, because absence
         // reads as "not looked at yet" and this file has been looked at and
         // refused. Without it the mode would fall through to `oversized` and draw
@@ -279,17 +325,22 @@ export function createEditor(
 
   async function loadWhole(path: string, force = false): Promise<boolean> {
     if (texts.has(path) && !force) return true;
+    const token = tokenOf(path);
     try {
       const text = await backend.readFile(path);
+      if (token !== tokenOf(path)) return false;
       const size = bytesOf(text);
       // Admitted even when it busts the budget on its own: the file being looked
       // at is pinned, and dropping it here would mean re-reading on every
       // keystroke.
-      texts.put(path, text, size);
-      setReason(path, null);
-      bump();
-      return true;
+      batch(() => {
+        texts.put(path, text, size);
+        if (texts.has(path)) setReason(path, null);
+        bump();
+      });
+      return texts.has(path);
     } catch (err) {
+      if (token !== tokenOf(path)) return false;
       setReason(path, String((err as Error)?.message ?? err));
       bump();
       return false;
@@ -304,9 +355,11 @@ export function createEditor(
    * blank-then-refill in the editor.
    */
   function setContent(path: string, text: string): void {
-    texts.put(path, text, bytesOf(text));
-    setReason(path, null);
-    bump();
+    batch(() => {
+      texts.put(path, text, bytesOf(text));
+      if (texts.has(path)) setReason(path, null);
+      bump();
+    });
   }
 
   const reasons = new Map<string, string | null>();
@@ -383,6 +436,8 @@ export function createEditor(
     bump,
     open,
     invalidate,
+    forget,
+    refresh,
     clearAll,
     moveBuffer,
     syncPins,

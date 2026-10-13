@@ -4,6 +4,12 @@ import { describe, expect, it } from 'vitest';
 import { createEditor, type EditorLimits } from '../src/store/editor';
 import { FakeFs, fakeBackend } from './fakefs';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /**
  * The content layer's contract: how a file is decided to be shown, what stays
  * resident, and what a build reports.
@@ -22,6 +28,53 @@ function withEditor(
 }
 
 describe('文件模式：先探测，再决定怎么显示', () => {
+  it('关闭或清空后，未完成的读取不能重新写入缓存', async () => {
+    const fs = new FakeFs({ '/': ['a.txt'] });
+    const backend = fakeBackend(fs);
+    const originalRead = backend.readFile;
+    const held = deferred<string>();
+    backend.readFile = async (path) => path === '/a.txt' ? held.promise : originalRead(path);
+    const editor = createEditor(backend);
+    const opening = editor.open('/a.txt');
+    await Promise.resolve();
+    editor.forget('/a.txt');
+    held.resolve('late content');
+    await opening;
+    expect(editor.contentOf('/a.txt')).toBeUndefined();
+    expect(editor.modeOf('/a.txt')).toBe('probing');
+
+    const heldProbe = deferred<Awaited<ReturnType<typeof backend.fileInfo>>>();
+    const originalInfo = backend.fileInfo;
+    backend.fileInfo = (path) => path === '/a.txt' ? heldProbe.promise : originalInfo(path);
+    const next = editor.open('/a.txt');
+    editor.clearAll();
+    heldProbe.resolve(await originalInfo('/a.txt'));
+    await next;
+    expect(editor.modeOf('/a.txt')).toBe('probing');
+    expect(editor.contentOf('/a.txt')).toBeUndefined();
+  });
+
+  it('已淘汰文本的旧刷新不能在另一文件读入后复活', async () => {
+    const fs = new FakeFs({ '/': ['a.txt', 'b.txt'] });
+    fs.files.set('/a.txt', 'a'.repeat(40));
+    fs.files.set('/b.txt', 'b'.repeat(40));
+    const backend = fakeBackend(fs);
+    const originalRead = backend.readFile;
+    const held = deferred<string>();
+    let delay = false;
+    backend.readFile = (path) => path === '/a.txt' && delay ? held.promise : originalRead(path);
+    const editor = createEditor(backend, { maxBytes: 90 });
+    await editor.open('/a.txt');
+    delay = true;
+    const refreshing = editor.refresh('/a.txt');
+    await Promise.resolve();
+    await editor.open('/b.txt');
+    expect(editor.contentOf('/a.txt')).toBeUndefined();
+    held.resolve('stale');
+    await refreshing;
+    expect(editor.contentOf('/a.txt')).toBeUndefined();
+    expect(editor.contentOf('/b.txt')).toBe('b'.repeat(40));
+  });
   it('文本文件整份读入', async () => {
     await withEditor(async (editor, fs) => {
       fs.files.set('/a.txt', 'hello\nworld\n');
