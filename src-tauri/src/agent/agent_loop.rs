@@ -36,6 +36,10 @@ const MAX_STEPS: usize = 48;
 /// reports itself instead of leaving the panel spinning.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
+// The host knows the absolute workspace path; the model only needs to know
+// that every tool starts inside the folder currently open in the app.
+const WORKSPACE_INSTRUCTIONS: &str = "Your working directory is the currently open project folder. All file paths in read, write, edit, grep and glob, and paths in shell commands, are relative to that folder. For a file directly inside the open folder use its filename (e.g. `1.txt`), not the folder name followed by the filename (e.g. `paper/1.txt` when the open folder is `paper`). Use glob to discover paths when unsure. Do not guess or prepend the open folder's name.";
+
 /// The transcript, kept across turns so the model remembers what it did.
 #[derive(Clone)]
 pub struct Session {
@@ -329,7 +333,7 @@ pub async fn call_model(
 
   let body = json!({
     "model": cfg.model,
-    "messages": messages,
+    "messages": model_messages(messages),
     "tools": tools::tool_defs(),
     "stream": true,
     "stream_options": { "include_usage": true },
@@ -403,6 +407,15 @@ pub async fn call_model(
     output_tokens: usage.1,
     cache_read_tokens: usage.2,
   })
+}
+
+fn model_messages(messages: &[Value]) -> Vec<Value> {
+  // Keep the guidance outside the saved transcript: it stays at the front of
+  // every model request without being duplicated on later turns.
+  let mut context = Vec::with_capacity(messages.len() + 1);
+  context.push(json!({ "role": "system", "content": WORKSPACE_INSTRUCTIONS }));
+  context.extend_from_slice(messages);
+  context
 }
 
 /// The assistant message exactly as it goes back into the transcript.
@@ -578,6 +591,16 @@ impl AgentState {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn model_requests_explain_project_relative_paths_without_changing_history() {
+    let history = vec![json!({ "role": "user", "content": "read 1.txt" })];
+    let request = model_messages(&history);
+    assert_eq!(request[0]["role"], "system");
+    assert!(request[0]["content"].as_str().unwrap().contains("currently open project folder"));
+    assert_eq!(request[1], history[0]);
+    assert_eq!(history.len(), 1);
+  }
 
   fn delta(v: Value) -> Value {
     json!({ "choices": [{ "delta": v }] })
