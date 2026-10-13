@@ -113,6 +113,9 @@ export function FileTree(props: { ws: Workspace }) {
     const creating = createItem();
     const rows = slice();
     if (!creating) return { before: rows, after: [] as Row[], item: null };
+    if (creating.dir === ws().root()) {
+      return { before: [] as Row[], after: rows, item: creating };
+    }
     let at = -1;
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -230,6 +233,12 @@ export function FileTree(props: { ws: Workspace }) {
     if (!creating) return;
     const sc = scroller;
     if (!sc) return;
+    // The workspace root has no row of its own. Its create input lives at the
+    // top of the tree, rather than being rejected as a missing parent row.
+    if (creating.dir === ws().root()) {
+      scrollToPx(0);
+      return;
+    }
     const at = ws().indexOf(creating.dir);
     if (at < 0) {
       // 父目录本身还没展开成行：定位不到就把输入框收掉，别留下一个
@@ -364,10 +373,8 @@ export function FileTree(props: { ws: Workspace }) {
     if (!ws().selected().includes(row.path)) ws().setSelected([row.path]);
     setCursorPath(row.path);
     setCursor(ws().indexOf(row.path));
-    const base = ws().root() ?? '/';
-    const parent = parentOf(row.path, base) ?? base;
-    const isDirRow = row.kind === 'dir';
-    const targetDir = isDirRow ? row.path : parent;
+    const targetDir = ws().creationDir(row.path);
+    if (!targetDir) return;
     // Creating is the only action that needs write access, and it is the one
     // that used to fail with a bare EACCES. Check first, explain up front.
     void ws().canWrite(targetDir).then((writable) => {
@@ -378,12 +385,12 @@ export function FileTree(props: { ws: Workspace }) {
       {
         label: 'New File…',
         disabled: !writable,
-        run: () => ws().setCreating({ dir: targetDir, kind: 'file' }),
+        run: () => void ws().startCreating('file', targetDir),
       },
       {
         label: 'New Folder…',
         disabled: !writable,
-        run: () => ws().setCreating({ dir: targetDir, kind: 'dir' }),
+        run: () => void ws().startCreating('dir', targetDir),
       },
       ...(blocked ? [blocked] : []),
       { separator: true, label: '' },
@@ -414,12 +421,12 @@ export function FileTree(props: { ws: Workspace }) {
       {
         label: 'New File…',
         disabled: !base || !writable,
-        run: () => base && ws().setCreating({ dir: base, kind: 'file' }),
+        run: () => void ws().startCreating('file', base),
       },
       {
         label: 'New Folder…',
         disabled: !base || !writable,
-        run: () => base && ws().setCreating({ dir: base, kind: 'dir' }),
+        run: () => void ws().startCreating('dir', base),
       },
       ...(base && !writable
         ? [{ label: '（根目录无写入权限）', disabled: true, run: () => {} }]
@@ -791,6 +798,13 @@ export function FileTree(props: { ws: Workspace }) {
         captureAnchor(e.currentTarget.scrollTop);
       }}
       onContextMenu={headerMenu}
+      onClick={(e) => {
+        // Row clicks keep their own selection behavior. Only empty tree space
+        // clears selection, so toolbar creation falls back to the root.
+        if ((e.target as Element).closest('.row')) return;
+        ws().setSelected([]);
+        setCursorPath(null);
+      }}
       onBlur={releaseDrag}
     >
       <div

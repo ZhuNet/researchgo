@@ -792,6 +792,30 @@ export function createWorkspace(
     return path;
   }
 
+  function creationDir(path: string | null = selected().at(-1) ?? null): string | null {
+    const base = root();
+    if (!base) return null;
+    if (!path || path === base) return base;
+    return isDir(path) ? path : parentOf(path, base) ?? base;
+  }
+
+  async function startCreating(kind: 'file' | 'dir', dir = creationDir()): Promise<void> {
+    const base = root();
+    if (!base || !dir) return;
+    if (!await canWrite(dir)) {
+      toast('error', 'Cannot create', `${dir} 不可写`);
+      return;
+    }
+    if (root() !== base) return;
+    if (dir !== base) {
+      await revealPath(dir);
+      await ensureLoaded(dir);
+      if (root() !== base) return;
+      setExpanded(dir, true);
+    }
+    setCreating({ dir, kind });
+  }
+
   async function renameEntry(path: string, name: string): Promise<string | null> {
     const base = root();
     if (!base) return null;
@@ -1294,6 +1318,8 @@ export function createWorkspace(
     moveBy,
     reorderTabs,
     createEntry,
+    creationDir,
+    startCreating,
     renameEntry,
     removeEntry,
     removeEntries,

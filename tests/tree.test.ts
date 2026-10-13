@@ -31,6 +31,37 @@ const files = (dir: string, n: number): DirEntry[] =>
 const dirsIn = (dir: string, n: number): DirEntry[] =>
   Array.from({ length: n }, (_, i) => dirEntry(`${dir}/d${i}`));
 
+it('嵌套目录中的同名文件不能显示成根目录的文件夹', () => {
+  const cache = new DirCache();
+  cache.set('/text', ['1', '11', '2', '3'].map((name) => dirEntry(`/text/${name}`)));
+  cache.set('/text/1', []);
+  cache.set('/text/11', [dirEntry('/text/11/11')]);
+  cache.set('/text/11/11', []);
+  const expanded = new Set(['/text/1', '/text/11', '/text/11/11']);
+  const rows = new Map();
+  new RowIndex('/text', expanded, viewOf(cache), rows).slice(0, 20);
+  cache.patchCreate('/text/11/11', '1', 'file');
+  const index = new RowIndex('/text', expanded, viewOf(cache), rows);
+  const result = index.slice(0, 20);
+  expect(result.map((row) => row.path)).toEqual([
+    '/text/1', '/text/11', '/text/11/11', '/text/11/11/1', '/text/2', '/text/3',
+  ]);
+  expect(result[3].kind).toBe('file');
+  expect(result[0].kind).toBe('dir');
+});
+
+it('后端纠正条目类型时，旧目录行不能覆盖新的文件类型', () => {
+  const cache = new DirCache();
+  const rows = new Map();
+  cache.set('/text', [dirEntry('/text/1')]);
+  const old = new RowIndex('/text', new Set(), viewOf(cache), rows).rowAt(0)!;
+  cache.set('/text', [file('/text/1')]);
+  const current = new RowIndex('/text', new Set(), viewOf(cache), rows).rowAt(0)!;
+  expect(current.kind).toBe('file');
+  expect(current).not.toBe(old);
+  expect(new RowIndex('/text', new Set(), viewOf(cache), rows).rowAt(0)).toBe(current);
+});
+
 /** The shape the row index consumes: a resident prefix plus what is still out there. */
 function viewOf(cache: DirCache) {
   return (dir: string): DirView | undefined => {

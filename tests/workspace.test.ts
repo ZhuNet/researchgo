@@ -31,6 +31,26 @@ const paths = (ws: Workspace) => {
 };
 
 describe('打开文件夹', () => {
+  it('新建入口共用选中位置，文件取父目录，目录取自身，无选择取根目录', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      ws.setSelected([]);
+      await ws.startCreating('file');
+      expect(ws.creating()).toEqual({ dir: '/', kind: 'file' });
+      ws.setCreating(null);
+      ws.setSelected(['/docs']);
+      await ws.startCreating('dir');
+      expect(ws.creating()).toEqual({ dir: '/docs', kind: 'dir' });
+      expect(ws.expanded().has('/docs')).toBe(true);
+      ws.setCreating(null);
+      ws.setSelected(['/docs/guide.md']);
+      await ws.startCreating('file');
+      expect(ws.creating()).toEqual({ dir: '/docs', kind: 'file' });
+      ws.setCreating(null);
+      await ws.startCreating('file', '/');
+      expect(ws.creating()).toEqual({ dir: '/', kind: 'file' });
+    });
+  });
   it('选择文件和目录都交由后端预检，不自动构建，工具链变化仍检查当前选择', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');

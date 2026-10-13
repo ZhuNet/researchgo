@@ -26,28 +26,14 @@ export function Explorer(props: { ws: Workspace }) {
               <button
                 class="icon-btn"
                 title="New file  ⌘N"
-                onClick={() => {
-                  const dir = props.ws.root();
-                  if (!dir) return;
-                  void props.ws.canWrite(dir).then((ok) => {
-                    if (ok) props.ws.setCreating({ dir, kind: 'file' });
-                    else toast('error', 'Cannot create', `${dir} 不可写`);
-                  });
-                }}
+                onClick={() => void props.ws.startCreating('file')}
               >
                 <Icon name="file" size={15} />
               </button>
               <button
                 class="icon-btn"
                 title="New folder"
-                onClick={() => {
-                  const dir = props.ws.root();
-                  if (!dir) return;
-                  void props.ws.canWrite(dir).then((ok) => {
-                    if (ok) props.ws.setCreating({ dir, kind: 'dir' });
-                    else toast('error', 'Cannot create', `${dir} 不可写`);
-                  });
-                }}
+                onClick={() => void props.ws.startCreating('dir')}
               >
                 <Icon name="folder" size={15} />
               </button>

@@ -258,7 +258,10 @@ export class RowIndex {
     if (!entry) return undefined;
     const path = entry.path;
     let row = this.byPath.get(path);
-    if (!row) {
+    // Recreate only entries whose identity changed. Keeping a cached directory
+    // row after the host reports a file preserves both its stale kind and the
+    // non-reactive folder rendering in Solid's <For>.
+    if (!row || row.kind !== entry.kind || row.name !== entry.name) {
       row = {
         path,
         name: entry.name,
