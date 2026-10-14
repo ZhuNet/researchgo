@@ -88,6 +88,13 @@ pub enum Frame {
   },
   #[serde(rename = "turn.end")]
   TurnEnd {
+    /// Which turn this ends. The renderer drops a `turn.end` whose number is not
+    /// the turn it is running: a stop settles the turn it stopped, and the frame
+    /// announcing that can still be in flight when the next prompt has already
+    /// started — and one that closes the wrong turn leaves a live turn looking
+    /// finished, which puts the send button back while the agent is still
+    /// working.
+    turn: u64,
     reason: TurnReason,
   },
   #[serde(rename = "error")]
@@ -183,7 +190,7 @@ mod tests {
         },
         "usage",
       ),
-      (Frame::TurnEnd { reason: TurnReason::Stop }, "turn.end"),
+      (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop }, "turn.end"),
       (Frame::Error { message: "e".into() }, "error"),
     ];
 

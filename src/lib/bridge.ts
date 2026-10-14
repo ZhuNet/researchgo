@@ -7,7 +7,7 @@ export type RawEvent =
   | { type: 'tool.end'; id: string; call_id: string; ok: boolean; summary: string }
   | { type: 'file.patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
   | { type: 'usage'; input: number; output: number; cache_read: number }
-  | { type: 'turn.end'; reason: 'stop' | 'aborted' | 'error' }
+  | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { type: 'error'; message: string };
 
 export type UiEvent =
@@ -19,7 +19,7 @@ export type UiEvent =
   | { kind: 'tool.end'; id: string; callId: string; ok: boolean; summary: string }
   | { kind: 'patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
   | { kind: 'usage'; input: number; output: number; cacheRead: number }
-  | { kind: 'turn.end'; reason: 'stop' | 'aborted' | 'error' }
+  | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { kind: 'error'; message: string };
 
 export function translate(line: string): UiEvent[] {
@@ -63,7 +63,11 @@ export function translate(line: string): UiEvent[] {
         { kind: 'usage', input: raw.input, output: raw.output, cacheRead: raw.cache_read },
       ];
     case 'turn.end':
-      return [{ kind: 'turn.end', reason: raw.reason }];
+      // The turn number travels with the frame rather than being inferred. A
+      // stopped turn settles itself, so the `turn.end` announcing that can
+      // still be in flight when the next prompt starts; the consumer needs to be
+      // able to tell that one from the frame that ends the turn it is running.
+      return [{ kind: 'turn.end', turn: raw.turn, reason: raw.reason }];
     case 'error':
       return [{ kind: 'error', message: raw.message }];
     default: {

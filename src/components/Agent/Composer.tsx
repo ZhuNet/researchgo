@@ -31,6 +31,10 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
   const submit = () => {
     const value = text();
     if (!value.trim()) return;
+    // One action at a time. The send button is already a stop button while a
+    // turn is running, but Enter is not — and clearing the draft for a prompt
+    // that was never sent is the worst possible reading of "ignored".
+    if (props.agent.busy()) return;
     // The agent's tools are sandboxed to a workspace, so a prompt sent without
     // one has nowhere to read from. Saying so beats a turn that opens with a
     // tool error the model has to reason around.
@@ -128,8 +132,24 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
                 </button>
               }
             >
-              <button class="send send--stop" onClick={() => props.agent.abort()} title="Interrupt">
-                <Icon name="stop" size={13} />
+              {/* One button for both halves of the turn, disabled in both of
+                  the states where there is nothing to press. `sending` has no
+                  turn to interrupt yet, and `stopping` is a stop already in
+                  flight — arming it again would queue a second prompt against
+                  a transcript the host is still finishing with. */}
+              <button
+                class="send send--stop"
+                classList={{ 'send--busy': !props.agent.stoppable() }}
+                disabled={!props.agent.stoppable()}
+                onClick={() => void props.agent.abort()}
+                title={props.agent.stopping() ? 'Stopping…' : 'Interrupt'}
+              >
+                <Show
+                  when={props.agent.stopping()}
+                  fallback={<Icon name="stop" size={13} />}
+                >
+                  <Icon name="refresh" size={13} class="spin" />
+                </Show>
               </button>
             </Show>
           </div>

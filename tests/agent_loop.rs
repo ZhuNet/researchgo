@@ -15,6 +15,7 @@ use researchgo_lib::agent::config::ResolvedModel;
 use serde_json::{json, Value};
 
 use researchgo_lib::agent::agent_loop;
+use researchgo_lib::agent::agent_loop::Turn;
 
 #[tokio::test]
 async fn text_arrives_before_the_response_finishes() {
@@ -53,7 +54,7 @@ async fn text_arrives_before_the_response_finishes() {
     api_key: "sk-test".into(), name: "mock".into(), model: "test-model".into(),
   };
   let mut deltas = Vec::new();
-  let reply = agent_loop::call_model_streaming(&cfg, &[], |text| {
+  let reply = agent_loop::call_model_streaming(&cfg, &[], &agent_loop::Turn::detached(), |text| {
     deltas.push(text.to_string());
     if deltas.len() == 1 { tx.send(()).unwrap(); }
   }).await.expect("stream completes");
@@ -61,6 +62,79 @@ async fn text_arrives_before_the_response_finishes() {
   assert_eq!(deltas, vec!["你好", "!"]);
   assert_eq!(reply.text, "你好!");
   assert_eq!(reply.message["content"], "你好!");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_does_not_wait_for_the_endpoint_to_finish_streaming() {
+  // The server sends one delta and then holds the connection open for far
+  // longer than this test allows. That gap is the whole point: a stop that waits
+  // for the stream to end is indistinguishable from a hung endpoint, and the
+  // person who pressed stop cannot tell which one they are looking at.
+  let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let (tx, rx) = std::sync::mpsc::channel();
+  let server = std::thread::spawn(move || {
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut length = 0;
+    loop {
+      let mut line = String::new();
+      if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+      }
+      if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+        length = value.trim().parse().unwrap_or(0);
+      }
+      if line.trim().is_empty() {
+        break;
+      }
+    }
+    let mut body = vec![0; length];
+    let _ = std::io::Read::read_exact(&mut reader, &mut body);
+    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+    socket.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"thinking\"}}]}\n\n").unwrap();
+    socket.flush().unwrap();
+    let _ = tx.send(());
+    // A stream that never ends, on purpose.
+    std::thread::sleep(std::time::Duration::from_secs(30));
+  });
+
+  let cfg = ResolvedModel {
+    url: format!("http://127.0.0.1:{port}/v1"),
+    api_key: "sk-test".into(), name: "mock".into(), model: "test-model".into(),
+  };
+  let turn = Turn::detached();
+  let calling = {
+    let cfg = cfg.clone();
+    let turn = turn.clone();
+    tokio::spawn(async move { agent_loop::call_model_streaming(&cfg, &[], &turn, |_| {}).await })
+  };
+
+  // Wait until the reply is genuinely in flight, so the stop lands on a live
+  // stream rather than on a call that has not been made yet. Blocked on a
+  // plain channel rather than awaited, which is why this test needs more than
+  // one thread to run on: the request is on the runtime while this waits.
+  rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the reply started");
+
+  let started = std::time::Instant::now();
+  turn.stop();
+  let settled = tokio::time::timeout(std::time::Duration::from_secs(5), calling)
+    .await
+    .expect("a stop must not wait for the endpoint")
+    .expect("the task did not panic");
+
+  match settled {
+    Err(agent_loop::CallError::Stopped) => {}
+    other => panic!("a stopped call reports Stopped rather than a failure: {other:?}"),
+  }
+  assert!(
+    started.elapsed() < std::time::Duration::from_secs(5),
+    "the stop waited {:?} on an endpoint that was never going to finish",
+    started.elapsed()
+  );
+  // The server thread is deliberately still sleeping; leaving it to the process
+  // rather than joining it keeps this test at a second instead of thirty.
+  drop(server);
 }
 
 #[tokio::test]
@@ -86,17 +160,17 @@ async fn workspace_tools_continue_after_a_nested_glob() {
 
   let started = std::time::Instant::now();
   let found = researchgo_lib::agent::tools::run(
-    &root, "glob", &json!({ "pattern": "**/*.json" }), "glob-1"
+    &root, "glob", &json!({ "pattern": "**/*.json" }), "glob-1", &Turn::detached()
   ).await.expect("glob finishes even with nested nonmatching paths");
   assert_eq!(found.content, "package.json");
   assert!(started.elapsed() < std::time::Duration::from_secs(5));
 
   let read = researchgo_lib::agent::tools::run(
-    &root, "read", &json!({ "path": found.content }), "read-1"
+    &root, "read", &json!({ "path": found.content }), "read-1", &Turn::detached()
   ).await.expect("next tool reads the discovered file");
   assert!(read.content.contains("fixture-project"));
   let searched = researchgo_lib::agent::tools::run(
-    &root, "grep", &json!({ "pattern": "fixture-project" }), "grep-1"
+    &root, "grep", &json!({ "pattern": "fixture-project" }), "grep-1", &Turn::detached()
   ).await.expect("analysis continues to search");
   assert!(searched.content.contains("package.json:1:"));
 }
@@ -192,7 +266,7 @@ async fn a_streamed_reply_reassembles_into_one_message() {
 
   let messages = vec![json!({ "role": "user", "content": "read package.json" })];
 
-  let reply = agent_loop::call_model(&cfg, &messages)
+  let reply = agent_loop::call_model(&cfg, &messages, &Turn::detached())
     .await
     .expect("first turn");
 
@@ -238,7 +312,7 @@ async fn a_streamed_reply_reassembles_into_one_message() {
     "content": "1\t{\n2\t  \"name\": \"researchgo\"\n3\t}"
   }));
 
-  let second = agent_loop::call_model(&cfg, &transcript)
+  let second = agent_loop::call_model(&cfg, &transcript, &Turn::detached())
     .await
     .expect("second turn");
   assert!(second.tool_calls.is_empty(), "the second turn is prose only");
@@ -282,7 +356,7 @@ async fn diag_real_endpoint() {
   })];
 
   let started = std::time::Instant::now();
-  let first = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &messages)).await;
+  let first = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &messages, &Turn::detached())).await;
   eprintln!("[diag] first call settled after {:?}", started.elapsed());
   let reply = match first {
     Err(_) => panic!("[diag] first call still running after 90s — reproduced the hang"),
@@ -312,7 +386,7 @@ async fn diag_real_endpoint() {
   }
 
   let started = std::time::Instant::now();
-  let second = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &transcript)).await;
+  let second = tokio::time::timeout(std::time::Duration::from_secs(90), agent_loop::call_model(&cfg, &transcript, &Turn::detached())).await;
   eprintln!("[diag] second call settled after {:?}", started.elapsed());
   match second {
     Err(_) => panic!("[diag] second call still running after 90s — the hang is in the tool-result round trip"),

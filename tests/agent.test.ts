@@ -11,11 +11,21 @@ import { createAgent, type AgentTool, type Item } from '../src/store/agent';
  */
 
 let frame: ((payload: unknown) => void) | undefined;
+let calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+/** What the host does with `agent_abort`, resolved by the test rather than by a real turn. */
+let stopHost: () => void = () => {};
 
 function installBridge() {
   frame = undefined;
+  calls = [];
+  stopHost = () => {};
   (globalThis as Record<string, unknown>).__TAURI__ = {
-    core: { invoke: async () => undefined },
+    core: {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        calls.push({ cmd, args });
+        if (cmd === 'agent_abort') await new Promise<void>((resolve) => (stopHost = resolve));
+      },
+    },
     event: {
       listen: async (_name: string, cb: (msg: { payload: unknown }) => void) => {
         frame = (payload: unknown) => cb({ payload });
@@ -55,7 +65,7 @@ describe('agent store: 轮次身份', () => {
       { type: 'tool.start', id: 'a1', call_id: 'call_0', name: 'read', input: { path: 'x' } },
       { type: 'tool.output', id: 'a1', call_id: 'call_0', chunk: '内容' },
       { type: 'tool.end', id: 'a1', call_id: 'call_0', ok: true, summary: '1 line' },
-      { type: 'turn.end', reason: 'stop' },
+      { type: 'turn.end', turn: 1, reason: 'stop' },
     ]);
 
     expect(agent.items().map((i) => i.kind)).toEqual(['user', 'assistant', 'tool']);
@@ -72,7 +82,7 @@ describe('agent store: 轮次身份', () => {
       { type: 'tool.start', id: 'a1', call_id: 'call_0', name: 'read', input: { path: 'y' } },
       { type: 'tool.output', id: 'a1', call_id: 'call_0', chunk: '输出' },
       { type: 'tool.end', id: 'a1', call_id: 'call_0', ok: true, summary: '1 line' },
-      { type: 'turn.end', reason: 'stop' },
+      { type: 'turn.end', turn: 2, reason: 'stop' },
     ]);
 
     expect(agent.items().map((i) => i.kind)).toEqual([
@@ -102,7 +112,7 @@ describe('agent store: 轮次身份', () => {
       { type: 'tool.output', id: 'a1', call_id: 'call_1', chunk: 'B' },
       { type: 'tool.end', id: 'a1', call_id: 'call_0', ok: true, summary: 's' },
       { type: 'tool.end', id: 'a1', call_id: 'call_1', ok: false, summary: 'e' },
-      { type: 'turn.end', reason: 'stop' },
+      { type: 'turn.end', turn: 1, reason: 'stop' },
     ]);
 
     const cards = tools(agent);
@@ -110,5 +120,104 @@ describe('agent store: 轮次身份', () => {
     expect(cards[0]).toMatchObject({ output: 'A', status: 'ok' });
     expect(cards[1]).toMatchObject({ output: 'B', status: 'error' });
     expect(cards[0].id).not.toBe(cards[1].id);
+  });
+});
+
+describe('agent store: 终止是串行的', () => {
+  it('停止在 host 确认之前不放行：按钮禁用，且不接受下一条消息', async () => {
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('first', '/root');
+    frame?.({ type: 'assistant.delta', id: 'a1', text: 'thinking' });
+    expect(agent.stoppable()).toBe(true);
+
+    // The host tears the turn down and only answers once it is gone. Until it
+    // does, the stop is still in flight: the button is not pressable and a
+    // second prompt would land on a transcript the host is still writing.
+    const stopping = agent.abort();
+    await Promise.resolve();
+    expect(agent.stopping()).toBe(true);
+    expect(agent.stoppable()).toBe(false);
+    expect(agent.busy()).toBe(true);
+
+    await agent.send('second', '/root');
+    expect(calls.map((c) => c.cmd)).toEqual(['agent_send', 'agent_abort']);
+    expect(agent.items().filter((i) => i.kind === 'user')).toHaveLength(1);
+
+    stopHost();
+    await stopping;
+
+    expect(agent.busy()).toBe(false);
+    expect(agent.stopping()).toBe(false);
+    expect(texts(agent)).toEqual(['thinking']);
+  });
+
+  it('被停止的轮次留下的行就地收尾，而不是等一帧永远不会来的帧', async () => {
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('build it', '/root');
+    frame?.({ type: 'assistant.delta', id: 'a1', text: 'Running' });
+    frame?.({ type: 'tool.start', id: 'a1', call_id: 'c0', name: 'bash', input: { command: 'x' } });
+
+    const stopping = agent.abort();
+    await Promise.resolve();
+    stopHost();
+    await stopping;
+
+    const [message, card] = agent.items().filter((i) => i.kind !== 'user');
+    expect(message).toMatchObject({ kind: 'assistant', streaming: false, text: 'Running' });
+    expect(card).toMatchObject({ kind: 'tool', status: 'error', summary: 'stopped' });
+  });
+
+  it('迟到的 turn.end 不关闭已经开始的下一轮', async () => {
+    // 这就是停止必须带轮次号的原因：被停止的轮次由停止本身结算，
+    // 而宣布它结束的那一帧可能还在路上。落进下一轮就等于把正在跑的
+    // 轮次标成结束，发送键会在 agent 还在工作的时候变回来。
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('first', '/root');
+    frame?.({ type: 'turn.end', turn: 1, reason: 'aborted' });
+    await agent.send('second', '/root');
+
+    frame?.({ type: 'turn.end', turn: 1, reason: 'aborted' });
+    expect(agent.busy()).toBe(true);
+    expect(agent.stoppable()).toBe(true);
+
+    frame?.({ type: 'turn.end', turn: 2, reason: 'stop' });
+    expect(agent.busy()).toBe(false);
+  });
+
+  it('错误帧不结束轮次：它后面一定跟着 turn.end', async () => {
+    // 两处结算会让一个轮次被关两次，其中一次落在下一轮头上。
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('go', '/root');
+    frame?.({ type: 'error', message: 'model stream was silent' });
+
+    expect(agent.busy()).toBe(true);
+    expect(agent.items().filter((i) => i.kind === 'notice')).toHaveLength(1);
+
+    frame?.({ type: 'turn.end', turn: 1, reason: 'error' });
+    expect(agent.busy()).toBe(false);
+  });
+
+  it('停止期间不接受再次点击停止', async () => {
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('go', '/root');
+    const stopping = agent.abort();
+    await Promise.resolve();
+    await agent.abort();
+    stopHost();
+    await stopping;
+
+    // 一次就够：第二次点击只会对着同一个已经在拆除的轮次再问一遍，
+    // 而一个排在它后面的提示词会悄悄地被这次停止一起带走。
+    expect(calls.filter((c) => c.cmd === 'agent_abort')).toHaveLength(1);
   });
 });

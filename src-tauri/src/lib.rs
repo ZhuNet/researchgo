@@ -8,9 +8,11 @@ mod search;
 mod toolchain;
 mod watcher;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  tauri::Builder::default()
+  let app = tauri::Builder::default()
     .plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())
     .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
@@ -52,6 +54,16 @@ pub fn run() {
       fsops::pick_directory,
       search::search_workspace,
     ])
-    .run(tauri::generate_context!())
+    .build(tauri::generate_context!())
     .expect("error while building tauri application");
+
+  app.run(|handle, event| {
+    // The window is going away, so stop the agent rather than interrupting a
+    // turn nobody is going to see the end of. No waiting: there is no panel left
+    // to settle, and what is left behind — a shell command still running after
+    // the window is gone — is exactly what this is here to prevent.
+    if let tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::Destroyed, .. } = event {
+      agent::stop_without_waiting(&handle.state::<agent::agent_loop::AgentState>());
+    }
+  });
 }

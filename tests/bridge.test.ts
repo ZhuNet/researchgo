@@ -73,9 +73,15 @@ describe('translate: 补丁与用量', () => {
     });
   });
 
-  it('turn.end 保留原因', () => {
+  it('turn.end 保留轮次与原因', () => {
+    // The turn number is what lets the panel tell a late `turn.end` from one
+    // that closes the turn it is running, so it has to survive translation.
     for (const reason of ['stop', 'aborted', 'error'] as const) {
-      expect(one({ type: 'turn.end', reason })).toEqual({ kind: 'turn.end', reason });
+      expect(one({ type: 'turn.end', turn: 7, reason })).toEqual({
+        kind: 'turn.end',
+        turn: 7,
+        reason,
+      });
     }
   });
 });
@@ -121,7 +127,7 @@ describe('translate: 一行一帧的线协议假设', () => {
     const stream = [
       JSON.stringify({ type: 'assistant.delta', id: 'a', text: 'he' }),
       JSON.stringify({ type: 'assistant.delta', id: 'a', text: 'llo' }),
-      JSON.stringify({ type: 'turn.end', reason: 'stop' }),
+      JSON.stringify({ type: 'turn.end', turn: 1, reason: 'stop' }),
     ].join('\n');
     const events = stream.split('\n').flatMap((line) => translate(line));
     expect(events.map((e) => e.kind)).toEqual(['text.delta', 'text.delta', 'turn.end']);

@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use globset::{GlobBuilder, GlobMatcher};
 use grep_regex::RegexMatcherBuilder;
@@ -18,6 +19,8 @@ use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use tokio::process::Command;
+
+use super::agent_loop::Turn;
 
 /// A tool refused to run. Reported to the model as a failed call rather than
 /// crashing the turn: the model is often right about the goal and wrong about
@@ -190,25 +193,47 @@ pub fn tool_defs() -> Vec<Value> {
   ]
 }
 
+/// What a tool says when the turn stopped before it could finish.
+///
+/// One string for both readers: the transcript the model sees next turn and the
+/// row on screen. It is a *result* rather than a silence on purpose — a tool
+/// call the model asked for has to be answered, and an unanswered one is a
+/// request the endpoint rejects outright.
+pub const STOPPED: &str = "stopped";
+
 /// Runs one tool call.
 ///
 /// `root` is the workspace the conversation is running in. `call_id` is echoed
 /// in every frame for the call so a late chunk cannot be attributed to the
-/// wrong tool.
-pub async fn run(root: &Path, name: &str, args: &Value, call_id: &str) -> Result<ToolOutput, ToolError> {
+/// wrong tool. `turn` is what makes a tool interruptible: a search and a shell
+/// command both outlive the click that stopped the turn unless something
+/// interrupts them, and a build still running after the panel says it stopped is
+/// the one that rewrites a file the next turn has already read.
+pub async fn run(
+  root: &Path,
+  name: &str,
+  args: &Value,
+  call_id: &str,
+  turn: &Arc<Turn>,
+) -> Result<ToolOutput, ToolError> {
   if matches!(name, "glob" | "grep") {
     let root = root.to_path_buf();
     let args = args.clone();
     let name = name.to_string();
-    return tokio::task::spawn_blocking(move || {
-      if name == "glob" { glob_tool(&root, &args) } else { grep_tool(&root, &args) }
-    }).await.map_err(|e| ToolError(format!("search task failed: {e}")))?;
+    return tokio::select! {
+      biased;
+      _ = turn.stopped() => Err(ToolError(STOPPED.into())),
+      result = tokio::task::spawn_blocking(move || {
+        if name == "glob" { glob_tool(&root, &args) } else { grep_tool(&root, &args) }
+      }) =>
+        result.map_err(|e| ToolError(format!("search task failed: {e}")))?,
+    };
   }
   match name {
     "read" => read_tool(root, args),
     "write" => write_tool(root, args),
     "edit" => edit_tool(root, args),
-    "bash" => bash_tool(root, args).await,
+    "bash" => bash_tool(root, args, turn).await,
     "glob" => glob_tool(root, args),
     "grep" => grep_tool(root, args),
     other => Err(ToolError(format!(
@@ -444,7 +469,7 @@ fn dialect() -> &'static str {
   }
 }
 
-async fn bash_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
+async fn bash_tool(root: &Path, args: &Value, turn: &Arc<Turn>) -> Result<ToolOutput, ToolError> {
   let command = arg_str(args, "command")?;
   if command.trim().is_empty() {
     return Err(ToolError("command is empty".into()));
@@ -464,15 +489,19 @@ async fn bash_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   // across this await, and a blocking `output()` there would pin a blocking
   // thread for as long as the command runs — and forever, if the command does.
   //
-  // `kill_on_drop` so a timeout takes the process with it: a build left running
-  // after the model gave up keeps a file handle, burns a core, and can rewrite
-  // a source file the next turn has already read.
-  let output = match tokio::time::timeout(
-    std::time::Duration::from_secs(BASH_TIMEOUT_SECS),
-    child.kill_on_drop(true).current_dir(root).output(),
-  )
-  .await
-  {
+  // `kill_on_drop` so a stop takes the process with it: a build left running
+  // after the turn was stopped keeps a file handle, burns a core, and can
+  // rewrite a source file the next turn has already read. Dropping the future
+  // is what kills it, which is why the stop is raced here rather than polled.
+  let output = tokio::select! {
+    biased;
+    _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
+    result = tokio::time::timeout(
+      std::time::Duration::from_secs(BASH_TIMEOUT_SECS),
+      child.kill_on_drop(true).current_dir(root).output(),
+    ) => result,
+  };
+  let output = match output {
     Ok(result) => result.map_err(|e| ToolError(format!("cannot run `{command}`: {e}")))?,
     Err(_) => {
       // `kill_on_drop` took the process with the future, so nothing survives to
@@ -884,7 +913,7 @@ mod tests {
     // tool call, so the transcript drew a tick beside a failed command and the
     // model read a failing test run as a passing one.
     let fixture = Fixture::new();
-    let out = bash_tool(&fixture.0, &json!({ "command": failing_command() })).await.unwrap();
+    let out = bash_tool(&fixture.0, &json!({ "command": failing_command() }), &Turn::detached()).await.unwrap();
 
     assert!(!out.ok, "a command that exits non-zero is not a success");
     // The output is the whole point of the call. Turning the failure into a
@@ -896,7 +925,7 @@ mod tests {
   #[tokio::test]
   async fn a_successful_command_reports_success_and_no_summary() {
     let fixture = Fixture::new();
-    let out = bash_tool(&fixture.0, &json!({ "command": succeeding_command() })).await.unwrap();
+    let out = bash_tool(&fixture.0, &json!({ "command": succeeding_command() }), &Turn::detached()).await.unwrap();
 
     assert!(out.ok);
     // `cmd` writes CRLF, so the content is compared on the line, not the byte.
@@ -925,7 +954,7 @@ mod tests {
 
   #[tokio::test]
   async fn unknown_tool_names_itself() {
-    let err = match run(&root(), "deploy", &json!({}), "c1").await {
+    let err = match run(&root(), "deploy", &json!({}), "c1", &Turn::detached()).await {
       Ok(out) => panic!("expected an error, got: {}", out.summary),
       Err(err) => err.0,
     };
@@ -939,7 +968,7 @@ mod tests {
   async fn read_reports_a_directory_as_such() {
     // Without a temp dir this would depend on the machine; the guard is what
     // matters, and it is checked before any read is attempted.
-    let err = match run(&root(), "read", &json!({ "path": "src" }), "c1").await {
+    let err = match run(&root(), "read", &json!({ "path": "src" }), "c1", &Turn::detached()).await {
       Ok(out) => panic!("expected an error, got: {}", out.summary),
       Err(err) => err.0,
     };

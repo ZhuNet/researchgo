@@ -780,6 +780,20 @@
   background: rgba(242, 88, 91, 0.24);
 }
 
+/* Neither a turn to interrupt nor a stop to repeat: dimmed rather than hidden,
+   so the button never changes size or position between the two states. */
+.send--busy,
+.send:disabled {
+  color: var(--tx-4);
+  background: var(--bg-4);
+  cursor: default;
+}
+
+.send--busy:hover,
+.send:disabled:hover {
+  background: var(--bg-4);
+}
+
 .composer__foot {
   display: flex;
   align-items: center;
