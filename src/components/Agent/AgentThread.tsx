@@ -1,7 +1,7 @@
-import { createEffect, createSignal, For, on, Show } from 'solid-js';
+import { createEffect, createSignal, Index, on, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
-import { markdown } from '../../lib/markdown';
+import { updateMarkdown } from '../../lib/markdown';
 import type { Agent, Item } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 
@@ -59,24 +59,27 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
   return (
     <div class="thread-wrap">
       <div class="thread scroll" ref={scroller} onScroll={onScroll}>
-        <For each={props.agent.items()}>
+        <Index each={props.agent.items()}>
           {(item) => (
             <>
-              <Show when={item.kind === 'assistant' && item.streaming && item.text === ''}>
+              <Show when={(() => {
+                const value = item();
+                return value.kind === 'assistant' && value.streaming && value.text === '';
+              })()}>
                 <ThinkingRow />
               </Show>
               <ThreadItem
-                item={item}
+                item={item()}
                 agent={props.agent}
                 ws={props.ws}
-                open={expanded()[keyOf(item)] ?? false}
+                open={expanded()[keyOf(item())] ?? false}
                 onToggle={() =>
-                  setExpanded((prev) => ({ ...prev, [keyOf(item)]: !prev[keyOf(item)] }))
+                  setExpanded((prev) => ({ ...prev, [keyOf(item())]: !prev[keyOf(item())] }))
                 }
               />
             </>
           )}
-        </For>
+        </Index>
 
         <Show when={props.agent.busy()}>
           <div class="thread__working">
@@ -136,10 +139,7 @@ function ThreadItem(props: {
           <div class="msg__avatar">
             <Icon name="sparkles" size={13} />
           </div>
-          <div class="msg__body markdown" innerHTML={markdown((props.item as any).text)} />
-          <Show when={(props.item as any).streaming}>
-            <span class="caret" />
-          </Show>
+          <AssistantText text={(props.item as any).text} />
         </div>
       </Show>
 
@@ -173,6 +173,12 @@ function ThreadItem(props: {
       </Show>
     </>
   );
+}
+
+function AssistantText(props: { text: string }) {
+  let body!: HTMLDivElement;
+  createEffect(() => updateMarkdown(body, props.text));
+  return <div class="msg__body markdown" ref={body} />;
 }
 
 function ToolCard(props: {

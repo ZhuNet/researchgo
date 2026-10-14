@@ -356,23 +356,6 @@
   }
 }
 
-.caret {
-  display: inline-block;
-  width: 6px;
-  height: 13px;
-  margin-left: 2px;
-  vertical-align: -2px;
-  border-radius: 1px;
-  background: var(--ac-hi);
-  animation: blink 1s steps(2, start) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
-}
-
 .markdown .md__p {
   margin: 0 0 var(--sp-4);
 }

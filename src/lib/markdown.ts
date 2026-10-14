@@ -14,6 +14,10 @@ function inline(s: string): string {
 }
 
 export function markdown(src: string): string {
+  return markdownBlocks(src).join('');
+}
+
+function markdownBlocks(src: string): string[] {
   const lines = src.split('\n');
   const out: string[] = [];
   let i = 0;
@@ -92,7 +96,70 @@ export function markdown(src: string): string {
   }
 
   flushList();
-  return out.join('');
+  return out;
+}
+
+// Keep existing message nodes while streaming, including completed paragraphs.
+// Markdown delimiters can change the current node's shape as more text arrives.
+export function updateMarkdown(target: HTMLElement, src: string): void {
+  let current = target.firstChild;
+  for (const html of markdownBlocks(src)) {
+    const following = current?.nextSibling ?? null;
+    if (!current || (current as Element).outerHTML !== html) {
+      const template = target.ownerDocument.createElement('template');
+      template.innerHTML = html;
+      for (const incoming of Array.from(template.content.childNodes)) {
+        if (!current) target.appendChild(incoming);
+        else syncNode(current, incoming);
+      }
+    }
+    current = following;
+  }
+  while (current) {
+    const following = current.nextSibling;
+    target.removeChild(current);
+    current = following;
+  }
+}
+
+function syncChildren(target: Node, next: Node): void {
+  let current = target.firstChild;
+  for (const incoming of Array.from(next.childNodes)) {
+    if (!current) {
+      target.appendChild(incoming);
+      continue;
+    }
+    const following = current.nextSibling;
+    syncNode(current, incoming);
+    current = following;
+  }
+  while (current) {
+    const following = current.nextSibling;
+    target.removeChild(current);
+    current = following;
+  }
+}
+
+function syncNode(current: Node, incoming: Node): void {
+  if (current.isEqualNode(incoming)) return;
+  if (current.nodeType !== incoming.nodeType || current.nodeName !== incoming.nodeName) {
+    current.parentNode!.replaceChild(incoming, current);
+  } else if (current.nodeType === 3) {
+    const before = current.nodeValue ?? '';
+    const after = incoming.nodeValue ?? '';
+    if (after.startsWith(before)) (current as Text).appendData(after.slice(before.length));
+    else current.nodeValue = after;
+  } else if (current.nodeType === 1) {
+    const element = current as Element;
+    const replacement = incoming as Element;
+    for (const attr of Array.from(element.attributes)) {
+      if (!replacement.hasAttribute(attr.name)) element.removeAttribute(attr.name);
+    }
+    for (const attr of Array.from(replacement.attributes)) {
+      if (element.getAttribute(attr.name) !== attr.value) element.setAttribute(attr.name, attr.value);
+    }
+    syncChildren(element, replacement);
+  }
 }
 
 export function plain(src: string, max = 220): string {
