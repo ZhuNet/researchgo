@@ -548,15 +548,17 @@
 
 .toast {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sp-4);
-  min-width: 240px;
-  max-width: 360px;
+  min-width: 320px;
+  max-width: 480px;
   padding: var(--sp-4) var(--sp-5);
   border-radius: var(--r-md);
   background: var(--bg-3);
   border: 1px solid var(--bd-2);
   box-shadow: var(--sh-3);
+  /* The container is click-through; each card opts back in so the × is live. */
+  pointer-events: auto;
 }
 
 .toast__icon {
@@ -565,6 +567,7 @@
   width: 20px;
   height: 20px;
   flex: none;
+  margin-top: -1px;
   border-radius: 50%;
   color: var(--info);
   background: rgba(91, 168, 245, 0.14);
@@ -585,16 +588,42 @@
   flex-direction: column;
   gap: 1px;
   min-width: 0;
+  flex: 1;
+  /* Wrapped errors read as a paragraph, not as ragged fragments: even the
+     left and right edges. The last line stays flush left, as justify should. */
+  text-align: justify;
 }
 
 .toast__title {
   font-size: 12px;
   font-weight: 500;
   color: var(--tx-1);
+  overflow-wrap: anywhere;
 }
 
+/* Error details are paths and stack traces: keep the line breaks they arrived
+   with, and break anywhere so one long token cannot stretch the card. */
 .toast__detail {
   font-size: 10.5px;
   font-family: var(--font-mono);
   color: var(--tx-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.toast__close {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: var(--r-sm);
+  color: var(--tx-4);
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+.toast__close:hover {
+  background: var(--bg-4);
+  color: var(--tx-1);
 }

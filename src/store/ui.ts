@@ -7,6 +7,8 @@ export interface Toast {
   kind: 'info' | 'ok' | 'error';
   title: string;
   detail?: string;
+  /** Sticky toasts ignore the auto-dismiss timer and wait for the × button. */
+  sticky: boolean;
 }
 
 const stored = (typeof localStorage !== 'undefined' && localStorage.getItem('rg.theme')) as Theme | null;
@@ -101,10 +103,22 @@ export function setWrap(next: boolean) {
 
 let seq = 0;
 
+/** How long a transient toast lingers. Errors ignore this: a message that
+ *  vanishes before it has been read is worse than one that takes up room, so
+ *  they stay until dismissed. */
+const TRANSIENT_MS = 2600;
+
 export function toast(kind: Toast['kind'], title: string, detail?: string) {
   const id = ++seq;
-  setToasts((prev) => [...prev.slice(-3), { id, kind, title, detail }]);
-  setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 2600);
+  const sticky = kind === 'error';
+  setToasts((prev) => [...prev.slice(-3), { id, kind, title, detail, sticky }]);
+  if (!sticky) setTimeout(() => dismissToast(id), TRANSIENT_MS);
+}
+
+export function dismissToast(id: number) {
+  // Guard the identity check so a toast that already timed out does not hand
+  // the <For> a fresh array and re-render every remaining toast for nothing.
+  setToasts((prev) => (prev.some((t) => t.id === id) ? prev.filter((t) => t.id !== id) : prev));
 }
 
 export interface MenuItem {

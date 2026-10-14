@@ -1,7 +1,7 @@
 import { For, Show } from 'solid-js';
 
 import { Icon } from './Icon';
-import { toasts } from '../store/ui';
+import { dismissToast, toasts } from '../store/ui';
 
 export function Toaster() {
   return (
@@ -18,10 +18,21 @@ export function Toaster() {
             </span>
             <div class="toast__body">
               <span class="toast__title">{toast.title}</span>
+              {/* No .truncate: an error you cannot read in full is not a
+                  message, it is a rumour. Wrapping is handled in CSS. */}
               <Show when={toast.detail}>
-                <span class="toast__detail truncate">{toast.detail}</span>
+                <span class="toast__detail">{toast.detail}</span>
               </Show>
             </div>
+            <button
+              class="toast__close"
+              type="button"
+              title="Dismiss"
+              aria-label="Dismiss"
+              onClick={() => dismissToast(toast.id)}
+            >
+              <Icon name="x" size={12} stroke={2} />
+            </button>
           </div>
         )}
       </For>
