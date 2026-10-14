@@ -34,9 +34,13 @@ use super::tools;
 /// Ceiling on model round-trips per turn. Generous for real work, and finite so
 /// a loop the model cannot exit costs a turn rather than the conversation.
 const MAX_STEPS: usize = 48;
-/// Longer than any reasonable first token, short enough that a dead endpoint
-/// reports itself instead of leaving the panel spinning.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// A connection should be established quickly even when generation itself is
+/// allowed to run for a long time.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum silence between two chunks. This is deliberately a read timeout,
+/// not a total request timeout: a tool-heavy or reasoning-heavy response can
+/// legitimately stream for longer than three minutes.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 // The host knows the absolute workspace path; the model only needs to know
 // that every tool starts inside the folder currently open in the app.
@@ -132,7 +136,14 @@ impl Conversation {
       // outside the model's control, so it is the only place a turn reports an
       // error rather than a tool error.
       log::info!("[agent] step {step}: calling model ({} messages)", self.messages.len());
-      let reply = match call_model(&cfg, &self.messages).await {
+      let id = format!("a{step}");
+      let result = call_model_streaming(&cfg, &self.messages, |text| {
+        if !cancel.load(Ordering::Relaxed) {
+          emit(app, Frame::AssistantDelta { id: id.clone(), text: text.to_string() });
+        }
+      }).await;
+      emit(app, Frame::AssistantDone { id: id.clone() });
+      let reply = match result {
         Ok(reply) => reply,
         Err(err) => {
           emit(app, Frame::Error { message: err });
@@ -148,23 +159,6 @@ impl Conversation {
       if cancel.load(Ordering::Relaxed) {
         break TurnReason::Aborted;
       }
-
-      let id = format!("a{step}");
-      if !reply.text.is_empty() {
-        // Text that arrived before the tool calls is real output and is kept:
-        // a model that explains what it is about to do and then does it is
-        // worth showing, and dropping it leaves the reader with a bare tool row.
-        for chunk in chunks(&reply.text, 220) {
-          emit(
-            app,
-            Frame::AssistantDelta {
-              id: id.clone(),
-              text: chunk,
-            },
-          );
-        }
-      }
-      emit(app, Frame::AssistantDone { id: id.clone() });
 
       self.record(&reply.message, None);
 
@@ -394,8 +388,19 @@ pub async fn call_model(
   cfg: &ResolvedModel,
   messages: &[Value],
 ) -> Result<Reply, String> {
+  call_model_streaming(cfg, messages, |_| {}).await
+}
+
+/// Delivers text as it arrives while retaining the full reply for the transcript
+/// and waiting for complete tool arguments before any tool can run.
+pub async fn call_model_streaming(
+  cfg: &ResolvedModel,
+  messages: &[Value],
+  mut on_text: impl FnMut(&str),
+) -> Result<Reply, String> {
   let client = reqwest::Client::builder()
-    .timeout(REQUEST_TIMEOUT)
+    .connect_timeout(CONNECT_TIMEOUT)
+    .read_timeout(STREAM_IDLE_TIMEOUT)
     .build()
     .map_err(|e| format!("cannot build HTTP client: {e}"))?;
 
@@ -434,27 +439,41 @@ pub async fn call_model(
   let mut content = String::new();
   let mut tool_calls: Vec<ToolCall> = Vec::new();
   let mut usage = (0u64, 0u64, 0u64);
-  let mut buffer = String::new();
+  let mut buffer = Vec::new();
 
   let mut stream = response.bytes_stream();
   use futures_util::StreamExt;
   while let Some(next) = stream.next().await {
-    let bytes = next.map_err(|e| format!("stream failed: {e}"))?;
-    buffer.push_str(&String::from_utf8_lossy(&bytes));
+    let bytes = next.map_err(|e| {
+      if e.is_timeout() {
+        format!(
+          "model stream was silent for {} seconds; check the endpoint or proxy",
+          STREAM_IDLE_TIMEOUT.as_secs()
+        )
+      } else {
+        format!("stream failed: {e}")
+      }
+    })?;
+    buffer.extend_from_slice(&bytes);
 
     // SSE frames are separated by a blank line. A chunk can land anywhere,
     // including mid-line, so whatever follows the last newline is held back
     // until the next one completes it.
-    while let Some(pos) = buffer.find('\n') {
-      let line = buffer[..pos].trim().to_string();
-      buffer = buffer[pos + 1..].to_string();
+    while let Some(pos) = buffer.iter().position(|&byte| byte == b'\n') {
+      // Decode complete lines, since a network chunk can split a UTF-8 character.
+      let line = String::from_utf8_lossy(&buffer[..pos]).trim().to_string();
+      buffer.drain(..=pos);
       if let Some(data) = line.strip_prefix("data:") {
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
           continue;
         }
         if let Ok(chunk) = serde_json::from_str::<Value>(data) {
+          let before = content.len();
           absorb(&chunk, &mut content, &mut tool_calls, &mut usage);
+          if content.len() > before {
+            on_text(&content[before..]);
+          }
         }
       }
     }

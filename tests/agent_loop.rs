@@ -17,6 +17,53 @@ use serde_json::{json, Value};
 use researchgo_lib::agent::agent_loop;
 
 #[tokio::test]
+async fn text_arrives_before_the_response_finishes() {
+  let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let (tx, rx) = std::sync::mpsc::channel();
+  let server = std::thread::spawn(move || {
+    let (mut socket, _) = listener.accept().unwrap();
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut length = 0;
+    loop {
+      let mut line = String::new();
+      assert!(reader.read_line(&mut line).unwrap() > 0);
+      if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+        length = value.trim().parse::<usize>().unwrap();
+      }
+      if line.trim().is_empty() { break; }
+    }
+    let mut body = vec![0; length];
+    std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n";
+    let split = first.find('你').unwrap() + 1;
+    socket.write_all(&first.as_bytes()[..split]).unwrap();
+    socket.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    socket.write_all(&first.as_bytes()[split..]).unwrap();
+    socket.flush().unwrap();
+    // The server cannot finish until the caller has received the first delta.
+    rx.recv_timeout(std::time::Duration::from_secs(5)).expect("text delivered before EOF");
+    socket.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\ndata: [DONE]\n\n").unwrap();
+  });
+  let cfg = ResolvedModel {
+    url: format!("http://127.0.0.1:{port}/v1"),
+    api_key: "sk-test".into(), name: "mock".into(), model: "test-model".into(),
+  };
+  let mut deltas = Vec::new();
+  let reply = agent_loop::call_model_streaming(&cfg, &[], |text| {
+    deltas.push(text.to_string());
+    if deltas.len() == 1 { tx.send(()).unwrap(); }
+  }).await.expect("stream completes");
+  server.join().unwrap();
+  assert_eq!(deltas, vec!["你好", "!"]);
+  assert_eq!(reply.text, "你好!");
+  assert_eq!(reply.message["content"], "你好!");
+}
+
+#[tokio::test]
 async fn workspace_tools_continue_after_a_nested_glob() {
   let root = std::env::temp_dir().join(format!(
     "researchgo-agent-tools-{}-{}",
