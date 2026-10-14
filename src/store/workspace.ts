@@ -545,10 +545,17 @@ export function createWorkspace(
     return paths;
   }
 
+  /**
+   * 记录 tab 条的可视窗口，并校准刚进入窗口的 tab。
+   *
+   * 进入窗口不是一次内容请求：横向滚动一下就能让一个 tab 进来，如果这里重读
+   * 磁盘，未保存的编辑会在读者根本没碰过这个 tab 的时候被冲掉。校准只做两件
+   * 事——确认路径还在不在，以及比一次指纹；真的变了 `checkTab` 自己会发现。
+   */
   function protectTabs(paths: string[]): void {
     const previous = visibleTabs;
     visibleTabs = new Set(paths);
-    for (const path of monitoredTabs()) if (!previous.has(path)) void checkTab(path, true);
+    for (const path of monitoredTabs()) if (!previous.has(path)) void checkTab(path, false);
     syncWatch();
   }
 
@@ -651,7 +658,10 @@ export function createWorkspace(
     if (tabs().includes(path)) {
       setActive(path);
       setStageMode('code');
-      await checkTab(path, !missingTabs().has(path));
+      // 只校准，不重读。缓冲区常驻内存，而且每个键入都已经写回 store，所以这里
+      // 再从磁盘读一遍只会用旧内容覆盖读者手上的那一份——包括他没保存的编辑。
+      // 路径消失或指纹变化由 `checkTab` 自己比较，变了才跟上磁盘。
+      await checkTab(path, false);
       syncWatch();
       return;
     }
@@ -1175,6 +1185,20 @@ export function createWorkspace(
   const checkingTabs = new Map<string, Promise<void>>();
   const tabAgain = new Set<string>();
   const tabStamps = new Map<string, string>();
+
+  /**
+   * Calibrates one open tab against the disk.
+   *
+   * `content` says the caller *knows* the bytes moved — a watcher event, or our own
+   * save. It is deliberately not what "the reader is looking at this tab again"
+   * means: switching to a tab, or scrolling one into the strip's window, must not
+   * re-read the file, because the resident buffer already is what the reader has
+   * been editing and `open` would hand back whatever is on disk instead.
+   *
+   * Existence is always checked, and the size/mtime/binary stamp below decides the
+   * rest: a file that really changed under us is still followed onto the disk, and
+   * a struck-through tab that came back is picked up again.
+   */
   async function checkTab(path: string, content: boolean): Promise<void> {
     const pending = checkingTabs.get(path);
     if (pending) { if (content) tabAgain.add(path); return pending; }

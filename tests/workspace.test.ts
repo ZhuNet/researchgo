@@ -202,6 +202,50 @@ describe('打开文件与内容', () => {
     });
   });
 
+  it('重新点开已打开的 tab 不从磁盘覆盖当前缓冲', async () => {
+    // 缓冲区常驻内存，切回来要显示的就是它自己，包括没保存的那部分。
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.files.set('/README.md', 'on disk\n');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', '未保存的编辑');
+      ws.setDirty(new Set(['/README.md']));
+      await ws.openFile('/src/lib.rs');
+      const reads = fs.readCalls.length;
+      await ws.openFile('/README.md');
+      expect(ws.contentOf('/README.md')).toBe('未保存的编辑');
+      expect(ws.dirty().has('/README.md')).toBe(true);
+      expect(fs.readCalls.length).toBe(reads);
+    });
+  });
+
+  it('tab 滚出可视窗口再滚回来也不重读', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.files.set('/README.md', 'on disk\n');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', '未保存的编辑');
+      const reads = fs.readCalls.length;
+      ws.protectTabs([]);
+      ws.protectTabs(['/README.md']);
+      await flush();
+      expect(ws.contentOf('/README.md')).toBe('未保存的编辑');
+      expect(fs.readCalls.length).toBe(reads);
+    });
+  });
+
+  it('tab 里的文件确实变了，再次点开仍然跟上磁盘', async () => {
+    // 去掉强制重读之后，指纹比较就是唯一发现外部改动的途径，不能一起丢掉。
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      fs.files.set('/README.md', 'on disk\n');
+      await ws.openFile('/README.md');
+      fs.files.set('/README.md', 'changed outside\n');
+      await ws.openFile('/README.md');
+      expect(ws.contentOf('/README.md')).toBe('changed outside\n');
+    });
+  });
+
   it('openFile 打开目录只负责加载，不改变展开状态', async () => {
     // 展开权只归 toggleDir。早期 openFile 内部也 toggle，而点击行与点击箭头
     // 各触发一次，导致"展开后立刻收起"——这正是回归的根源。
