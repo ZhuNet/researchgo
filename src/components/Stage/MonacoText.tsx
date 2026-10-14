@@ -34,6 +34,10 @@ const models = new Map<string, Monaco.editor.ITextModel>();
 const views = new Map<string, Monaco.editor.ICodeEditorViewState>();
 const externalModels = new Set<Monaco.editor.ITextModel>();
 
+function modelKey(path: string): string {
+  return monaco.Uri.file(path).toString();
+}
+
 /**
  * Above this many characters the editor turns off the parts that cost the most per
  * line — the minimap, folding, occurrence highlighting — so a big file still types
@@ -84,9 +88,15 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   }
 
   function modelFor(path: string, content: string): Monaco.editor.ITextModel {
-    let model = models.get(path);
+    const uri = monaco.Uri.file(path);
+    const key = modelKey(path);
+    let model = models.get(key);
     if (!model) {
-      model = monaco.editor.createModel(content, languageFor(path), monaco.Uri.file(path));
+      // Monaco's registry outlives editor views. A model that is not in this
+      // document registry has no current workspace owner or change listener, so
+      // adopting it would join this tab to stale data. Remove the orphan instead.
+      monaco.editor.getModel(uri)?.dispose();
+      model = monaco.editor.createModel(content, languageFor(path), uri);
       model.onDidChangeContent(() => {
         if (externalModels.has(model!)) return;
         batch(() => {
@@ -94,9 +104,20 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
           props.ws.editor.setContent(path, model!.getValue());
         });
       });
-      models.set(path, model);
     }
+    models.set(key, model);
     return model;
+  }
+
+  function releaseClosedModels(): void {
+    const open = props.ws.tabs();
+    for (const [key, model] of models) {
+      const path = open.find((candidate) => modelKey(candidate) === key);
+      if (path) continue;
+      if (editor?.getModel() === model) editor.setModel(null);
+      model.dispose();
+      models.delete(key);
+    }
   }
 
   function countLines(): void {
@@ -124,7 +145,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       if (view) editor.restoreViewState(view);
       else editor.setPosition({ lineNumber: 1, column: 1 });
       density(content.length);
-      countLines();
       return;
     }
     const model = editor.getModel();
@@ -139,7 +159,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     model.setValue(content);
     externalModels.delete(model);
     density(content.length);
-    countLines();
   }
 
   function save(): void {
@@ -183,6 +202,8 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         const model = editor?.getModel();
         setSelected(model ? model.getValueLengthInRange(e.selection) : 0);
       });
+      editor.onDidChangeModel(countLines);
+      editor.onDidChangeModelContent(countLines);
       adopt(props.path, props.ws.contentOf(props.path), props.ws.isLoaded(props.path));
     });
     onCleanup(() => {
@@ -190,7 +211,9 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       if (current && editor) {
         const saved = editor.saveViewState();
         if (saved) views.set(current, saved as Monaco.editor.ICodeEditorViewState);
+        if (!props.ws.tabs().some((path) => modelKey(path) === modelKey(current))) views.delete(current);
       }
+      releaseClosedModels();
       editor?.dispose();
       editor = undefined;
       current = '';
@@ -220,12 +243,15 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   // every file ever opened. Until then, keeping it is what preserves unsaved edits.
   createEffect(() => {
     const open = new Set(props.ws.tabs());
-    for (const [path, model] of models) {
+    releaseClosedModels();
+    for (const [key, model] of models) {
+      const path = props.ws.tabs().find((candidate) => modelKey(candidate) === key);
+      if (!path) continue;
       const content = props.ws.editor.contentOf(path);
       if (!open.has(path) || (content === undefined && path !== props.ws.active() && !props.ws.dirty().has(path))) {
         if (editor?.getModel() === model) editor.setModel(null);
         model.dispose();
-        models.delete(path);
+        models.delete(key);
         if (!open.has(path)) views.delete(path);
       } else if (content !== undefined && model.getValue() !== content) {
         externalModels.add(model);
