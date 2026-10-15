@@ -293,12 +293,12 @@ in-process — no network, no key, no mocking of the streaming layer.
 
 Not built yet, in rough order of how much they'd improve the thing:
 
-- [ ] Transcript import / export (`.jsonl`) — the menu entries are stubs today
-- [ ] Real git integration for the Changes panel (right now it lists unsaved buffers)
-- [ ] Bibliography management — `.bib` is syntax-highlighted, not managed
-- [ ] macOS / Windows installers (`bundle.targets` is currently deb + AppImage only)
-- [ ] Multi-root workspaces
-- [ ] A real LaTeX completion source (label, ref, cite) rather than just highlighting
+- Transcript import / export (`.jsonl`) — the menu entries are stubs today
+- Real git integration for the Changes panel (right now it lists unsaved buffers)
+- Bibliography management — `.bib` is syntax-highlighted, not managed
+- macOS / Windows installers (`bundle.targets` is currently deb + AppImage only)
+- Multi-root workspaces
+- A real LaTeX completion source (label, ref, cite) rather than just highlighting
 
 ---
 
