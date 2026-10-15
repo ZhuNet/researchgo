@@ -82,9 +82,17 @@ pub enum Frame {
   },
   #[serde(rename = "usage")]
   Usage {
-    input: u64,
-    output: u64,
-    cache_read: u64,
+    /// How large the conversation is right now: everything the last request
+    /// carried, plus what it answered. This is what the panel's context meter
+    /// shows, and the only figure comparable to a model's context window.
+    context: u64,
+    /// Everything this turn has cost so far, across all of its requests.
+    ///
+    /// Not the same number as `context`, and not interchangeable with it: each
+    /// request re-sends the whole conversation, so a turn that made twenty
+    /// calls has paid for the history twenty times over while the conversation
+    /// itself grew by only the last of those. This one is a cost, for the rate.
+    tokens: u64,
   },
   #[serde(rename = "turn.end")]
   TurnEnd {
@@ -101,19 +109,6 @@ pub enum Frame {
   Error {
     message: String,
   },
-}
-
-impl Frame {
-  /// Frames the renderer must see in order.
-  ///
-  /// `usage` is the exception: it reports a running total rather than something
-  /// that happened at a point in the transcript, so a late arrival corrects the
-  /// number instead of corrupting the ordering. The renderer treats the stream
-  /// as append-only and never assumes ordering beyond what a single `id`
-  /// implies, which is what makes that safe.
-  pub fn is_ordered(&self) -> bool {
-    !matches!(self, Frame::Usage { .. })
-  }
 }
 
 /// The event name the frontend listens on.
@@ -183,11 +178,7 @@ mod tests {
         "file.patch",
       ),
       (
-        Frame::Usage {
-          input: 1,
-          output: 1,
-          cache_read: 1,
-        },
+        Frame::Usage { context: 1, tokens: 1 },
         "usage",
       ),
       (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop }, "turn.end"),

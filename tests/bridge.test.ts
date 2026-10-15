@@ -64,12 +64,11 @@ describe('translate: 补丁与用量', () => {
     ).toEqual({ kind: 'patch', path: '/a.tex', op: 'modify', bytes: 128 });
   });
 
-  it('usage 的 cache_read 映射成 cacheRead', () => {
-    expect(one({ type: 'usage', input: 10, output: 20, cache_read: 30 })).toEqual({
+  it('usage 同时带过上下文长度与本轮消耗', () => {
+    expect(one({ type: 'usage', context: 8_300, tokens: 21_000 })).toEqual({
       kind: 'usage',
-      input: 10,
-      output: 20,
-      cacheRead: 30,
+      context: 8_300,
+      tokens: 21_000,
     });
   });
 

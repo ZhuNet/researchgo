@@ -2,7 +2,7 @@
 //!
 //! This is the part of a coding agent that is not a negotiation with an API. A
 //! turn is: ask the model, run whatever it asked for, feed the results back,
-//! ask again. Stop when the model stops asking. Everything else in a harness �?//! compaction, subagents, steering, skills �?exists to make that loop survive
+//! ask again. Stop when the model stops asking. Everything else in a harness —//! compaction, subagents, steering, skills —exists to make that loop survive
 //! longer, and none of it changes what the loop does.
 //!
 //! What does matter, and what is implemented here rather than skipped:
@@ -13,9 +13,10 @@
 //! * Every frame leaves through one emitter, and so does every record on its
 //!   way to the log: the order is whatever the loop did, not whatever the
 //!   transport or the filesystem did.
-//! * The turn ends on a budget as well as on the model. A model that has
-//!   decided to keep editing is indistinguishable from one that is stuck, and
-//!   the difference is only visible in the count.
+//! * The turn ends when the model stops asking or when the person stops it.
+//!   There is deliberately no step ceiling: a long task is the ordinary case
+//!   rather than an exception to be tolerated, and the stop button is a real
+//!   exit rather than a courtesy —it cuts the model stream where it stands.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,9 +33,6 @@ use super::frame::{Frame, PatchOp, TurnReason, STREAM};
 use super::log::{Recorder, Store, ToolRecord};
 use super::tools;
 
-/// Ceiling on model round-trips per turn. Generous for real work, and finite so
-/// a loop the model cannot exit costs a turn rather than the conversation.
-const MAX_STEPS: usize = 48;
 /// A connection should be established quickly even when generation itself is
 /// allowed to run for a long time.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -50,8 +48,8 @@ const WORKSPACE_INSTRUCTIONS: &str = "Your working directory is the currently op
 /// The conversation, kept across turns so the model remembers what it did.
 ///
 /// There is no session and no session id: one panel, one transcript, and the
-/// log beside it. What a session id used to identify — which conversation these
-/// records belong to — is the answer to a question nobody asks once there is
+/// log beside it. What a session id used to identify —which conversation these
+/// records belong to —is the answer to a question nobody asks once there is
 /// only ever one conversation, and carrying it meant the renderer had to be
 /// told about it and had to keep track of it.
 pub struct Conversation {
@@ -75,10 +73,11 @@ impl Conversation {
 
   /// The one method that runs a whole turn.
   ///
-  /// Loops until the model answers without asking for a tool or the step budget
-  /// runs out. The transcript is appended to as it goes rather than assembled
-  /// at the end, so a turn that is aborted mid-way leaves usable context
-  /// behind.
+  /// Loops until the model answers without asking for a tool, or until the turn
+  /// is stopped. Nothing caps the number of steps, so the model and the stop
+  /// button are the only two endings a turn has. The transcript is appended to
+  /// as it goes rather than assembled at the end, so a turn that is aborted
+  /// mid-way leaves usable context behind.
   pub async fn turn(&mut self, app: &AppHandle, prompt: &str, turn: &Arc<Turn>, root: PathBuf) {
     // The workspace can change under a conversation that was kept alive across
     // a folder switch. Re-pointing here rather than at construction keeps a
@@ -86,6 +85,12 @@ impl Conversation {
     // folder the old folder's history.
     if self.root != root {
       *self = Conversation::new(root, String::new());
+      // The transcript went with it, so there is now no conversation to
+      // measure. Saying so is the only way the panel's meter stops describing
+      // the old one: it is driven entirely by what the model is sent, and a
+      // silent reset here would leave the bar sitting on the previous
+      // project's size for as long as the new one stayed under the first reply.
+      emit(app, Frame::Usage { context: 0, tokens: 0 });
     }
 
     // Read once per turn, not per request: switching models in Settings takes
@@ -122,19 +127,22 @@ impl Conversation {
       None,
     );
 
+    // Counts model round-trips, and names the assistant message each one
+    // streams into. Not a budget —nothing consults it to end the turn.
     let mut step = 0usize;
+    // Two running figures, because a turn is two different questions. `ctx` is
+    // how large the conversation has become, which is the only thing a context
+    // window can be compared against. `tok` is what this turn has cost: every
+    // request re-sends the whole conversation, so the twenty calls of a long
+    // turn have paid for the history twenty times over while the conversation
+    // itself grew by only the last of them.
+    // Only `tok` carries across steps. `ctx` is deliberately not a running total:
+    // it is whatever the next request measures itself, so a stale one can never
+    // outlive the conversation it described.
+    let mut tok = 0u64;
     let reason = loop {
       if turn.is_stopped() {
         break TurnReason::Aborted;
-      }
-      if step >= MAX_STEPS {
-        emit(
-          app,
-          Frame::Error {
-            message: format!("Stopped after {MAX_STEPS} steps without a final answer."),
-          },
-        );
-        break TurnReason::Stop;
       }
       step += 1;
 
@@ -149,6 +157,20 @@ impl Conversation {
         self.messages.len()
       );
       let id = format!("a{step}");
+      // What this request is about to carry, measured here rather than asked
+      // for afterwards. The conversation is a local fact, so the meter is right
+      // the moment the prompt is on its way — it stays right on an endpoint
+      // that reports no usage at all, and on a request that is stopped before
+      // it is ever answered, which a provider's count never arrives for.
+      let ctx = estimate_tokens(
+        &serde_json::to_string(&json!({
+          "messages": model_messages(&self.messages),
+          "tools": tools::tool_defs(),
+        }))
+        .unwrap_or_default(),
+      );
+      emit(app, Frame::Usage { context: ctx, tokens: tok });
+
       let result = call_model_streaming(&cfg, &self.messages, turn, |text| {
         emit(app, Frame::AssistantDelta { id: id.clone(), text: text.to_string() });
       })
@@ -164,11 +186,24 @@ impl Conversation {
           break TurnReason::Error;
         }
       };
+      // What came back, on the same terms: the text and the arguments of any
+      // tool it asked for, which are tokens the model produced just as much as
+      // the prose is.
+      let produced = estimate_tokens(&reply.text)
+        + reply
+          .tool_calls
+          .iter()
+          .map(|call| estimate_tokens(&call.arguments.to_string()))
+          .sum::<u64>();
+      tok += ctx + produced;
+      emit(app, Frame::Usage { context: ctx, tokens: tok });
       emit(app, Frame::AssistantDone { id: id.clone() });
       log::info!(
-        "[agent] step {step}: reply text_len={} tool_calls={}",
+        "[agent] step {step}: reply text_len={} tool_calls={} context={} turn={}",
         reply.text.len(),
-        reply.tool_calls.len()
+        reply.tool_calls.len(),
+        ctx,
+        tok
       );
 
       if turn.is_stopped() {
@@ -178,14 +213,6 @@ impl Conversation {
       self.record(&reply.message, None);
 
       if reply.tool_calls.is_empty() {
-        emit(
-          app,
-          Frame::Usage {
-            input: reply.input_tokens,
-            output: reply.output_tokens,
-            cache_read: reply.cache_read_tokens,
-          },
-        );
         break TurnReason::Stop;
       }
 
@@ -193,8 +220,8 @@ impl Conversation {
         // Every tool call the model asked for gets an answer, including the ones
         // that will never run. An assistant message carrying `tool_calls` with
         // no matching `tool` message behind it is rejected by the endpoint on
-        // the next request — a 400 that kills the conversation rather than the
-        // turn — and stopping part-way through a batch is exactly how that
+        // the next request —a 400 that kills the conversation rather than the
+        // turn —and stopping part-way through a batch is exactly how that
         // shape gets written.
         if turn.is_stopped() {
           self.record(
@@ -238,7 +265,7 @@ impl Conversation {
     };
 
     // The turn is over, so the records it could not write get their one retry
-    // as a whole — before `turn.end`, so that frame still means what it says.
+    // as a whole —before `turn.end`, so that frame still means what it says.
     self.end_turn();
     finish(app, turn, reason);
   }
@@ -280,7 +307,7 @@ impl Conversation {
   /// same order.
   ///
   /// Both from one call, because a record the model saw but the log did not —
-  /// or the reverse — is a conversation that cannot be read back from disk.
+  /// or the reverse —is a conversation that cannot be read back from disk.
   fn record(&mut self, message: &Value, tool: Option<ToolRecord>) {
     let model = self.model.clone();
     self.messages.push(message.clone());
@@ -333,7 +360,7 @@ async fn run_one_tool(
 
   let (ok, content, summary, patch) = match outcome {
     // `out.ok`, not an unconditional `true`: a tool that ran but whose work
-    // failed — a shell command with a non-zero exit — is not a success, and
+    // failed —a shell command with a non-zero exit —is not a success, and
     // reporting it as one draws a tick beside a failed build.
     Ok(out) => (out.ok, out.content, out.summary, out.patch),
     Err(err) => (false, format!("Error: {err}"), err.0.clone(), None),
@@ -363,7 +390,7 @@ async fn run_one_tool(
       call_id: call.id.clone(),
       ok,
       // Joined only when the tool had something of its own to say. `bash` has
-      // no summary by design — its outcome is the icon beside it — and
+      // no summary by design —its outcome is the icon beside it —and
       // concatenating unconditionally left every shell row starting with a
       // bare " · ", which reads like a missing value rather than a timing.
       summary: match summary.trim() {
@@ -396,9 +423,9 @@ async fn run_one_tool(
 /// What one tool call produced: the text the model gets, and what the panel
 /// showed for it.
 ///
-/// Both halves, because they are two different readings of one event — the
+/// Both halves, because they are two different readings of one event —the
 /// result the model reads is a file's contents, the row the user reads is
-/// "Read · 1 line · 4ms" — and the log is the only place they can be kept
+/// "Read · 1 line · 4ms" —and the log is the only place they can be kept
 /// together.
 struct ToolOutcome {
   content: String,
@@ -415,25 +442,68 @@ pub struct ToolCall {
   pub arguments: Value,
 }
 
-/// What one model call produced: the complete reply, plus the token counts the
-/// panel shows. `Debug` because the tests print one when a round trip fails.
+/// What one model call produced: the complete reply. `Debug` because the tests
+/// print one when a round trip fails.
 #[derive(Debug)]
 pub struct Reply {
   /// The assistant message exactly as it goes back into the transcript.
   pub message: Value,
   pub text: String,
   pub tool_calls: Vec<ToolCall>,
-  pub input_tokens: u64,
-  pub output_tokens: u64,
-  pub cache_read_tokens: u64,
 }
 
+/// An estimate of what a piece of text costs the model's context.
+///
+/// Not exact, and not trying to be. The only exact answer is the model's own
+/// tokenizer, which this protocol does not carry and which differs per model;
+/// carrying one would mean shipping a word list for every endpoint the user
+/// might type in. What this has to be instead is *consistent* —the same text
+/// always scores the same, so the meter moves when the conversation grows and
+/// not when a provider happens to feel like reporting usage.
+///
+/// One token per wide character and one per four of everything else. The four
+/// is the familiar rule of thumb for alphabetic text; the one is closer than it
+/// sounds for Chinese, where tokenizers sit near one character per token, and
+/// that is the case that matters here —the usual four-to-one rule applied to
+/// this app's prose would understate it threefold.
+fn estimate_tokens(text: &str) -> u64 {
+  let (mut wide, mut rest) = (0u64, 0u64);
+  for ch in text.chars() {
+    if is_wide(ch) {
+      wide += 1;
+    } else {
+      rest += 1;
+    }
+  }
+  wide + rest / 4
+}
+
+/// Whether a character is one the tokenizers spend roughly a token on.
+///
+/// The ranges a CJK-capable tokenizer treats as individually addressable:
+/// Hangul, the CJK blocks and their extensions, and the fullwidth forms.
+fn is_wide(c: char) -> bool {
+  matches!(c as u32,
+    0x1100..=0x115F            // Hangul Jamo
+    | 0x2E80..=0x303E          // CJK radicals, Kangxi, punctuation
+    | 0x3041..=0x33FF          // Kana, CJK compatibility
+    | 0x3400..=0x4DBF          // CJK extension A
+    | 0x4E00..=0x9FFF          // CJK unified ideographs
+    | 0xA000..=0xA4CF          // Yi
+    | 0xAC00..=0xD7A3          // Hangul syllables
+    | 0xF900..=0xFAFF          // CJK compatibility ideographs
+    | 0xFE30..=0xFE6F          // CJK compatibility forms
+    | 0xFF00..=0xFF60          // fullwidth forms
+    | 0xFFE0..=0xFFE6
+    | 0x20000..=0x3FFFD        // CJK extensions B and beyond
+  )
+}
 /// Asks the model once, streaming the reply.
 ///
 /// Streamed because the difference between text appearing as it is written and
 /// text appearing all at once is the whole reason a panel shows a spinner, and
 /// because a long answer should be readable while it is still arriving. The SSE
-/// chunks are reassembled into one message at the end �?the model needs the
+/// chunks are reassembled into one message at the end —the model needs the
 /// complete tool-call arguments, and a tool call that has been truncated
 /// halfway is not an argument.
 /// Why a model call produced no reply.
@@ -474,8 +544,12 @@ pub async fn call_model(
 /// race drops the HTTP response on the way out. This is the whole difference
 /// between stopping a turn and asking one to stop: asking left the response
 /// being read to the end, so how long the button felt dead was however long the
-/// network took to notice — on a slow connection longer than anyone will sit and
+/// network took to notice —on a slow connection longer than anyone will sit and
 /// watch a disabled button.
+///
+/// The request asks for no token counts: the panel measures the payload itself
+/// with `estimate_tokens`, which works on endpoints that do not implement
+/// `include_usage` and is correct for a request that is still in flight.
 pub async fn call_model_streaming(
   cfg: &ResolvedModel,
   messages: &[Value],
@@ -495,7 +569,6 @@ pub async fn call_model_streaming(
     "messages": model_messages(messages),
     "tools": tools::tool_defs(),
     "stream": true,
-    "stream_options": { "include_usage": true },
   });
 
   let response = tokio::select! {
@@ -530,7 +603,6 @@ pub async fn call_model_streaming(
 
   let mut content = String::new();
   let mut tool_calls: Vec<ToolCall> = Vec::new();
-  let mut usage = (0u64, 0u64, 0u64);
   let mut buffer = Vec::new();
 
   let mut stream = response.bytes_stream();
@@ -571,7 +643,7 @@ pub async fn call_model_streaming(
         }
         if let Ok(chunk) = serde_json::from_str::<Value>(data) {
           let before = content.len();
-          absorb(&chunk, &mut content, &mut tool_calls, &mut usage);
+          absorb(&chunk, &mut content, &mut tool_calls);
           if content.len() > before {
             on_text(&content[before..]);
           }
@@ -593,9 +665,6 @@ pub async fn call_model_streaming(
     message: assistant_message(&content, &tool_calls),
     text: content,
     tool_calls,
-    input_tokens: usage.0,
-    output_tokens: usage.1,
-    cache_read_tokens: usage.2,
   })
 }
 
@@ -613,7 +682,7 @@ fn model_messages(messages: &[Value]) -> Vec<Value> {
 /// Tool calls live in the top-level `tool_calls` field, never inside
 /// `content`: a `tool_calls` entry in the content array is a content part no
 /// OpenAI-compatible endpoint accepts, and the reply is a 400 naming the
-/// supported part types — the turn dies on the request after the first tool
+/// supported part types —the turn dies on the request after the first tool
 /// call. `content` is null rather than an empty string when the model went
 /// straight to a tool call, which is the shape the API itself sends back.
 fn assistant_message(text: &str, calls: &[ToolCall]) -> Value {
@@ -628,7 +697,7 @@ fn assistant_message(text: &str, calls: &[ToolCall]) -> Value {
     calls
       .iter()
       .map(|call| {
-        // Arguments are a JSON-encoded string on the wire — how they streamed
+        // Arguments are a JSON-encoded string on the wire —how they streamed
         // in is how they must stream back out.
         let arguments = match &call.arguments {
           Value::String(raw) => raw.clone(),
@@ -655,18 +724,7 @@ fn absorb(
   chunk: &Value,
   content: &mut String,
   tool_calls: &mut Vec<ToolCall>,
-  usage: &mut (u64, u64, u64),
 ) {
-  if let Some(u) = chunk.get("usage").filter(|v| !v.is_null()) {
-    usage.0 = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(usage.0);
-    usage.1 = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(usage.1);
-    usage.2 = u
-      .get("prompt_tokens_details")
-      .and_then(|d| d.get("cached_tokens"))
-      .and_then(|v| v.as_u64())
-      .unwrap_or(usage.2);
-  }
-
   let Some(delta) = chunk.pointer("/choices/0/delta") else {
     return;
   };
@@ -737,7 +795,7 @@ fn emit(app: &AppHandle, frame: Frame) {
 ///
 /// Stop used to be an `AtomicBool` the loop polled at a handful of points. That
 /// is enough to end a turn between two steps, and not enough to end one that is
-/// waiting on the model — which is where a turn spends nearly all of its time,
+/// waiting on the model —which is where a turn spends nearly all of its time,
 /// and which is what the person who pressed stop is actually watching. Cutting
 /// an `await` short takes a `select!`, and a `select!` branch needs something to
 /// await, so the flag is backed by a channel: a receiver created at any moment
@@ -995,9 +1053,8 @@ mod tests {
   fn text_deltas_accumulate() {
     let mut content = String::new();
     let mut calls = Vec::new();
-    let mut usage = (0, 0, 0);
-    absorb(&delta(json!({ "content": "Hello " })), &mut content, &mut calls, &mut usage);
-    absorb(&delta(json!({ "content": "world" })), &mut content, &mut calls, &mut usage);
+    absorb(&delta(json!({ "content": "Hello " })), &mut content, &mut calls);
+    absorb(&delta(json!({ "content": "world" })), &mut content, &mut calls);
     assert_eq!(content, "Hello world");
   }
 
@@ -1009,20 +1066,19 @@ mod tests {
     // syntax error on every real edit.
     let mut content = String::new();
     let mut calls = Vec::new();
-    let mut usage = (0, 0, 0);
 
     absorb(
       &delta(json!({
         "tool_calls": [{ "index": 0, "id": "call_a", "function": {
           "name": "edit", "arguments": "{\"path\":\"a." } }]
       })),
-      &mut content, &mut calls, &mut usage,
+      &mut content, &mut calls,
     );
     absorb(
       &delta(json!({
         "tool_calls": [{ "index": 0, "function": { "arguments": "ts\",\"old_string\":\"x\"}" } }]
       })),
-      &mut content, &mut calls, &mut usage,
+      &mut content, &mut calls,
     );
 
     assert_eq!(calls.len(), 1);
@@ -1037,7 +1093,6 @@ mod tests {
   fn parallel_tool_calls_are_kept_apart_by_index() {
     let mut content = String::new();
     let mut calls = Vec::new();
-    let mut usage = (0, 0, 0);
 
     absorb(
       &delta(json!({
@@ -1046,7 +1101,7 @@ mod tests {
           { "index": 1, "id": "c1", "function": { "name": "read", "arguments": "{\"path\":\"b\"}" } }
         ]
       })),
-      &mut content, &mut calls, &mut usage,
+      &mut content, &mut calls,
     );
 
     assert_eq!(calls.len(), 2);
@@ -1056,16 +1111,33 @@ mod tests {
   }
 
   #[test]
-  fn usage_lands_in_the_totals() {
+  fn latin_text_scores_about_four_characters_to_a_token() {
+    // "Hello world" is two tokens to every tokenizer worth the name; the point
+    // is the ratio, not the exact figure.
+    let counted = estimate_tokens("Hello world");
+    assert!((1..=3).contains(&counted), "scored {counted} for eleven characters");
+  }
+
+  #[test]
+  fn chinese_is_scored_by_character_not_by_the_latin_ratio() {
+    // The regression that matters for this app: nine Chinese characters are
+    // roughly nine tokens, and the familiar four-characters-per-token rule
+    // would score them at two and understate a Chinese conversation fivefold.
+    assert_eq!(estimate_tokens("\u{4eca}\u{5929}\u{6211}\u{4eec}\u{6539}\u{4e00}\u{4e0b}\u{6587}\u{4ef6}"), 9);
+    assert!(estimate_tokens("\u{4eca}\u{5929}\u{6211}\u{4eec}\u{6539}\u{4e00}\u{4e0b}\u{6587}\u{4ef6}") > estimate_tokens("abcdefghijkl"));
+  }
+
+  #[test]
+  fn a_usage_frame_in_the_stream_is_no_longer_looked_at() {
+    // Nothing reads the provider's token counts any more, so a payload can
+    // carry them without the estimate moving: the number is the conversation's
+    // size, measured here, and a count from the wire would only be a second
+    // opinion about it that could arrive late or not at all.
     let mut content = String::new();
     let mut calls = Vec::new();
-    let mut usage = (0, 0, 0);
-    absorb(
-      &json!({ "usage": { "prompt_tokens": 120, "completion_tokens": 34,
-                          "prompt_tokens_details": { "cached_tokens": 90 } } }),
-      &mut content, &mut calls, &mut usage,
-    );
-    assert_eq!(usage, (120, 34, 90));
+    absorb(&json!({ "usage": { "prompt_tokens": 120, "completion_tokens": 34 } }), &mut content, &mut calls);
+    assert!(content.is_empty());
+    assert!(calls.is_empty());
   }
 
   #[test]
@@ -1074,9 +1146,8 @@ mod tests {
     // stream is only over when the connection closes.
     let mut content = String::new();
     let mut calls = Vec::new();
-    let mut usage = (0, 0, 0);
-    absorb(&json!({ "choices": [] }), &mut content, &mut calls, &mut usage);
-    absorb(&json!({ "something": "else" }), &mut content, &mut calls, &mut usage);
+    absorb(&json!({ "choices": [] }), &mut content, &mut calls);
+    absorb(&json!({ "something": "else" }), &mut content, &mut calls);
     assert!(content.is_empty());
     assert!(calls.is_empty());
   }

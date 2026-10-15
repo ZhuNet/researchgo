@@ -68,7 +68,8 @@ describe('agent store: 轮次身份', () => {
       { type: 'turn.end', turn: 1, reason: 'stop' },
     ]);
 
-    expect(agent.items().map((i) => i.kind)).toEqual(['user', 'assistant', 'tool']);
+    // 每轮以自己的统计行收尾。
+    expect(agent.items().map((i) => i.kind)).toEqual(['user', 'assistant', 'tool', 'stat']);
     expect(texts(agent)).toEqual(['你好']);
     expect(tools(agent)[0]).toMatchObject({ output: '内容', status: 'ok' });
 
@@ -89,9 +90,11 @@ describe('agent store: 轮次身份', () => {
       'user',
       'assistant',
       'tool',
+      'stat',
       'user',
       'assistant',
       'tool',
+      'stat',
     ]);
     expect(texts(agent)).toEqual(['你好', '第二段']);
     expect(tools(agent).map((t) => t.output)).toEqual(['内容', '输出']);
@@ -219,5 +222,61 @@ describe('agent store: 终止是串行的', () => {
     // 一次就够：第二次点击只会对着同一个已经在拆除的轮次再问一遍，
     // 而一个排在它后面的提示词会悄悄地被这次停止一起带走。
     expect(calls.filter((c) => c.cmd === 'agent_abort')).toHaveLength(1);
+  });
+});
+
+describe('agent store: 上下文与消耗', () => {
+  const usage = (context: number, tokens: number) => ({ type: 'usage', context, tokens });
+
+  it('轮次以自己的耗时和速率收尾，并留在那一轮的最后', async () => {
+    installBridge();
+    const agent = createAgent();
+
+    await turn(agent, 'one', [usage(8_300, 21_000), { type: 'turn.end', turn: 1, reason: 'stop' }]);
+    await turn(agent, 'two', [usage(9_100, 12_000), { type: 'turn.end', turn: 2, reason: 'stop' }]);
+
+    const stats = agent.items().filter((i): i is Extract<Item, { kind: 'stat' }> => i.kind === 'stat');
+    // 每一轮各留一份，且各记各的消耗——统计属于它描述的那一轮，
+    // 而不是「最近一轮」这一个随轮次改写的值。
+    expect(stats).toHaveLength(2);
+    expect(stats.map((s) => s.tokens)).toEqual([21_000, 12_000]);
+    expect(stats[0].ms).toBeGreaterThanOrEqual(0);
+    // 第二轮的统计行落在第二轮的末尾，而不是被挪到最前面。
+    expect(agent.items().map((i) => i.kind)).toEqual([
+      'user', 'stat',
+      'user', 'stat',
+    ]);
+  });
+
+  it('显示的是当次对话长度，不跨轮累加', async () => {
+    installBridge();
+    const agent = createAgent();
+
+    await agent.send('go', '/root');
+    // 后端每一步都发当次的上下文长度，到达即可显示，不必等轮次结束。
+    frame?.(usage(5_500, 5_500));
+    expect(agent.context()).toBe(5_500);
+    // 下一次请求带着全部历史，所以它更大——是对话变长了，
+    // 不是上一轮的数被重复计了一遍。
+    frame?.(usage(11_000, 21_000));
+    expect(agent.context()).toBe(11_000);
+
+    // 轮次收尾：本轮的消耗清零，对话长度留着——transcript 还在。
+    frame?.({ type: 'turn.end', turn: 1, reason: 'stop' });
+    expect(agent.context()).toBe(11_000);
+    expect(agent.spent().tokens).toBe(0);
+
+    await turn(agent, 'again', [usage(12_000, 5_000), { type: 'turn.end', turn: 2, reason: 'stop' }]);
+    expect(agent.context()).toBe(12_000);
+  });
+
+  it('新 store 从 0 开始，不继承上一会话的任何数', async () => {
+    installBridge();
+    const first = createAgent();
+    await turn(first, 'one', [usage(11_000, 21_000), { type: 'turn.end', turn: 1, reason: 'stop' }]);
+    expect(first.context()).toBe(11_000);
+
+    // 没有任何东西落盘，所以重开窗口就是从零开始。
+    expect(createAgent().context()).toBe(0);
   });
 });

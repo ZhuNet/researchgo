@@ -20,13 +20,15 @@ export type Item =
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | AgentTool
   | { kind: 'patch'; id: string; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
-  | { kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error'; text: string };
-
-export interface Usage {
-  input: number;
-  output: number;
-  cacheRead: number;
-}
+  | { kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error'; text: string }
+  /**
+   * How a finished turn went, as the last row of that turn's own transcript.
+   *
+   * A row rather than a field on the store because a tally belongs to the turn
+   * it describes: held apart from the transcript it could only ever describe
+   * whichever turn ran last, which is the wrong answer as soon as there are two.
+   */
+  | { kind: 'stat'; id: string; ms: number; tokens: number };
 
 let n = 0;
 const uid = (p: string) => `${p}_${++n}`;
@@ -61,6 +63,36 @@ type Phase =
  */
 const STOP_BACKSTOP_MS = 12_000;
 
+/**
+ * How often the running timer repaints.
+ *
+ * A tenth of a second, because that is the resolution the panel prints: a
+ * faster tick would recompute the same tenth more often than anyone can read
+ * it, and a slower one would make the digits jump. Display only — nothing about
+ * a turn depends on it, so a dropped frame costs a stale number rather than a
+ * wrong one.
+ */
+const TICK_MS = 100;
+
+/**
+ * The window the context meter is a fraction of.
+ *
+ * A round million. Not a budget the panel enforces and not a total that
+ * accumulates toward something — it is the scale the bar is drawn against, and
+ * a model will have refused the request long before the bar fills. Nothing
+ * wraps, resets or persists: the figure is however large the conversation
+ * currently is, which is the whole of what a context window means.
+ */
+export const CONTEXT_WINDOW = 1_000_000;
+
+/** The two figures a turn produces, both straight from the provider. */
+export interface Usage {
+  /** How large the conversation is right now. */
+  context: number;
+  /** What this turn has cost across every request it made. */
+  tokens: number;
+}
+
 const TOOL_META: Record<string, string> = {
   read: 'Read',
   grep: 'Search',
@@ -78,11 +110,14 @@ export function createAgent() {
   // feature: it showed tool rows and benchmark output that no run produced.
   const [items, setItems] = createSignal<Item[]>([]);
   const [phase, setPhase] = createSignal<Phase>('idle');
-  const [usage, setUsage] = createSignal<Usage>({ input: 0, output: 0, cacheRead: 0 });
+  const [spent, setSpent] = createSignal<Usage>({ context: 0, tokens: 0 });
   const [elapsed, setElapsed] = createSignal(0);
 
+  /** The context meter: how large the conversation is right now. */
+  const context = () => spent().context;
+
   let startedAt = 0;
-  let tick: number | undefined;
+  let tick: ReturnType<typeof setInterval> | undefined;
   let turnSerial = 0;
   let activeTurn = 0;
   const textIds = new Map<string, string>();
@@ -114,7 +149,14 @@ export function createAgent() {
     if (phase() === 'idle') return;
     setPhase('idle');
     stopTimer();
-    setElapsed(Math.round(performance.now() - startedAt));
+    const ms = performance.now() - startedAt;
+    // The turn's cost and how fast it came, as the last row of that turn. The
+    // context figure survives the turn on purpose: the transcript does, so the
+    // conversation is still that long — zeroing it would make the meter claim
+    // an empty context between prompts. The next turn's first usage frame
+    // supersedes it, and by then it has grown again.
+    setItems((prev) => [...prev, { kind: 'stat', id: uid('s'), ms, tokens: spent().tokens }]);
+    setSpent({ context: spent().context, tokens: 0 });
   }
 
   function apply(ev: UiEvent) {
@@ -217,7 +259,7 @@ export function createAgent() {
         ]);
         break;
       case 'usage':
-        setUsage({ input: ev.input, output: ev.output, cacheRead: ev.cacheRead });
+        setSpent({ context: ev.context, tokens: ev.tokens });
         break;
       case 'turn.end':
         // The host counts its turns from 1 and so does `activeTurn`, one per
@@ -259,6 +301,9 @@ export function createAgent() {
     activeTurn = ++turnSerial;
     setPhase('sending');
     startedAt = performance.now();
+    // `spent` was already emptied by the `settle` that let this prompt be sent
+    // at all, so the turn starts counting from zero without restating it here.
+    startTimer();
     try {
       await agentApi.send(body, root);
       // The turn exists from here on, and only from here on can it be stopped.
@@ -324,7 +369,7 @@ export function createAgent() {
     textIds.clear();
     toolIds.clear();
     setItems([]);
-    setUsage({ input: 0, output: 0, cacheRead: 0 });
+    setSpent({ context: 0, tokens: 0 });
     settle();
   }
 
@@ -333,6 +378,30 @@ export function createAgent() {
       clearInterval(tick);
       tick = undefined;
     }
+  }
+
+  /**
+   * Repaints `elapsed` for as long as a turn runs.
+   *
+   * The clock is the renderer's own rather than the host's: `startedAt` was set
+   * when the prompt was handed over and is not touched again, so there is no
+   * round trip to negotiate for a number that exists only to be looked at. The
+   * interval stops at `settle`, and one already past due when a turn ends loses
+   * to the frozen `elapsed` written there.
+   */
+  function startTimer() {
+    stopTimer();
+    const repaint = () => setElapsed(performance.now() - startedAt);
+    repaint();
+    // Bare `setInterval` rather than `window.` because this module is also
+    // driven headlessly by tests, and `unref` because a timer that only paints
+    // a number must not be the reason a process stays alive — in a browser the
+    // handle is a number and has no `unref`, hence the optional call.
+    const handle = setInterval(repaint, TICK_MS) as ReturnType<typeof setInterval> & {
+      unref?: () => void;
+    };
+    handle.unref?.();
+    tick = handle;
   }
 
   // One subscription for the panel's lifetime. Frames arrive for whatever turn
@@ -344,8 +413,9 @@ export function createAgent() {
     busy,
     stopping,
     stoppable,
-    usage,
+    spent,
     elapsed,
+    context,
     send,
     abort,
     clear,

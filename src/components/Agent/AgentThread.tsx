@@ -5,6 +5,12 @@ import { updateMarkdown } from '../../lib/markdown';
 import type { Agent, Item } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 
+/** Seconds to one decimal: long enough to stop the digits flickering. */
+export const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+/** What a finished turn averaged, from what it cost over how long it took. */
+const rate = (tokens: number, ms: number) => (ms > 0 ? `${(tokens / (ms / 1000)).toFixed(1)} tok/s` : '');
+
 export function AgentThread(props: { agent: Agent; ws: Workspace }) {
   let scroller: HTMLDivElement | undefined;
   const [pinned, setPinned] = createSignal(true);
@@ -169,6 +175,14 @@ function ThreadItem(props: {
         <div class="notice" classList={{ 'notice--error': (props.item as any).tone === 'error' }}>
           <Icon name="alert" size={13} />
           <span class="notice__text">{(props.item as any).text}</span>
+        </div>
+      </Show>
+
+      {/* The turn's own figure, closing out its own rows. */}
+      <Show when={props.item.kind === 'stat'}>
+        <div class="thread__stat">
+          {secs((props.item as any).ms)}
+          <span class="thread__statrate">{rate((props.item as any).tokens, (props.item as any).ms)}</span>
         </div>
       </Show>
     </>

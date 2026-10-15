@@ -205,12 +205,27 @@
   color: var(--tx-4);
 }
 
+/* Everything the bar reports on the right: the live clock or the turn's final
+   tally, then the ceiling they are being read against. */
+.agent__meterend {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-left: auto;
+}
+
 .agent__spin {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-left: auto;
   color: var(--ac-hi);
+}
+
+/* The ceiling itself, set back from the figure it measures. Dimmed rather than
+   recoloured: `--tx-4` is already the faintest text in the panel and there is
+   no token one step past it. */
+.agent__scale {
+  opacity: 0.55;
 }
 
 .thread-wrap {
@@ -248,6 +263,22 @@
   gap: var(--sp-3);
   font-size: 11px;
   color: var(--tx-3);
+}
+
+/* How a turn ended, closing its rows. Faint on purpose: it is a footnote to
+   what just happened, not the next thing to read. */
+.thread__stat {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--tx-4);
+  opacity: 0.8;
+}
+
+.thread__statrate::before {
+  content: '·';
 }
 
 .thread__jump {

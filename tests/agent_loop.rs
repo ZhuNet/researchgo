@@ -107,7 +107,9 @@ async fn a_stop_does_not_wait_for_the_endpoint_to_finish_streaming() {
   let calling = {
     let cfg = cfg.clone();
     let turn = turn.clone();
-    tokio::spawn(async move { agent_loop::call_model_streaming(&cfg, &[], &turn, |_| {}).await })
+    tokio::spawn(async move {
+      agent_loop::call_model_streaming(&cfg, &[], &turn, |_| {}).await
+    })
   };
 
   // Wait until the reply is genuinely in flight, so the stop lands on a live
@@ -278,9 +280,6 @@ async fn a_streamed_reply_reassembles_into_one_message() {
     reply.tool_calls[0].arguments.as_str().expect("arguments are text"),
     "{\"path\":\"package.json\"}"
   );
-  assert_eq!(reply.input_tokens, 1200);
-  assert_eq!(reply.output_tokens, 84);
-  assert_eq!(reply.cache_read_tokens, 900);
 
   // The message going back into the transcript must be the same assistant turn
   // the panels rendered, or the next request contradicts what the user saw.
@@ -367,7 +366,7 @@ async fn diag_real_endpoint() {
   eprintln!("[diag] text: {:?}", reply.text);
   eprintln!("[diag] tool_calls: {}", reply.tool_calls.len());
   eprintln!("[diag] message: {}", serde_json::to_string(&reply.message).unwrap());
-  eprintln!("[diag] usage: {} in / {} out", reply.input_tokens, reply.output_tokens);
+  eprintln!("[diag] text_len: {}", reply.text.len());
 
   if reply.tool_calls.is_empty() {
     eprintln!("[diag] first reply is prose only — the turn would end here");
