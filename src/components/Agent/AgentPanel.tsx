@@ -86,11 +86,11 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
                   { separator: true, label: '' },
                   { label: 'Settings…', run: () => setSettingsOpen(true) },
                   {
-                    label: 'Clear thread',
+                    label: 'Clear session',
                     danger: true,
                     run: () => {
                       props.agent.clear();
-                      toast('info', 'Thread cleared', 'the next prompt starts a fresh transcript');
+                      toast('info', 'Session cleared', 'the next prompt starts a fresh transcript');
                     },
                   },
                 ],
