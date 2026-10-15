@@ -1,11 +1,13 @@
 import {
   createEffect,
+  createComputed,
   createMemo,
   createSignal,
   Match,
   onCleanup,
   Show,
   Switch,
+  untrack,
 } from 'solid-js';
 import 'pdfjs-viewer-element';
 import type PdfjsViewerElement from 'pdfjs-viewer-element';
@@ -18,6 +20,7 @@ import {
   captureSidebarView,
   captureViewerPosition,
   type PdfViewerLike,
+  type ViewerPosition,
   type ViewsManagerLike,
 } from '../../lib/pdfposition';
 import { theme, toast } from '../../store/ui';
@@ -80,6 +83,10 @@ export function PdfViewer(props: { ws: Workspace }) {
   const [viewer, setViewer] = createSignal<PdfjsViewerElement | null>(null);
   const [loadError, setLoadError] = createSignal<string | null>(null);
   const [buildButton, setBuildButton] = createSignal<HTMLButtonElement | null>(null);
+  const [restoring, setRestoring] = createSignal(false);
+  let viewerHost: HTMLDivElement | null = null;
+  let hiddenPosition: ViewerPosition | null = null;
+  let hiddenSidebar: number | null = null;
 
   /**
    * The element, created by hand rather than written as JSX.
@@ -90,6 +97,7 @@ export function PdfViewer(props: { ws: Workspace }) {
    * ordering explicit; JSX would attach first and set second.
    */
   function mount(host: HTMLDivElement) {
+    viewerHost = host;
     const base = import.meta.env.BASE_URL;
     const el = document.createElement('pdfjs-viewer-element') as PdfjsViewerElement;
     // A CID font with no ToUnicode table — which is what XeLaTeX produces for
@@ -208,6 +216,9 @@ export function PdfViewer(props: { ws: Workspace }) {
     `);
 
     onCleanup(() => {
+      viewerHost = null;
+      hiddenPosition = null;
+      hiddenSidebar = null;
       el.remove();
       setViewer(null);
     });
@@ -223,6 +234,30 @@ export function PdfViewer(props: { ws: Workspace }) {
     const el = viewer();
     if (!el) return;
     el.setAttribute('viewer-css-theme', theme() === 'dark' ? 'DARK' : 'LIGHT');
+  });
+
+  /**
+   * Lock the reading state at the instant the preview becomes invisible.
+   *
+   * Waiting until a build finishes is too late: `display: none` makes the
+   * iframe zero-sized, and pdf.js can adjust its viewport and scroll state in
+   * response before the artifact bytes arrive. A rebuild started while hidden
+   * must therefore restore this snapshot, not inspect the hidden viewer later.
+   * During an existing restore the original snapshot remains authoritative;
+   * hiding again only pauses that restore until another visible frame exists.
+   */
+  createComputed(() => {
+    const hidden = props.ws.stageMode() === 'code';
+    const el = viewer();
+    // A computed runs before Solid's DOM effects apply `display: none`.
+    // Reading the lock untracked also avoids overwriting this snapshot when
+    // the asynchronous restore completes.
+    if (!hidden || !el || untrack(restoring)) return;
+    const app = viewerAppOf(el);
+    const pv = pdfViewerOf(app);
+    const vm = viewsManagerOf(app);
+    if (pv) hiddenPosition = captureViewerPosition(pv);
+    if (vm) hiddenSidebar = captureSidebarView(vm);
   });
 
   /**
@@ -258,7 +293,20 @@ export function PdfViewer(props: { ws: Workspace }) {
     const abs = editor().artifact()?.absPath;
     if (!el || !abs) return;
     let alive = true;
+    const visibilityWait = new AbortController();
     setLoadError(null);
+    // Capture synchronously while the old document is still visible. If it is
+    // already hidden, use the snapshot taken at the visibility transition.
+    const appBeforeRead = viewerAppOf(el);
+    const pvBeforeRead = pdfViewerOf(appBeforeRead);
+    const vmBeforeRead = viewsManagerOf(appBeforeRead);
+    const startedHidden = !viewerHost || !hasVisibleLayout(viewerHost);
+    const positionBeforeRead = startedHidden
+      ? hiddenPosition ?? (pvBeforeRead ? captureViewerPosition(pvBeforeRead) : null)
+      : pvBeforeRead ? captureViewerPosition(pvBeforeRead) : null;
+    const sidebarBeforeRead = startedHidden
+      ? hiddenSidebar ?? (vmBeforeRead ? captureSidebarView(vmBeforeRead) : null)
+      : vmBeforeRead ? captureSidebarView(vmBeforeRead) : null;
     void (async () => {
       try {
         // Both at once: the bytes are the slow half on a large document and the
@@ -271,9 +319,26 @@ export function PdfViewer(props: { ws: Workspace }) {
         if (!alive) return;
         const pv = pdfViewerOf(viewerApp);
         const vm = viewsManagerOf(viewerApp);
-        // Before the swap: after it, the old document's positions are gone.
-        const position = pv ? captureViewerPosition(pv) : null;
-        const sidebar = vm ? captureSidebarView(vm) : null;
+        // Prefer the state captured before the asynchronous artifact read. If
+        // the preview was hidden while that read ran, the synchronous capture
+        // still describes the last visible frame.
+        const nowHidden = !viewerHost || !hasVisibleLayout(viewerHost);
+        const position = nowHidden
+          ? hiddenPosition ?? positionBeforeRead ?? (pv ? captureViewerPosition(pv) : null)
+          : pv ? captureViewerPosition(pv) : positionBeforeRead;
+        const sidebar = nowHidden
+          ? hiddenSidebar ?? sidebarBeforeRead ?? (vm ? captureSidebarView(vm) : null)
+          : vm ? captureSidebarView(vm) : sidebarBeforeRead;
+        // `display: none` gives pdf.js a zero-sized viewport. Opening the new
+        // document there leaves its pages unlaid-out (and, in WebView, often
+        // black) until a later zoom happens to force an update. Keep the bytes
+        // ready, but do not swap the document until the preview has a real box.
+        // The host remains visually locked while this runs, so the first frame
+        // the reader sees is the restored one rather than page one jumping into
+        // place.
+        setRestoring(true);
+        if (viewerHost) await waitForVisibleLayout(viewerHost, visibilityWait.signal);
+        if (!alive) return;
         // `{ data }`, not the bytes alone: `getDocument` wants exactly one of
         // `data`, `range` or `url`, and handing it a bare `Uint8Array` fails with
         // "expected either `data`, `range`, or `url` parameter" — a mistake the
@@ -293,6 +358,8 @@ export function PdfViewer(props: { ws: Workspace }) {
             // its own, and restoring before that would only be overridden.
             await Promise.all([afterDocumentInit(viewerApp, 2_000), pv.pagesPromise]);
             if (!alive) return;
+            // The reader may have switched back to Source while `open` or page
+            // layout was running. Never restore against that zero-sized box.
             // The sidebar goes back first, with its slide animation
             // suspended: a preset zoom ("page-width", "auto") is computed
             // from the container's width, and the container's width depends
@@ -304,10 +371,22 @@ export function PdfViewer(props: { ws: Workspace }) {
             const doc = el.iframe?.contentDocument;
             doc?.documentElement.classList.add('rg-restoring');
             try {
-              if (vm && sidebar !== null) applySidebarView(vm, sidebar);
-              await null;
-              if (!alive) return;
-              applyViewerPosition(pv, position);
+              do {
+                if (viewerHost) await waitForVisibleLayout(viewerHost, visibilityWait.signal);
+                if (!alive) return;
+                if (vm && sidebar !== null) applySidebarView(vm, sidebar);
+                await null;
+                if (!alive) return;
+                applyViewerPosition(pv, position);
+                // Explicitly repaint the restored viewport after an ancestor
+                // returns from `display: none`.
+                pv.update?.();
+                pv.forceRendering?.();
+                await nextFrame();
+                if (!alive) return;
+                // Hiding during restoration re-arms the lock with the same
+                // snapshot, however many times the reader switches tabs.
+              } while (viewerHost && !hasVisibleLayout(viewerHost));
             } finally {
               doc?.documentElement.classList.remove('rg-restoring');
             }
@@ -317,13 +396,16 @@ export function PdfViewer(props: { ws: Workspace }) {
             // failure.
           }
         }
+        if (alive) setRestoring(false);
       } catch (err: unknown) {
         if (!alive) return;
+        setRestoring(false);
         setLoadError(err instanceof Error ? err.message : String(err));
       }
     })();
     onCleanup(() => {
       alive = false;
+      visibilityWait.abort();
     });
   });
 
@@ -460,7 +542,7 @@ export function PdfViewer(props: { ws: Workspace }) {
             </div>
           </Match>
           <Match when={preview()?.page === 'pdf'}>
-            <div class="pdf__host" ref={mount} />
+            <div class="pdf__host" classList={{ 'pdf__host--restoring': restoring() }} ref={mount} />
             <Show when={loadError()}>
               <div class="pdf__empty">
                 <Icon name="alert" size={26} />
@@ -498,7 +580,11 @@ const ZAP_ICON =
  * pages exist.
  */
 interface ViewerApp extends PdfViewerApplication {
-  pdfViewer?: PdfViewerLike & { pagesPromise: Promise<void> | null };
+  pdfViewer?: PdfViewerLike & {
+    pagesPromise: Promise<void> | null;
+    update?(): void;
+    forceRendering?(): boolean;
+  };
   viewsManager?: ViewsManagerLike;
 }
 
@@ -617,4 +703,48 @@ function PlanHint(props: { plan: BuildPlan | null }) {
       </Match>
     </Switch>
   );
+}
+
+/** Returns the already-created application without introducing an async gap. */
+function viewerAppOf(viewer: PdfjsViewerElement): PdfViewerApplication | undefined {
+  return viewer.iframe?.contentWindow.PDFViewerApplication;
+}
+
+/** Waits until an ancestor-hidden viewer has a real viewport and layout frame. */
+function waitForVisibleLayout(host: HTMLElement, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let observer: ResizeObserver | null = null;
+    let frame = 0;
+    const finish = () => {
+      observer?.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const inspect = () => {
+      if (signal.aborted) return finish();
+      if (hasVisibleLayout(host)) {
+        // Visibility may have changed in the same task. One frame lets flexbox
+        // and the iframe consume their newly available dimensions first.
+        if (!frame) frame = requestAnimationFrame(() => {
+          frame = 0;
+          if (signal.aborted || hasVisibleLayout(host)) finish();
+        });
+      }
+    };
+    signal.addEventListener('abort', finish, { once: true });
+    observer = new ResizeObserver(inspect);
+    observer.observe(host);
+    inspect();
+  });
+}
+
+function hasVisibleLayout(host: HTMLElement): boolean {
+  const rect = host.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0 && host.getClientRects().length > 0;
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }

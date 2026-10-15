@@ -359,6 +359,15 @@
   min-height: 0;
 }
 
+/*
+ * A rebuilt document is opened only after this host has a measurable viewport.
+ * Keep that layout available to pdf.js while withholding the intermediate
+ * page-one/default-zoom frame from the reader.
+ */
+.pdf__host--restoring {
+  visibility: hidden;
+}
+
 .pdf__host > pdfjs-viewer-element {
   position: absolute;
   inset: 0;
