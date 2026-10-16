@@ -58,10 +58,16 @@ describe('translate: 工具调用', () => {
 });
 
 describe('translate: 补丁与用量', () => {
-  it('file.patch 保留 op 与字节数', () => {
+  it('file.patch 保留 op、字节数与完整 diff', () => {
     expect(
-      one({ type: 'file.patch', path: '/a.tex', op: 'modify', bytes: 128 }),
-    ).toEqual({ kind: 'patch', path: '/a.tex', op: 'modify', bytes: 128 });
+      one({ type: 'file.patch', path: '/a.tex', op: 'modify', bytes: 128, diff: '@@ -1 +1 @@\n-old\n+new\n' }),
+    ).toEqual({
+      kind: 'patch',
+      path: '/a.tex',
+      op: 'modify',
+      bytes: 128,
+      diff: '@@ -1 +1 @@\n-old\n+new\n',
+    });
   });
 
   it('usage 同时带过上下文长度与本轮消耗', () => {

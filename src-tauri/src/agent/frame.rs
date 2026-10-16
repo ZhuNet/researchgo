@@ -79,6 +79,7 @@ pub enum Frame {
     path: String,
     op: PatchOp,
     bytes: usize,
+    diff: String,
   },
   #[serde(rename = "usage")]
   Usage {
@@ -174,6 +175,7 @@ mod tests {
           path: "p".into(),
           op: PatchOp::Create,
           bytes: 1,
+          diff: "--- p\n+++ p\n@@ -0,0 +1 @@\n+x\n".into(),
         },
         "file.patch",
       ),

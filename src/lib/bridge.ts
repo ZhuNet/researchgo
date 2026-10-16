@@ -5,7 +5,7 @@ export type RawEvent =
   | { type: 'tool.start'; id: string; call_id: string; name: string; input: unknown }
   | { type: 'tool.output'; id: string; call_id: string; chunk: string }
   | { type: 'tool.end'; id: string; call_id: string; ok: boolean; summary: string }
-  | { type: 'file.patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
+  | { type: 'file.patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { type: 'usage'; context: number; tokens: number }
   | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { type: 'error'; message: string };
@@ -17,7 +17,7 @@ export type UiEvent =
   | { kind: 'tool.start'; id: string; callId: string; name: string; input: unknown }
   | { kind: 'tool.output'; id: string; callId: string; chunk: string }
   | { kind: 'tool.end'; id: string; callId: string; ok: boolean; summary: string }
-  | { kind: 'patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
+  | { kind: 'patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { kind: 'usage'; context: number; tokens: number }
   | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { kind: 'error'; message: string };
@@ -57,7 +57,7 @@ export function translate(line: string): UiEvent[] {
         },
       ];
     case 'file.patch':
-      return [{ kind: 'patch', path: raw.path, op: raw.op, bytes: raw.bytes }];
+      return [{ kind: 'patch', path: raw.path, op: raw.op, bytes: raw.bytes, diff: raw.diff }];
     case 'usage':
       return [{ kind: 'usage', context: raw.context, tokens: raw.tokens }];
     case 'turn.end':

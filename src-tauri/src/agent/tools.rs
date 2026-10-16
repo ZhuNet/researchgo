@@ -18,6 +18,7 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use serde_json::{json, Value};
+use similar::TextDiff;
 use tokio::process::Command;
 
 use super::agent_loop::Turn;
@@ -49,9 +50,17 @@ pub struct ToolOutput {
   /// failed, and the model has no reason to look again. So the call succeeds,
   /// the content comes back whole, and the row is drawn as a failure.
   pub ok: bool,
-  /// Emitted as a `file_patch` frame when set, so the changes panel and any
-  /// open editor learn about the write without polling.
-  pub patch: Option<(String, bool)>,
+  /// Emitted as a `file.patch` frame when set. The diff is captured at write
+  /// time so the transcript keeps this operation's exact change even when a
+  /// later tool edits the same file again.
+  pub patch: Option<FilePatch>,
+}
+
+pub struct FilePatch {
+  pub path: String,
+  pub created: bool,
+  pub bytes: usize,
+  pub diff: String,
 }
 
 /// Largest file `read` will return whole. Beyond this the model gets a refusal
@@ -368,6 +377,12 @@ fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   }
 
   let existed = path.exists();
+  let before = if existed {
+    let bytes = fs::read(&path).map_err(|e| ToolError(format!("cannot read `{raw}` before writing: {e}")))?;
+    String::from_utf8_lossy(&bytes).into_owned()
+  } else {
+    String::new()
+  };
   fs::write(&path, &content).map_err(|e| ToolError(format!("cannot write `{raw}`: {e}")))?;
 
   Ok(ToolOutput {
@@ -384,9 +399,12 @@ fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
       content.len()
     ),
     ok: true,
-    // The boolean is "created": the renderer needs to distinguish an add from a
-    // modify to label the row.
-    patch: Some((path.display().to_string(), !existed)),
+    patch: Some(FilePatch {
+      path: path.display().to_string(),
+      created: !existed,
+      bytes: content.len(),
+      diff: unified_diff(&raw, &before, &content),
+    }),
   })
 }
 
@@ -421,8 +439,23 @@ fn edit_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
     content: format!("Edited {raw}"),
     ok: true,
     summary: format!("edited {}", short_path(root, &path)),
-    patch: Some((path.display().to_string(), false)),
+    patch: Some(FilePatch {
+      path: path.display().to_string(),
+      created: false,
+      bytes: updated.len(),
+      diff: unified_diff(&raw, &text, &updated),
+    }),
   })
+}
+
+/// A stable, familiar unified diff for the transcript. Three context lines
+/// match Git's default while every changed line remains present in its hunk.
+fn unified_diff(path: &str, before: &str, after: &str) -> String {
+  TextDiff::from_lines(before, after)
+    .unified_diff()
+    .context_radius(3)
+    .header(path, path)
+    .to_string()
 }
 
 fn shell() -> &'static str {
@@ -741,6 +774,17 @@ mod tests {
 
   fn matches_glob(path: &str, pattern: &str) -> bool {
     compile_glob(pattern, true).unwrap().is_match(path)
+  }
+
+  #[test]
+  fn unified_diff_keeps_created_and_replaced_text() {
+    let created = unified_diff("new.txt", "", "first\nsecond\n");
+    assert!(created.contains("--- new.txt\n+++ new.txt"));
+    assert!(created.contains("+first\n+second"));
+
+    let edited = unified_diff("note.txt", "before\nkeep\n", "after\nkeep\n");
+    assert!(edited.contains("-before\n+after"));
+    assert!(edited.contains(" keep"));
   }
 
   struct Fixture(PathBuf);

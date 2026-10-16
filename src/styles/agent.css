@@ -582,19 +582,26 @@
 }
 
 .patch {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  height: 26px;
-  padding: 0 var(--sp-4);
-  border-radius: var(--r-sm);
+  overflow: hidden;
+  border-radius: var(--r-md);
   background: rgba(76, 183, 130, 0.07);
   border: 1px solid rgba(76, 183, 130, 0.22);
-  transition: background var(--t-fast) var(--ease);
+  transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 
 .patch:hover {
   background: rgba(76, 183, 130, 0.13);
+  border-color: rgba(76, 183, 130, 0.34);
+}
+
+.patch__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--sp-4);
+  text-align: left;
 }
 
 .patch__op {
@@ -614,9 +621,79 @@
 }
 
 .patch__size {
+  flex: none;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--tx-4);
+}
+
+.patch__caret {
+  flex: none;
+  color: var(--tx-4);
+  transition: transform var(--t-med) var(--ease);
+}
+
+.patch--open .patch__caret {
+  transform: rotate(180deg);
+}
+
+.patch__diff {
+  margin: 0 var(--sp-3) var(--sp-3);
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--bd-1);
+  border-radius: var(--r-sm);
+  background: var(--bg-0);
+  animation: fadeIn var(--t-fast) var(--ease-out) both;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-3) transparent;
+}
+
+.patch__line {
+  display: flex;
+  min-width: max-content;
+  min-height: 19px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 19px;
+  color: var(--tx-3);
+  white-space: pre;
+}
+
+.patch__line--add {
+  color: var(--tx-2);
+  background: rgba(76, 183, 130, 0.13);
+}
+
+.patch__line--del {
+  color: var(--tx-2);
+  background: rgba(242, 88, 91, 0.13);
+}
+
+.patch__line--hunk {
+  color: var(--vio);
+  background: rgba(132, 110, 246, 0.08);
+}
+
+.patch__line--meta {
+  color: var(--tx-4);
+}
+
+.patch__line-no {
+  position: sticky;
+  left: 0;
+  width: 34px;
+  flex: none;
+  padding-right: var(--sp-3);
+  color: var(--tx-4);
+  background: inherit;
+  border-right: 1px solid var(--bd-1);
+  text-align: right;
+  user-select: none;
+}
+
+.patch__line-text {
+  padding: 0 var(--sp-4);
 }
 
 .notice {

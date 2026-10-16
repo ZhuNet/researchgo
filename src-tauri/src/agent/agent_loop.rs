@@ -400,13 +400,14 @@ async fn run_one_tool(
     },
   );
 
-  if let Some((path, created)) = patch {
+  if let Some(patch) = patch {
     emit(
       app,
       Frame::FilePatch {
-        path,
-        op: if created { PatchOp::Create } else { PatchOp::Modify },
-        bytes: content.len(),
+        path: patch.path,
+        op: if patch.created { PatchOp::Create } else { PatchOp::Modify },
+        bytes: patch.bytes,
+        diff: patch.diff,
       },
     );
   }

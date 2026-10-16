@@ -19,7 +19,7 @@ export type Item =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | AgentTool
-  | { kind: 'patch'; id: string; path: string; op: 'create' | 'modify' | 'delete'; bytes: number }
+  | { kind: 'patch'; id: string; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error'; text: string }
   /**
    * How a finished turn went, as the last row of that turn's own transcript.
@@ -255,7 +255,7 @@ export function createAgent() {
       case 'patch':
         setItems((prev) => [
           ...prev,
-          { kind: 'patch', id: uid('p'), path: ev.path, op: ev.op, bytes: ev.bytes },
+          { kind: 'patch', id: uid('p'), path: ev.path, op: ev.op, bytes: ev.bytes, diff: ev.diff },
         ]);
         break;
       case 'usage':

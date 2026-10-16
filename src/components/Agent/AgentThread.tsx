@@ -160,15 +160,7 @@ function ThreadItem(props: {
       </Show>
 
       <Show when={props.item.kind === 'patch'}>
-        <button
-          class="patch"
-          onClick={() => props.ws.openFile((props.item as any).path)}
-          title="Open changed file"
-        >
-          <span class="patch__op">{(props.item as any).op === 'create' ? 'A' : (props.item as any).op === 'delete' ? 'D' : 'M'}</span>
-          <span class="patch__path truncate">{(props.item as any).path}</span>
-          <span class="patch__size">+{Math.round(((props.item as any).bytes as number) / 102.4) / 10} KB</span>
-        </button>
+        <PatchCard patch={props.item as any} open={props.open} onToggle={props.onToggle} />
       </Show>
 
       <Show when={props.item.kind === 'notice'}>
@@ -187,6 +179,50 @@ function ThreadItem(props: {
       </Show>
     </>
   );
+}
+
+function PatchCard(props: {
+  patch: { path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string };
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const mark = () => props.patch.op === 'create' ? 'A' : props.patch.op === 'delete' ? 'D' : 'M';
+
+  return (
+    <div class="patch" classList={{ 'patch--open': props.open }}>
+      <button class="patch__head" onClick={props.onToggle} aria-expanded={props.open}>
+        <span class="patch__op">{mark()}</span>
+        <span class="patch__path truncate">{props.patch.path}</span>
+        <span class="patch__size">{formatBytes(props.patch.bytes)}</span>
+        <Icon name="chevronDown" size={12} class="patch__caret" />
+      </button>
+      <Show when={props.open}>
+        <div class="patch__diff scroll">
+          <Index each={props.patch.diff.split('\n')}>
+            {(line, index) => (
+              <div
+                class="patch__line"
+                classList={{
+                  'patch__line--add': line().startsWith('+') && !line().startsWith('+++'),
+                  'patch__line--del': line().startsWith('-') && !line().startsWith('---'),
+                  'patch__line--hunk': line().startsWith('@@'),
+                  'patch__line--meta': line().startsWith('---') || line().startsWith('+++'),
+                }}
+              >
+                <span class="patch__line-no">{index + 1}</span>
+                <span class="patch__line-text">{line() || ' '}</span>
+              </div>
+            )}
+          </Index>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${Math.round(bytes / 102.4) / 10} KB`;
 }
 
 function AssistantText(props: { text: string }) {
