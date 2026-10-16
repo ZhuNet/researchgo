@@ -1,4 +1,7 @@
-# Third-party notices
+# ResearchGO Third-Party Notices
+
+ResearchGO is proprietary software. The notices below apply only to the
+identified third-party components and do not grant rights to ResearchGO itself.
 
 ## Material Icon Theme
 
