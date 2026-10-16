@@ -136,7 +136,6 @@ export function createEditor(
    * needs.
    */
   const [plan, setPlan] = createSignal<BuildPlan | null>(null);
-  const [planPending, setPlanPending] = createSignal(false);
   const [buildTarget, setBuildTarget] = createSignal<string | null>(null);
   let planGeneration = 0;
 
@@ -162,7 +161,6 @@ export function createEditor(
     setBuildDuration(null);
     setPlan(null);
     planGeneration += 1;
-    setPlanPending(false);
     setBuildTarget(null);
     bump();
   }
@@ -431,32 +429,38 @@ export function createEditor(
    */
   async function loadPlan(root: string | null): Promise<BuildPlan | null> {
     const generation = ++planGeneration;
-    setBuildTarget(root);
-    setPlanPending(root !== null);
-    // Keep the last published result visible until the host replaces it. Pending
-    // only blocks clicks; it is not a new visual state of the build target.
     if (!root) {
-      setPlan(null);
+      batch(() => {
+        setBuildTarget(null);
+        setPlan(null);
+      });
       return null;
     }
     try {
       const found = await backend.buildPlan(root);
       if (generation !== planGeneration) return null;
-      setPlan(found);
+      // Target and plan describe one fact. Publish them together only after the
+      // precheck finishes, so the UI keeps the previous complete result while
+      // this request is in flight and repaints once when it can replace it.
+      batch(() => {
+        setBuildTarget(root);
+        setPlan(found);
+      });
       return found;
     } catch (err) {
       if (generation !== planGeneration) return null;
-      setPlan({
-        buildable: false,
-        command: null,
-        reason: null,
-        artifact: null,
-        passes: 1,
-        detail: String((err as Error)?.message ?? err),
+      batch(() => {
+        setBuildTarget(root);
+        setPlan({
+          buildable: false,
+          command: null,
+          reason: null,
+          artifact: null,
+          passes: 1,
+          detail: String((err as Error)?.message ?? err),
+        });
       });
       return null;
-    } finally {
-      if (generation === planGeneration) setPlanPending(false);
     }
   }
 
@@ -486,7 +490,6 @@ export function createEditor(
     artifact,
     plan,
     loadPlan,
-    planPending,
     buildTarget,
   };
 }

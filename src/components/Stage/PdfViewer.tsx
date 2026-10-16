@@ -54,10 +54,7 @@ export function PdfViewer(props: { ws: Workspace }) {
   const building = createMemo(() => editor().buildState()?.phase === 'running');
   const preview = createMemo(() => editor().previewState());
   const plan = createMemo(() => editor().plan());
-  const disabled = createMemo(() => building() || editor().planPending() ||
-    !editor().buildTarget() || plan()?.buildable !== true);
-  // While checking, retain the previous plan's colour rather than turning every
-  // disabled button light (or forcing every checking button dark).
+  const disabled = createMemo(() => building() || !editor().buildTarget() || plan()?.buildable !== true);
   const undimmed = createMemo(() => !building() && plan()?.buildable === true);
 
   async function build() {

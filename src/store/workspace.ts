@@ -100,11 +100,17 @@ export function createWorkspace(
   const [active, setActive] = createSignal<string | null>(restored.active ?? null);
   const [stageMode, setStageModeRaw] = createSignal<StageMode>(restored.stageMode ?? 'code');
   const [selected, setSelected] = createSignal<string[]>([]);
-  // The host resolves file versus directory and validates the direct TeX children.
-  createEffect(() => {
+  const buildScope = () => {
     const base = root();
-    const selection = base ? (selected().at(-1) ?? active() ?? base) : null;
-    untrack(() => { void editor.loadPlan(selection); });
+    return base ? (selected().at(-1) ?? base) : null;
+  };
+  // Build scope belongs to the tree selection, not to the editor. A selected
+  // directory is checked directly and a selected file is resolved to its parent
+  // by the host; with no selection the workspace root is the scope. Opening a
+  // tab must never move the build target behind the tree's back.
+  createEffect(() => {
+    const scope = buildScope();
+    untrack(() => { void editor.loadPlan(scope); });
   });
   const [renaming, setRenaming] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal<{ dir: string; kind: 'file' | 'dir' } | null>(null);
@@ -1046,7 +1052,7 @@ export function createWorkspace(
    * that pane happens to be showing.
    */
   const stopToolchainWatch = backend.onToolchainChange(() => {
-    const dir = editor.buildTarget();
+    const dir = buildScope();
     if (dir) void editor.loadPlan(dir);
   });
 
@@ -1104,7 +1110,7 @@ export function createWorkspace(
     if (!base || (change.dir !== base && !change.dir.startsWith(base === '/' ? '/' : `${base}/`))) return;
     const touched = joinPath(change.dir, change.name);
     const old = change.from ? joinPath(change.dir, change.from) : touched;
-    const target = editor.buildTarget();
+    const target = buildScope();
     if (target && change.kind !== 'changed' &&
         (change.name.toLowerCase().endsWith('.tex') || change.from?.toLowerCase().endsWith('.tex') ||
          target === touched || target.startsWith(`${touched}/`) || target === old || target.startsWith(`${old}/`))) {

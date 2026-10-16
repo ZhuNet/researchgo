@@ -62,9 +62,17 @@ describe('打开文件夹', () => {
       ws.setSelected(['/src', '/docs/guide.md']);
       await flush();
       expect(ws.editor.buildTarget()).toBe('/docs/guide.md');
-      emitToolchainChange(fs);
+      // Opening a different file changes the editor, not the tree-owned build
+      // scope. Clearing the tree selection always returns to the workspace root.
+      await ws.openFile('/src/main.ts');
       await flush();
       expect(ws.editor.buildTarget()).toBe('/docs/guide.md');
+      ws.setSelected([]);
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/');
+      emitToolchainChange(fs);
+      await flush();
+      expect(ws.editor.buildTarget()).toBe('/');
       expect(fs.buildCalls).toEqual([]);
       ws.closeFolder();
       await flush();

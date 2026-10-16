@@ -302,23 +302,22 @@ describe('编译：结果与原因都在预览里', () => {
     const state = editor.buildState();
     const old = editor.loadPlan('/a/main.tex');
     const current = editor.loadPlan('/b');
-    expect(editor.buildTarget()).toBe('/b');
-    expect(editor.planPending()).toBe(true);
+    expect(editor.buildTarget()).toBeNull();
     expect(editor.plan()).toBeNull();
     first.resolve({ buildable: true, command: 'old', reason: null, artifact: null, passes: 2, detail: null });
     await old;
     expect(editor.plan()).toBeNull();
-    expect(editor.planPending()).toBe(true);
+    expect(editor.buildTarget()).toBeNull();
     second.resolve({ buildable: false, command: null, reason: null, artifact: null, passes: 1, detail: 'Multiple .tex files' });
     await current;
+    expect(editor.buildTarget()).toBe('/b');
     expect(editor.plan()?.detail).toBe('Multiple .tex files');
-    expect(editor.planPending()).toBe(false);
     expect(editor.artifact()).toBe(artifact);
     expect(editor.buildState()).toBe(state);
     expect(fs.buildCalls).toEqual([{ root: '/a' }]);
   });
 
-  it('预检期间保留旧结果及其可构建颜色依据，完成后直接替换', async () => {
+  it('预检完成后一次替换目标与方案，期间保留上一组完整结果', async () => {
     const backend = fakeBackend(new FakeFs({ '/': [] }));
     type Plan = Awaited<ReturnType<typeof backend.buildPlan>>;
     const editor = createEditor(backend);
@@ -330,21 +329,22 @@ describe('编译：结果与原因都在预览里', () => {
     const first = deferred<Plan>();
     backend.buildPlan = () => first.promise;
     const checkingInvalid = editor.loadPlan('/b');
-    expect(editor.planPending()).toBe(true);
+    expect(editor.buildTarget()).toBe('/a');
     expect(editor.plan()).toBe(valid);
     first.resolve(invalid);
     await checkingInvalid;
+    expect(editor.buildTarget()).toBe('/b');
     expect(editor.plan()).toBe(invalid);
 
     const second = deferred<Plan>();
     backend.buildPlan = () => second.promise;
     const checkingValid = editor.loadPlan('/c');
-    expect(editor.planPending()).toBe(true);
+    expect(editor.buildTarget()).toBe('/b');
     expect(editor.plan()).toBe(invalid);
     second.resolve(valid);
     await checkingValid;
+    expect(editor.buildTarget()).toBe('/c');
     expect(editor.plan()).toBe(valid);
-    expect(editor.planPending()).toBe(false);
   });
 
   it('清空项目后，旧预检响应不能重新填入构建状态', async () => {
@@ -358,7 +358,6 @@ describe('编译：结果与原因都在预览里', () => {
     await pending;
     expect(editor.buildTarget()).toBeNull();
     expect(editor.plan()).toBeNull();
-    expect(editor.planPending()).toBe(false);
   });
 
   it('没有可执行的构建时，占位直说而不是给一个会失败的按钮', async () => {
