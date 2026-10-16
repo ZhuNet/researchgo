@@ -152,6 +152,11 @@
   font-weight: 600;
 }
 
+.cmd__file-icon {
+  display: block;
+  object-fit: contain;
+}
+
 .cmd__label {
   flex: 1;
   min-width: 0;

@@ -1,4 +1,4 @@
-import { fileGlyphOf, fileIconLang } from '../lib/fs';
+import { fileIconOf, folderIconOf } from '../lib/file-icons';
 
 const P: Record<string, string> = {
   chevronRight: '<path d="M9.5 5.5 16 12l-6.5 6.5"/>',
@@ -74,18 +74,33 @@ const P: Record<string, string> = {
 
 export type IconName = keyof typeof P | string;
 
-/**
- * The file-type glyph for a path: one glyph mapping, one color table, one
- * look. Every place that shows a file's type icon — tree rows, tabs, search
- * results — renders this, so a new file kind is added exactly once.
- */
-export function FileGlyph(props: { path: string; size?: number }) {
+/** One file-theme entry point shared by trees, tabs, search, and the palette. */
+export function FileGlyph(props: { path: string; size?: number; class?: string }) {
   return (
-    <Icon
-      name={fileGlyphOf(props.path)}
-      size={props.size ?? 14}
-      class="row__glyph"
-      style={{ color: LANG_COLOR[fileIconLang(props.path)] }}
+    <img
+      src={fileIconOf(props.path)}
+      width={props.size ?? 14}
+      height={props.size ?? 14}
+      class={props.class ?? 'row__glyph'}
+      alt=""
+      aria-hidden="true"
+    />
+  );
+}
+export function FolderGlyph(props: {
+  path: string;
+  expanded?: boolean;
+  size?: number;
+  class?: string;
+}) {
+  return (
+    <img
+      src={folderIconOf(props.path, props.expanded)}
+      width={props.size ?? 14}
+      height={props.size ?? 14}
+      class={props.class ?? 'row__glyph'}
+      alt=""
+      aria-hidden="true"
     />
   );
 }
@@ -115,30 +130,3 @@ export function Icon(props: {
     />
   );
 }
-
-export const LANG_COLOR: Record<string, string> = {
-  ts: '#3178c6',
-  tsx: '#3178c6',
-  js: '#eab308',
-  jsx: '#eab308',
-  rs: '#dea584',
-  json: '#a371f7',
-  css: '#42a5f5',
-  scss: '#f55385',
-  html: '#e34c26',
-  xml: '#e37933',
-  yaml: '#cb9f4a',
-  toml: '#9c4221',
-  md: '#7d8590',
-  mdx: '#7d8590',
-  tex: '#3f8fd6',
-  bib: '#8a7f5c',
-  py: '#3572a5',
-  sh: '#4e9a51',
-  docker: '#0f8ecb',
-  txt: '#8b9098',
-  env: '#c8a84b',
-  sql: '#d38f6d',
-  go: '#00add8',
-  pdf: '#d9381e',
-};

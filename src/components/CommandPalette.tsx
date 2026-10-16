@@ -1,7 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
-import { Icon, LANG_COLOR } from './Icon';
-import { fileGlyphOf, fileIconLang } from '../lib/fs';
+import { FileGlyph, Icon } from './Icon';
 import { fuzzyScore } from '../lib/tree';
 import {
   agentCollapsed,
@@ -27,7 +26,7 @@ interface Entry {
   hint?: string;
   group: string;
   icon: string;
-  color?: string;
+  filePath?: string;
   run: () => void;
 }
 
@@ -79,8 +78,8 @@ export function CommandPalette(props: { ws: Workspace; agent: Agent }) {
           group: 'Files',
           label: entry.name,
           hint: dir,
-          icon: fileGlyphOf(entry.path),
-          color: LANG_COLOR[fileIconLang(entry.path)],
+          icon: 'file',
+          filePath: entry.path,
           run: () => void props.ws.openFile(entry.path),
         });
       }
@@ -192,8 +191,13 @@ export function CommandPalette(props: { ws: Workspace; agent: Agent }) {
                         onPointerEnter={() => setActive(flat.indexOf(entry))}
                         onClick={() => run(entry)}
                       >
-                        <span class="cmd__icon" style={{ color: entry.color ?? 'var(--tx-3)' }}>
-                          <Icon name={entry.icon} size={14} />
+                        <span class="cmd__icon">
+                          <Show
+                            when={entry.filePath}
+                            fallback={<Icon name={entry.icon} size={14} />}
+                          >
+                            {(path) => <FileGlyph path={path()} size={14} class="cmd__file-icon" />}
+                          </Show>
                         </span>
                         <span class="cmd__label truncate">{entry.label}</span>
                         <Show when={entry.hint}>

@@ -158,8 +158,10 @@
 }
 
 .row__glyph {
+  display: block;
   flex: none;
   color: var(--tx-3);
+  object-fit: contain;
 }
 
 .row__glyph--dir {

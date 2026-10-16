@@ -8,7 +8,7 @@ import {
   Show,
 } from 'solid-js';
 
-import { FileGlyph, Icon } from '../Icon';
+import { FileGlyph, FolderGlyph, Icon } from '../Icon';
 import { anchoredScrollTop, virtualRange } from '../../lib/tree';
 import { moveTargetOf, parentOf, type Row } from '../../lib/rowindex';
 import { copyText, openMenu, setTreeCmd, toast, treeCmd } from '../../store/ui';
@@ -861,7 +861,12 @@ function CreateRow(props: {
   });
   return (
     <div class="row row--create" style={{ 'padding-left': '8px' }}>
-      <Icon name={props.item.kind === 'dir' ? 'folder' : 'file'} size={14} class="row__glyph" />
+      <Show
+        when={props.item.kind === 'dir'}
+        fallback={<FileGlyph path={input?.value ?? ''} size={14} />}
+      >
+        <FolderGlyph path={input?.value ?? ''} size={14} />
+      </Show>
       <input
         ref={input}
         class="row__input"
@@ -989,7 +994,7 @@ function TreeRow(props: {
       >
         <Show
           when={row().kind === 'file'}
-          fallback={<Icon name="folder" size={14} class="row__glyph" />}
+          fallback={<FolderGlyph path={row().path} expanded={isOpen()} size={14} />}
         >
           <FileGlyph path={row().path} size={14} />
         </Show>
