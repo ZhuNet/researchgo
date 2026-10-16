@@ -33,6 +33,10 @@ function languageFor(path: string): string {
 const models = new Map<string, Monaco.editor.ITextModel>();
 const views = new Map<string, Monaco.editor.ICodeEditorViewState>();
 const externalModels = new Set<Monaco.editor.ITextModel>();
+const modelListeners = new Map<Monaco.editor.ITextModel, {
+  owner: symbol;
+  subscription: Monaco.IDisposable;
+}>();
 
 function modelKey(path: string): string {
   return monaco.Uri.file(path).toString();
@@ -47,6 +51,7 @@ function modelKey(path: string): string {
 const LARGE_FILE_CHARS = 2 * 1024 * 1024;
 
 export function MonacoText(props: { ws: Workspace; path: string }) {
+  const listenerOwner = Symbol('monaco-text');
   let host: HTMLDivElement | undefined;
   let editor: Monaco.editor.IStandaloneCodeEditor | undefined;
   let current = '';
@@ -97,16 +102,29 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       // adopting it would join this tab to stale data. Remove the orphan instead.
       monaco.editor.getModel(uri)?.dispose();
       model = monaco.editor.createModel(content, languageFor(path), uri);
-      model.onDidChangeContent(() => {
-        if (externalModels.has(model!)) return;
-        batch(() => {
-          markDirty(path);
-          props.ws.editor.setContent(path, model!.getValue());
-        });
-      });
     }
     models.set(key, model);
+    // Models deliberately outlive this component, but the workspace store does
+    // not necessarily do so: a dev refresh can rebuild the app while Monaco keeps
+    // the model. Rebind on every adoption so edits are delivered to the current
+    // workspace rather than to the store captured by the old component instance.
+    modelListeners.get(model)?.subscription.dispose();
+    const subscription = model.onDidChangeContent(() => {
+      if (externalModels.has(model)) return;
+      batch(() => {
+        markDirty(path);
+        props.ws.editor.setContent(path, model.getValue());
+      });
+    });
+    modelListeners.set(model, { owner: listenerOwner, subscription });
     return model;
+  }
+
+  function disposeModel(model: Monaco.editor.ITextModel): void {
+    modelListeners.get(model)?.subscription.dispose();
+    modelListeners.delete(model);
+    externalModels.delete(model);
+    model.dispose();
   }
 
   function releaseClosedModels(): void {
@@ -115,7 +133,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       const path = open.find((candidate) => modelKey(candidate) === key);
       if (path) continue;
       if (editor?.getModel() === model) editor.setModel(null);
-      model.dispose();
+      disposeModel(model);
       models.delete(key);
     }
   }
@@ -214,6 +232,14 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         if (!props.ws.tabs().some((path) => modelKey(path) === modelKey(current))) views.delete(current);
       }
       releaseClosedModels();
+      // A replacement component may already have adopted the same model. Only
+      // remove subscriptions that still belong to this instance, otherwise an
+      // overlapping HMR cleanup would disconnect the new workspace again.
+      for (const [model, binding] of modelListeners) {
+        if (binding.owner !== listenerOwner) continue;
+        binding.subscription.dispose();
+        modelListeners.delete(model);
+      }
       editor?.dispose();
       editor = undefined;
       current = '';
@@ -250,7 +276,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       const content = props.ws.editor.contentOf(path);
       if (!open.has(path) || (content === undefined && path !== props.ws.active() && !props.ws.dirty().has(path))) {
         if (editor?.getModel() === model) editor.setModel(null);
-        model.dispose();
+        disposeModel(model);
         models.delete(key);
         if (!open.has(path)) views.delete(path);
       } else if (content !== undefined && model.getValue() !== content) {
