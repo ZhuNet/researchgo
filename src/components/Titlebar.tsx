@@ -1,4 +1,4 @@
-import { Show } from 'solid-js';
+import { onCleanup, Show } from 'solid-js';
 
 import { Icon } from './Icon';
 import {
@@ -9,12 +9,45 @@ import {
   theme,
 } from '../store/ui';
 import { isDesktop, windowCtl } from '../lib/bridge';
+import { passedDragThreshold } from '../lib/titlebarDrag';
 import type { Workspace } from '../store/workspace';
 import type { Agent } from '../store/agent';
 
 const desktop = isDesktop();
 
 export function Titlebar(props: { ws: Workspace; agent: Agent }) {
+  let dragOrigin: { x: number; y: number } | null = null;
+
+  const stopTracking = () => {
+    dragOrigin = null;
+    window.removeEventListener('pointermove', trackDrag);
+    window.removeEventListener('pointerup', stopTracking);
+    window.removeEventListener('pointercancel', stopTracking);
+  };
+
+  const trackDrag = (event: PointerEvent) => {
+    if (!dragOrigin || !event.isPrimary || (event.buttons & 1) === 0) {
+      stopTracking();
+      return;
+    }
+    if (!passedDragThreshold(dragOrigin, { x: event.screenX, y: event.screenY })) return;
+    stopTracking();
+    windowCtl.startDragging();
+  };
+
+  const beginDrag = (event: PointerEvent) => {
+    if (!desktop || event.button !== 0 || !event.isPrimary) return;
+    const target = event.target as Element | null;
+    if (target?.closest("button, input, textarea, select, a, [role='button']")) return;
+    stopTracking();
+    dragOrigin = { x: event.screenX, y: event.screenY };
+    window.addEventListener('pointermove', trackDrag);
+    window.addEventListener('pointerup', stopTracking);
+    window.addEventListener('pointercancel', stopTracking);
+  };
+
+  onCleanup(stopTracking);
+
   const modes = [
     { id: 'code', label: 'Source', icon: 'code' },
     { id: 'pdf', label: 'Preview', icon: 'book' },
@@ -22,8 +55,17 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
   ] as const;
 
   return (
-    <header class="titlebar drag" data-tauri-drag-region>
-      <div class="titlebar__left no-drag">
+    <header
+      class="titlebar"
+      onPointerDown={beginDrag}
+      onDblClick={(event) => {
+        const target = event.target as Element | null;
+        if (desktop && !target?.closest("button, input, textarea, select, a, [role='button']")) {
+          windowCtl.toggleMaximize();
+        }
+      }}
+    >
+      <div class="titlebar__left">
         <div class="mark" title="ResearchGO">
           <svg viewBox="0 0 1024 1024" width="17" height="17" aria-hidden="true">
             <path
@@ -49,7 +91,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
 
       </div>
 
-      <div class="titlebar__center no-drag">
+      <div class="titlebar__center">
         <div class="segmented" role="tablist" aria-label="Stage mode">
           {modes.map((m) => (
             <button
@@ -71,7 +113,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
         </button>
       </div>
 
-      <div class="titlebar__right no-drag">
+      <div class="titlebar__right">
         <button
           class="icon-btn"
           classList={{ 'icon-btn--on': agentCollapsed() }}

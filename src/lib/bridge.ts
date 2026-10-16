@@ -93,6 +93,7 @@ interface TauriBridge {
       minimize: () => void;
       toggleMaximize: () => void;
       close: () => void;
+      startDragging: () => void;
     };
   };
 }
@@ -109,4 +110,5 @@ export const windowCtl = {
   minimize: () => tauri()?.window?.getCurrentWindow?.().minimize(),
   toggleMaximize: () => tauri()?.window?.getCurrentWindow?.().toggleMaximize(),
   close: () => tauri()?.window?.getCurrentWindow?.().close(),
+  startDragging: () => tauri()?.window?.getCurrentWindow?.().startDragging(),
 };
