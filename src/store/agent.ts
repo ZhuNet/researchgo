@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 
-import { agentApi, onAgentEvent } from '../lib/agent';
+import { agentApi, onAgentEvent, type AgentStatus } from '../lib/agent';
 import type { UiEvent } from '../lib/bridge';
 
 export interface AgentTool {
@@ -118,8 +118,28 @@ export function createAgent() {
 
   let startedAt = 0;
   let tick: ReturnType<typeof setInterval> | undefined;
-  let turnSerial = 0;
+  /**
+   * Which turn the host last said it registered, or 0 if it has not said.
+   *
+   * Adopted from `turn.start` rather than counted here. The panel used to keep
+   * its own counter and compare the two, which held only while this process and
+   * the host were the same age: a webview that reloaded mid-turn came back
+   * counting from one while the host carried on from where it was, so every
+   * later `turn.end` named a turn this store had never issued and was thrown
+   * away as stale. Since `turn.end` is the only thing that can settle a turn,
+   * that left the phase on `running` for the rest of the session — the spinner
+   * spinning and the send button showing interrupt, with Enter and the send
+   * click both refused by `busy()`. One counter, allocated where the turn is
+   * registered, cannot drift from itself.
+   */
   let activeTurn = 0;
+  /**
+   * The prompt handed to the host and not yet answered, if any.
+   *
+   * Nothing about a turn can be acted on before the host has accepted its
+   * prompt, so this is what a stop or a clear waits out rather than racing.
+   */
+  let inflight: Promise<void> | undefined;
   const textIds = new Map<string, string>();
   const toolIds = new Map<string, string>();
 
@@ -135,7 +155,9 @@ export function createAgent() {
   // The host numbers its own frames per turn (`a1`, `a2`, …) and reuses those
   // numbers on the next one, so the turn they belong to is part of the key
   // here. Without it a second turn's answer appends to the first turn's
-  // message and its cards land on rows that are already on screen.
+  // message and its cards land on rows that are already on screen. `activeTurn`
+  // is the host's number for the turn in progress, so this is the host's
+  // numbering all the way down rather than a local guess at it.
   const frameKey = (id: string) => `${activeTurn}:${id}`;
 
   /**
@@ -261,11 +283,26 @@ export function createAgent() {
       case 'usage':
         setSpent({ context: ev.context, tokens: ev.tokens });
         break;
+      case 'turn.start':
+        // The host naming the turn it just registered, and the moment the panel
+        // becomes `running`. Driving that off the host's answer to the prompt
+        // instead left the panel claiming a turn on the strength of a round
+        // trip, and it could then sit on `running` waiting for a `turn.end`
+        // that had already gone by — a turn the host had finished before the
+        // panel knew it existed. From this frame on, the turn is provably still
+        // ahead of us: it cannot end before it was announced, and the frame
+        // announcing it was received, so the listener was already live. Nothing
+        // can be missed between here and the `turn.end` that ends it.
+        activeTurn = ev.turn;
+        // From `sending` only: a stop already in flight is further along than
+        // this, and writing `running` over it would put the button back while
+        // the turn behind it was still being torn down.
+        setPhase((phase) => (phase === 'sending' ? 'running' : phase));
+        break;
       case 'turn.end':
-        // The host counts its turns from 1 and so does `activeTurn`, one per
-        // prompt the panel sends, so the two numbers line up. A frame carrying
-        // any other number belongs to a turn that is already over: its panel
-        // was settled by the stop that ended it, and applying it now would
+        // A frame carrying any other number belongs to a turn this panel is not
+        // running — one that was stopped, and whose `turn.end` is still in
+        // flight, or one that began before this panel existed. Applying it would
         // close the turn that replaced it.
         if (ev.turn !== activeTurn) break;
         // A turn in the middle of being stopped settles itself when the stop
@@ -287,6 +324,63 @@ export function createAgent() {
   }
 
   /**
+   * Reads what the host knows that this panel does not, once, on its way up.
+   *
+   * The host outlives the panel. When a webview reloads mid-turn the host is
+   * still working, still holding a transcript, still counting turns — and the
+   * panel comes back knowing none of it, having been told only that a turn once
+   * existed by frames that stopped arriving the moment it went. Left to itself
+   * it then says three things that are false: that the conversation is empty,
+   * that nothing is running while something is, and that the counter starts at
+   * one. So this is read once rather than inferred forever.
+   *
+   * Optional in the strict sense that a host which cannot answer leaves the
+   * panel where it was — which is where it would have been anyway, since the
+   * read only ever corrects a panel that the host outlived.
+   */
+  async function adopt() {
+    let status: AgentStatus | undefined;
+    try {
+      status = await agentApi.status();
+    } catch {
+      return;
+    }
+    // A prompt sent while this read was in flight supersedes whatever it finds:
+    // from the moment the panel asked for a turn of its own, the panel is the
+    // one that knows. Adopting over the top of it would name the wrong turn.
+    if (!status || busy()) return;
+
+    // The host's number either way. It is the next turn's number once this one
+    // ends, and it is what a `turn.end` arriving now has to be checked against.
+    activeTurn = status.turn;
+    setSpent((prev) => ({ ...prev, context: status!.context }));
+
+    if (status.running) {
+      // A turn this panel did not start and so cannot time from its own click.
+      // The host's age is taken as the starting point rather than ignored,
+      // because reporting a turn that has been working forty seconds as one
+      // that started just now is the same kind of lie this read exists to stop.
+      startedAt = performance.now() - status.ageMs;
+      setPhase('running');
+      startTimer();
+    } else if (status.records > 0 && !items().length) {
+      // The host holds a conversation this panel is not showing. Saying so is
+      // the whole of what a panel with nothing on screen can honestly do about
+      // it: the transcript is the host's, and the records behind it are not
+      // something this side can rebuild from a count.
+      setItems((prev) => [
+        ...prev,
+        {
+          kind: 'notice',
+          id: uid('n'),
+          tone: 'info',
+          text: `This panel is not showing an earlier conversation the agent still has — ${status.records} transcript records. It will still answer from them.`,
+        },
+      ]);
+    }
+  }
+
+  /**
    * Hands the prompt to the host and waits for frames.
    *
    * Nothing is generated here. The user row is added optimistically so the
@@ -298,18 +392,35 @@ export function createAgent() {
     const body = text.trim();
     if (!body || busy()) return;
     setItems((prev) => [...prev, { kind: 'user', id: uid('u'), text: body }]);
-    activeTurn = ++turnSerial;
     setPhase('sending');
     startedAt = performance.now();
     // `spent` was already emptied by the `settle` that let this prompt be sent
     // at all, so the turn starts counting from zero without restating it here.
     startTimer();
+    const handed = handOver(body, root);
+    // Published so a stop or a clear can wait for the turn to exist before they
+    // try to act on it. See `abort`.
+    inflight = handed;
+    try {
+      await handed;
+    } finally {
+      inflight = undefined;
+    }
+  }
+
+  /**
+   * Hands the prompt to the host, and reports a refusal.
+   *
+   * Deliberately does not touch the phase on success: the panel becomes
+   * `running` when `turn.start` arrives, which is both the true answer to
+   * "is there a turn yet" and the frame whose arrival rules out having missed
+   * the `turn.end` that will end it. An answer to the prompt says only that the
+   * host accepted the request, which is a weaker and, on its own, unusable
+   * thing to be running on.
+   */
+  async function handOver(body: string, root: string) {
     try {
       await agentApi.send(body, root);
-      // The turn exists from here on, and only from here on can it be stopped.
-      // Between the click and this line there is nothing to interrupt, which is
-      // why the button is disabled in `sending` rather than armed at the click.
-      setPhase('running');
     } catch (err) {
       setItems((prev) => [
         ...prev,
@@ -330,6 +441,13 @@ export function createAgent() {
    * window would land on top of a turn nobody could see.
    */
   async function abort() {
+    // A prompt still on its way in has to land before it can be stopped. The
+    // host registers the turn only after it has torn down whatever was running,
+    // so a stop that overtook the handover would find nothing to stop and the
+    // turn would start anyway, right after the panel had written itself down as
+    // stopped. Waiting costs nothing — the handover is already in flight — and
+    // it is what makes the stop below unconditional rather than a race.
+    if (inflight) await inflight;
     if (!stoppable()) return;
     setPhase('stopping');
     try {
@@ -360,17 +478,19 @@ export function createAgent() {
   /** Drops the thread on screen and the transcript behind it. The host's log of
    * what happened is not part of either. */
   async function clear() {
-    // Clearing under a running turn empties the panel and then lets the turn go
-    // on filling it again, so the thread comes back from nothing. Stopping first
-    // costs a moment and is the same serial path the stop button uses.
-    if (stoppable()) await abort();
+    // Starting over starts from the one state a prompt can be sent from, so it
+    // goes back to it through the same stop the button uses. Emptying a panel
+    // out from under a turn lets that turn refill it behind the clear, and since
+    // the host holds the transcript for the whole turn, the clear lands *after*
+    // it — leaving the model remembering a conversation that is no longer on
+    // screen. One rule, no special case: anything in flight is stopped first.
+    if (busy()) await abort();
     await agentApi.clear().catch(() => undefined);
     stopTimer();
     textIds.clear();
     toolIds.clear();
     setItems([]);
     setSpent({ context: 0, tokens: 0 });
-    settle();
   }
 
   function stopTimer() {
@@ -407,6 +527,8 @@ export function createAgent() {
   // One subscription for the panel's lifetime. Frames arrive for whatever turn
   // is running, so there is nothing to wire up per prompt.
   onAgentEvent(apply);
+  // And one read of what came before it, since the host may have been here first.
+  void adopt();
 
   return {
     items,

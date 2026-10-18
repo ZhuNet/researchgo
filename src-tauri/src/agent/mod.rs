@@ -20,9 +20,11 @@ pub mod tools;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
-use agent_loop::AgentState;
+use self::frame::Frame;
+use agent_loop::{emit, AgentState};
 
 /// Registers the state the commands share. Called once from `lib.rs`.
 pub fn init(app: &mut tauri::App) {
@@ -78,6 +80,16 @@ pub async fn agent_send(
   // turn rather than a gap where one ought to be.
   let turn = state.begin_turn();
   let root = PathBuf::from(root);
+
+  // The turn's identity, announced by the same operation that allocated it and
+  // ahead of every frame the turn will produce. The renderer adopts this number
+  // instead of counting its own prompts and comparing: its count was a property
+  // of the webview rather than of the host, so it restarted whenever the
+  // renderer did, and a panel that reloaded while a turn was running came back
+  // unable to recognise any turn after it. Emitted before the spawn rather than
+  // from inside the task, which is what makes "the turn exists" and "here is
+  // what it is called" the same event rather than two that can arrive apart.
+  emit(&app, Frame::TurnStart { turn: turn.serial() });
 
   tauri::async_runtime::spawn(async move {
     // `state()` borrows from an owned handle held here; taking it inline would
@@ -148,11 +160,80 @@ pub fn stop_without_waiting(state: &AgentState) {
   }
 }
 
+/// What the host knows that a panel which has just started does not.
+///
+/// Read once, when a panel starts. The host owns the conversation, the running
+/// turn and the turn counter, and it outlives any panel — a webview that
+/// reloaded leaves the host mid-turn, with a transcript nobody is looking at.
+/// Frames cannot fill that gap, because a frame only ever carries what happens
+/// from the moment it is emitted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+  /// The number the host has reached. The live turn's while one is running, and
+  /// the last one that was otherwise — which is what the next prompt will be
+  /// called, so a panel that reads this never has to count on its own.
+  pub turn: u64,
+  /// Whether a turn is running.
+  pub running: bool,
+  /// How long the live turn has been running.
+  ///
+  /// A duration and not a timestamp, deliberately: the panel's clock and this
+  /// one are not the same clock, and a duration is the only thing that can cross
+  /// between them and still mean what it said on arrival.
+  pub age_ms: u64,
+  /// How large the conversation is, in the terms the panel's meter shows.
+  pub context: u64,
+  /// How many records the transcript holds.
+  ///
+  /// What separates an empty panel from an empty conversation: the transcript
+  /// carries the model-facing guidance too, so its measured size is never zero
+  /// and cannot answer the question by itself.
+  pub records: usize,
+}
+
+/// Reads the host's state for a panel that knows none of it.
+///
+/// Measured off the live turn when there is one, because that turn holds the
+/// transcript lock for its whole life and this read is wanted precisely when the
+/// turn is still going. Nothing is running means the lock is free, so the
+/// transcript is measured directly rather than from whatever it last said.
+#[tauri::command]
+pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
+  if let Some(turn) = state.running_turn() {
+    let (context, records) = turn.measured();
+    return Ok(AgentStatus {
+      turn: turn.serial(),
+      running: true,
+      age_ms: turn.age().as_millis() as u64,
+      context,
+      records,
+    });
+  }
+  let conversation = state.conversation.lock().await;
+  Ok(AgentStatus {
+    turn: state.turn_number(),
+    running: false,
+    age_ms: 0,
+    context: conversation.context(),
+    records: conversation.records(),
+  })
+}
+
 /// Drops the transcript the model reads. The log is untouched: a turn the user
 /// cleared from the panel still happened, and the log is a record of what
 /// happened rather than of what is on screen.
+///
+/// Stops first, by the same path a new prompt takes, for the same reason. The
+/// turn holds the transcript for its whole life, so a clear that merely waited
+/// for the lock would land *after* the turn that was filling the panel the user
+/// just emptied — a model left remembering a conversation that is no longer on
+/// screen, which is the one outcome clearing exists to prevent.
 #[tauri::command]
 pub async fn agent_clear(state: State<'_, AgentState>) -> Result<(), String> {
+  if let Err(()) = stop_running(&state).await {
+    ::log::warn!("[agent] the running turn did not stop; clearing behind it anyway");
+  }
   state.conversation.lock().await.clear();
   Ok(())
 }

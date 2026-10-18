@@ -39,6 +39,26 @@ export interface ConfigView {
   configs: LlmView[];
 }
 
+/**
+ * What the host knows about itself, for a panel that knows none of it.
+ *
+ * The host outlives the panel: it keeps the conversation, the running turn and
+ * the turn counter. Frames cannot carry that, because a frame only says what
+ * happened from the moment it was emitted. So a panel reads this once, when it
+ * starts, instead of inferring three things it has not been told.
+ */
+export interface AgentStatus {
+  /** The number the host has reached. The next prompt will be this plus one. */
+  turn: number;
+  running: boolean;
+  /** How long the live turn has been running. A duration, not a timestamp. */
+  ageMs: number;
+  /** How large the conversation is, in the terms the panel's meter shows. */
+  context: number;
+  /** How many records the transcript holds. */
+  records: number;
+}
+
 /** The event the host emits every JSONL frame on. */
 const STREAM = 'agent:frame';
 
@@ -86,6 +106,9 @@ export const agentApi = {
 
   /** Starts a turn. Resolves once the host has accepted it, not when it ends. */
   send: (prompt: string, root: string) => invoke<void>('agent_send', { prompt, root }),
+
+  /** Asks the host what it is doing. See `AgentStatus`. */
+  status: () => invoke<AgentStatus>('agent_status'),
 
   /** Asks the running turn to stop. The transcript survives. */
   abort: () => invoke<void>('agent_abort'),

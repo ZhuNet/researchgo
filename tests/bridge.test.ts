@@ -89,6 +89,15 @@ describe('translate: 补丁与用量', () => {
       });
     }
   });
+
+  it('turn.start 把宿主分配的轮次号原样带过', () => {
+    // 面板不再自己数 prompt，这个数就是它唯一知道的轮次身份。它在帧流
+    // 上以帧的形式出现，而不是某个计数器的自增结果，所以翻译必须原样保留。
+    expect(one({ type: 'turn.start', turn: 12 })).toEqual({
+      kind: 'turn.start',
+      turn: 12,
+    });
+  });
 });
 
 describe('translate: 容错', () => {

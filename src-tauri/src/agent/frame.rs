@@ -95,6 +95,20 @@ pub enum Frame {
     /// itself grew by only the last of those. This one is a cost, for the rate.
     tokens: u64,
   },
+  #[serde(rename = "turn.start")]
+  TurnStart {
+    /// Which turn has just been allocated and registered.
+    ///
+    /// Announced here, in the same operation that allocated the number, rather
+    /// than leaving the renderer to count prompts in parallel and hope the two
+    /// agree. They agreed only for as long as both processes did: a panel whose
+    /// webview reloaded mid-turn came back counting from one while the host
+    /// carried on from where it was, and from then on every `turn.end` carried a
+    /// number the panel had never issued — so no turn could close itself, the
+    /// phase stayed `running`, and the button stayed on interrupt for the rest
+    /// of the session. One allocation, announced once, cannot drift from itself.
+    turn: u64,
+  },
   #[serde(rename = "turn.end")]
   TurnEnd {
     /// Which turn this ends. The renderer drops a `turn.end` whose number is not
@@ -183,6 +197,7 @@ mod tests {
         Frame::Usage { context: 1, tokens: 1 },
         "usage",
       ),
+      (Frame::TurnStart { turn: 1 }, "turn.start"),
       (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop }, "turn.end"),
       (Frame::Error { message: "e".into() }, "error"),
     ];

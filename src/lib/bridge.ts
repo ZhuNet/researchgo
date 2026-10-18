@@ -7,6 +7,7 @@ export type RawEvent =
   | { type: 'tool.end'; id: string; call_id: string; ok: boolean; summary: string }
   | { type: 'file.patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { type: 'usage'; context: number; tokens: number }
+  | { type: 'turn.start'; turn: number }
   | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { type: 'error'; message: string };
 
@@ -19,6 +20,7 @@ export type UiEvent =
   | { kind: 'tool.end'; id: string; callId: string; ok: boolean; summary: string }
   | { kind: 'patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { kind: 'usage'; context: number; tokens: number }
+  | { kind: 'turn.start'; turn: number }
   | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { kind: 'error'; message: string };
 
@@ -60,6 +62,12 @@ export function translate(line: string): UiEvent[] {
       return [{ kind: 'patch', path: raw.path, op: raw.op, bytes: raw.bytes, diff: raw.diff }];
     case 'usage':
       return [{ kind: 'usage', context: raw.context, tokens: raw.tokens }];
+    case 'turn.start':
+      // The host naming the turn it has just registered. The panel adopts this
+      // rather than counting prompts of its own, because a count that lives in
+      // the webview restarts with the webview while the host's does not — and two
+      // counters that have to agree by equality are two sources of truth.
+      return [{ kind: 'turn.start', turn: raw.turn }];
     case 'turn.end':
       // The turn number travels with the frame rather than being inferred. A
       // stopped turn settles itself, so the `turn.end` announcing that can

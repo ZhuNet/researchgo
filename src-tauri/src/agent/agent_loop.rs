@@ -162,13 +162,10 @@ impl Conversation {
       // the moment the prompt is on its way — it stays right on an endpoint
       // that reports no usage at all, and on a request that is stopped before
       // it is ever answered, which a provider's count never arrives for.
-      let ctx = estimate_tokens(
-        &serde_json::to_string(&json!({
-          "messages": model_messages(&self.messages),
-          "tools": tools::tool_defs(),
-        }))
-        .unwrap_or_default(),
-      );
+      let ctx = self.context();
+      // Published on the turn so a panel starting mid-turn can read the size of
+      // the conversation without waiting for the turn to release it.
+      turn.publish(ctx, self.messages.len());
       emit(app, Frame::Usage { context: ctx, tokens: tok });
 
       let result = call_model_streaming(&cfg, &self.messages, turn, |text| {
@@ -275,6 +272,31 @@ impl Conversation {
   /// happened rather than of what is on screen.
   pub fn clear(&mut self) {
     self.messages.clear();
+  }
+
+  /// How large the conversation is right now, in the terms the panel's meter
+  /// shows.
+  ///
+  /// The same measurement the first step of every turn makes, defined once so a
+  /// panel asking on its own and a request about to be sent cannot disagree
+  /// about what the conversation weighs.
+  pub fn context(&self) -> u64 {
+    estimate_tokens(
+      &serde_json::to_string(&json!({
+        "messages": model_messages(&self.messages),
+        "tools": tools::tool_defs(),
+      }))
+      .unwrap_or_default(),
+    )
+  }
+
+  /// How many records the transcript holds.
+  ///
+  /// What tells an empty panel from an empty conversation: the transcript also
+  /// carries the model the system guidance, so its size is never zero and
+  /// cannot answer the question on its own.
+  pub fn records(&self) -> usize {
+    self.messages.len()
   }
 
   /// Opens the log the first time a turn needs it.
@@ -786,7 +808,9 @@ fn chunks(text: &str, size: usize) -> Vec<String> {
     .collect()
 }
 
-fn emit(app: &AppHandle, frame: Frame) {
+/// Puts one frame on the wire. Every frame leaves through here, so the order the
+/// loop produced them in is the order they arrive in.
+pub(crate) fn emit(app: &AppHandle, frame: Frame) {
   if let Err(err) = app.emit(STREAM, frame) {
     log::warn!("{STREAM} was not delivered: {err}");
   }
@@ -815,6 +839,19 @@ pub struct Turn {
   /// Which turn this is, counted from 1 and carried on `turn.end` so a late
   /// frame from a stopped turn cannot close the one that replaced it.
   serial: u64,
+  /// When this turn was registered.
+  ///
+  /// Kept because a panel that starts while this turn is already running cannot
+  /// time it from its own click, and the honest answer to "how long has it been
+  /// working" is a duration rather than nothing.
+  started: Instant,
+  /// The size of the conversation as of this turn's last step, published here
+  /// rather than on the conversation because a running turn holds that lock for
+  /// its whole life — and a panel starting mid-turn needs the figure most
+  /// exactly when waiting for it would be worst.
+  context: AtomicU64,
+  /// The same for how many records the transcript holds, and for the same reason.
+  records: AtomicU64,
 }
 
 impl Turn {
@@ -823,6 +860,9 @@ impl Turn {
       stop: watch::channel(false).0,
       done: watch::channel(false).0,
       serial,
+      started: Instant::now(),
+      context: AtomicU64::new(0),
+      records: AtomicU64::new(0),
     })
   }
 
@@ -836,6 +876,25 @@ impl Turn {
 
   pub fn serial(&self) -> u64 {
     self.serial
+  }
+
+  /// How long this turn has been running.
+  pub fn age(&self) -> Duration {
+    self.started.elapsed()
+  }
+
+  /// Records what this turn measured about the conversation it is working on.
+  pub fn publish(&self, context: u64, records: usize) {
+    self.context.store(context, Ordering::Relaxed);
+    self.records.store(records as u64, Ordering::Relaxed);
+  }
+
+  /// What `publish` recorded, for a panel asking about a turn it did not start.
+  pub fn measured(&self) -> (u64, usize) {
+    (
+      self.context.load(Ordering::Relaxed),
+      self.records.load(Ordering::Relaxed) as usize,
+    )
   }
 
   /// The cheap check, for the points in the loop where stopping is free.
@@ -946,6 +1005,22 @@ impl AgentState {
     turn
   }
 
+  /// The number the host has reached: the live turn's while one is running, and
+  /// the last one that was once it is not.
+  ///
+  /// Read straight from the counter, because `begin_turn` takes the number and
+  /// registers the turn in that order — so the two can never disagree about
+  /// which turn this is.
+  pub fn turn_number(&self) -> u64 {
+    self.serial.load(Ordering::Relaxed)
+  }
+
+  /// The live turn, looked at rather than asked to stop. `stop_running` is a
+  /// request; this is the observation, and a read must not be a side effect.
+  pub fn running_turn(&self) -> Option<Arc<Turn>> {
+    self.lock_running().clone()
+  }
+
   fn lock_running(&self) -> std::sync::MutexGuard<'_, Option<Arc<Turn>>> {
     // A poisoned lock means some other thread panicked holding it, and the only
     // thing in here is an `Arc` to a turn. Carrying on with whatever is there
@@ -1011,6 +1086,60 @@ mod tests {
     tokio::time::timeout(std::time::Duration::from_millis(200), turn.finished())
       .await
       .expect("a turn that is over is over for a waiter that arrives late");
+  }
+
+  #[tokio::test]
+  async fn a_read_of_the_host_does_not_ask_the_turn_to_stop() {
+    // The read exists so a panel that has just started can find out what the
+    // host is doing. Built on `stop_running`, which *is* the request to stop —
+    // so a status read that reused it would quietly end the very turn it was
+    // sent to report on, and the panel would be told the truth by killing it.
+    let state = AgentState::new();
+    let turn = state.begin_turn();
+    turn.publish(61_000, 14);
+
+    let live = state.running_turn().expect("a turn is running");
+    assert_eq!(live.serial(), turn.serial());
+    assert_eq!(state.turn_number(), turn.serial());
+    assert!(!turn.is_stopped(), "looking at a turn must not stop it");
+    assert_eq!(live.measured(), (61_000, 14));
+
+    state.end_turn(&turn);
+    assert!(state.running_turn().is_none());
+    // The number does not go backwards just because the turn ended: it is what
+    // the next prompt will be called.
+    assert_eq!(state.turn_number(), turn.serial());
+  }
+
+  #[test]
+  fn a_turn_reports_how_long_it_has_been_running() {
+    let turn = Turn::detached();
+    let started = turn.age();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(
+      turn.age() >= started + std::time::Duration::from_millis(4),
+      "a turn a panel adopted has to be able to say how old it is"
+    );
+  }
+
+  #[test]
+  fn the_conversation_measures_the_way_the_meter_reads_it() {
+    // Both the panel's meter and the request about to be sent have to come from
+    // one measurement, or the number the panel shows stops being a prediction of
+    // what the model is about to be handed.
+    let conversation = Conversation::new(PathBuf::from("/tmp"), "m".into());
+    let empty = conversation.context();
+
+    let mut grown = conversation;
+    grown.record(&json!({ "role": "user", "content": "a fairly long question about the thing" }), None);
+    assert_eq!(grown.records(), 1);
+    assert!(
+      grown.context() > empty,
+      "a transcript with a record in it weighs more than one without"
+    );
+    grown.clear();
+    assert_eq!(grown.records(), 0);
+    assert_eq!(grown.context(), empty, "a cleared transcript weighs what an empty one does");
   }
 
   #[tokio::test]
