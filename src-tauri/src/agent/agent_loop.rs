@@ -56,6 +56,8 @@ pub struct Conversation {
   pub root: PathBuf,
   pub model: String,
   messages: Vec<Value>,
+  /// Reused until the transcript changes; measuring serializes the full request.
+  measured_context: std::cell::Cell<Option<u64>>,
   /// Opened on the first turn rather than in `new`, because where the log lives
   /// is only known once there is an app to ask.
   log: Option<Recorder>,
@@ -67,6 +69,7 @@ impl Conversation {
       root,
       model,
       messages: Vec::new(),
+      measured_context: std::cell::Cell::new(None),
       log: None,
     }
   }
@@ -272,6 +275,7 @@ impl Conversation {
   /// happened rather than of what is on screen.
   pub fn clear(&mut self) {
     self.messages.clear();
+    self.measured_context.set(None);
   }
 
   /// How large the conversation is right now, in the terms the panel's meter
@@ -281,13 +285,18 @@ impl Conversation {
   /// panel asking on its own and a request about to be sent cannot disagree
   /// about what the conversation weighs.
   pub fn context(&self) -> u64 {
-    estimate_tokens(
+    if let Some(context) = self.measured_context.get() {
+      return context;
+    }
+    let context = estimate_tokens(
       &serde_json::to_string(&json!({
         "messages": model_messages(&self.messages),
         "tools": tools::tool_defs(),
       }))
       .unwrap_or_default(),
-    )
+    );
+    self.measured_context.set(Some(context));
+    context
   }
 
   /// How many records the transcript holds.
@@ -333,6 +342,7 @@ impl Conversation {
   fn record(&mut self, message: &Value, tool: Option<ToolRecord>) {
     let model = self.model.clone();
     self.messages.push(message.clone());
+    self.measured_context.set(None);
     if let Some(rec) = self.log.as_mut() {
       rec.push(model, message.clone(), tool);
     }
@@ -849,9 +859,7 @@ pub struct Turn {
   /// rather than on the conversation because a running turn holds that lock for
   /// its whole life — and a panel starting mid-turn needs the figure most
   /// exactly when waiting for it would be worst.
-  context: AtomicU64,
-  /// The same for how many records the transcript holds, and for the same reason.
-  records: AtomicU64,
+  measured: std::sync::Mutex<(u64, usize)>,
 }
 
 impl Turn {
@@ -861,8 +869,7 @@ impl Turn {
       done: watch::channel(false).0,
       serial,
       started: Instant::now(),
-      context: AtomicU64::new(0),
-      records: AtomicU64::new(0),
+      measured: std::sync::Mutex::new((0, 0)),
     })
   }
 
@@ -885,16 +892,12 @@ impl Turn {
 
   /// Records what this turn measured about the conversation it is working on.
   pub fn publish(&self, context: u64, records: usize) {
-    self.context.store(context, Ordering::Relaxed);
-    self.records.store(records as u64, Ordering::Relaxed);
+    *self.measured.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = (context, records);
   }
 
   /// What `publish` recorded, for a panel asking about a turn it did not start.
   pub fn measured(&self) -> (u64, usize) {
-    (
-      self.context.load(Ordering::Relaxed),
-      self.records.load(Ordering::Relaxed) as usize,
-    )
+    *self.measured.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 
   /// The cheap check, for the points in the loop where stopping is free.
@@ -951,6 +954,8 @@ impl Turn {
 /// would stall the runtime thread rather than just the other waiter.
 pub struct AgentState {
   pub(crate) conversation: tokio::sync::Mutex<Conversation>,
+  /// State-changing commands are admitted one at a time.
+  pub(crate) operations: tokio::sync::Mutex<()>,
   /// The turn that is live right now, or `None`. Registered before `agent_send`
   /// answers, so a stop cannot land in the gap between the click and the turn
   /// existing and find nothing to stop.
@@ -968,6 +973,7 @@ impl AgentState {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         String::new(),
       )),
+      operations: tokio::sync::Mutex::new(()),
       running: std::sync::Mutex::new(None),
       serial: AtomicU64::new(0),
     }
@@ -987,12 +993,32 @@ impl AgentState {
   /// Only clears the slot if it is still this turn's: a turn that ends after
   /// being superseded must not unregister the one that took its place.
   pub fn end_turn(&self, turn: &Arc<Turn>) {
+    self.unregister(turn);
+    turn.mark_finished();
+  }
+
+  /// Publishes the idle snapshot before waking commands waiting on this turn.
+  pub fn finish_turn(&self, app: &AppHandle, turn: &Arc<Turn>, context: u64, records: usize) {
+    self.unregister(turn);
+    emit(
+      app,
+      Frame::Status {
+        turn: turn.serial(),
+        phase: "idle".into(),
+        age_ms: 0,
+        context,
+        records,
+      },
+    );
+    turn.mark_finished();
+  }
+
+  fn unregister(&self, turn: &Arc<Turn>) {
     let mut running = self.lock_running();
     if running.as_ref().is_some_and(|current| Arc::ptr_eq(current, turn)) {
       *running = None;
     }
     drop(running);
-    turn.mark_finished();
   }
 
   /// Asks the live turn to stop and hands back its ticket, so the caller can

@@ -7,6 +7,7 @@ export type RawEvent =
   | { type: 'tool.end'; id: string; call_id: string; ok: boolean; summary: string }
   | { type: 'file.patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { type: 'usage'; context: number; tokens: number }
+  | { type: 'agent.status'; turn: number; phase: 'idle' | 'running' | 'stopping'; age_ms: number; context: number; records: number }
   | { type: 'turn.start'; turn: number }
   | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { type: 'error'; message: string };
@@ -20,6 +21,7 @@ export type UiEvent =
   | { kind: 'tool.end'; id: string; callId: string; ok: boolean; summary: string }
   | { kind: 'patch'; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
   | { kind: 'usage'; context: number; tokens: number }
+  | { kind: 'status'; turn: number; phase: 'idle' | 'running' | 'stopping'; ageMs: number; context: number; records: number }
   | { kind: 'turn.start'; turn: number }
   | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
   | { kind: 'error'; message: string };
@@ -62,6 +64,15 @@ export function translate(line: string): UiEvent[] {
       return [{ kind: 'patch', path: raw.path, op: raw.op, bytes: raw.bytes, diff: raw.diff }];
     case 'usage':
       return [{ kind: 'usage', context: raw.context, tokens: raw.tokens }];
+    case 'agent.status':
+      return [{
+        kind: 'status',
+        turn: raw.turn,
+        phase: raw.phase,
+        ageMs: raw.age_ms,
+        context: raw.context,
+        records: raw.records,
+      }];
     case 'turn.start':
       // The host naming the turn it has just registered. The panel adopts this
       // rather than counting prompts of its own, because a count that lives in

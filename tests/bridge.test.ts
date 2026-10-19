@@ -78,6 +78,12 @@ describe('translate: 补丁与用量', () => {
     });
   });
 
+  it('agent.status carries the authoritative control snapshot', () => {
+    expect(one({ type: 'agent.status', turn: 7, phase: 'stopping', age_ms: 8300, context: 4200, records: 5 })).toEqual({
+      kind: 'status', turn: 7, phase: 'stopping', ageMs: 8300, context: 4200, records: 5,
+    });
+  });
+
   it('turn.end 保留轮次与原因', () => {
     // The turn number is what lets the panel tell a late `turn.end` from one
     // that closes the turn it is running, so it has to survive translation.

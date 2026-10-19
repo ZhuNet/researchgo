@@ -18,8 +18,6 @@ pub mod log;
 pub mod tools;
 
 use std::path::PathBuf;
-use std::time::Duration;
-
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
@@ -31,15 +29,6 @@ pub fn init(app: &mut tauri::App) {
   app.manage(AgentState::new());
   config::init(app.handle());
 }
-
-/// How long a stop waits for the turn to actually let go of the transcript.
-///
-/// A backstop, not the expected cost. A stopped turn tears itself down — the
-/// model response is dropped mid-stream and a running command is killed — so
-/// this is only reached by a turn wedged somewhere the stop cannot reach. It
-/// used to be five seconds of a *prompt* being refused outright, which is a
-/// different problem: that one threw the prompt away.
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Runs one turn: the user's prompt, streamed back as frames on `agent:frame`.
 ///
@@ -60,25 +49,19 @@ pub async fn agent_send(
     return Ok(());
   }
 
-  // A new prompt supersedes whatever was running, and waits for it to be gone.
-  // Serial rather than parallel because two turns writing one transcript produce
-  // a conversation that reads as nonsense; a wait rather than a refusal because
-  // stopping is immediate and there is no longer a reason to throw the prompt
-  // away. The stopped turn releases the transcript before announcing that it is
-  // done, so the turn spawned below does not queue behind it.
-  //
-  // A stop that ran out of time is stepped over rather than refused. Refusing
-  // is what used to lose the prompt — and the renderer counts its turns the
-  // same way this does, so a refused prompt would leave the two out of step
-  // and every later `turn.end` would look like it belonged to a turn that had
-  // already ended. Queueing behind a wedged turn is the smaller problem.
-  if let Err(()) = stop_running(&state).await {
-    ::log::warn!("[agent] the previous turn did not stop; starting the new one behind it");
+  let operation = state.operations.lock().await;
+
+  if state.running_turn().is_some() {
+    return Err("a turn is already running".into());
   }
 
   // Registered before this returns, so a stop that follows the prompt finds a
   // turn rather than a gap where one ought to be.
   let turn = state.begin_turn();
+  {
+    let conversation = state.conversation.lock().await;
+    turn.publish(conversation.context(), conversation.records());
+  }
   let root = PathBuf::from(root);
 
   // The turn's identity, announced by the same operation that allocated it and
@@ -90,6 +73,8 @@ pub async fn agent_send(
   // from inside the task, which is what makes "the turn exists" and "here is
   // what it is called" the same event rather than two that can arrive apart.
   emit(&app, Frame::TurnStart { turn: turn.serial() });
+  emit_running(&app, &turn);
+  drop(operation);
 
   tauri::async_runtime::spawn(async move {
     // `state()` borrows from an owned handle held here; taking it inline would
@@ -97,15 +82,16 @@ pub async fn agent_send(
     // at nothing.
     let handle = app.clone();
     let shared = handle.state::<AgentState>();
-    {
+    let (context, records) = {
       let mut conversation = shared.conversation.lock().await;
       conversation.turn(&handle, &prompt, &turn, root).await;
-    }
+      (conversation.context(), conversation.records())
+    };
     // Only now is the transcript free, which is what makes a stop a wait for the
     // real thing: a stop that returned while the turn still held the lock was a
     // stop that returned early, and the prompt typed into that window queued
     // behind a turn nobody was watching.
-    shared.end_turn(&turn);
+    shared.finish_turn(&handle, &turn, context, records);
   });
 
   Ok(())
@@ -119,32 +105,25 @@ pub async fn agent_send(
 /// that returned early would put the send button back while the agent was still
 /// working.
 #[tauri::command]
-pub async fn agent_abort(state: State<'_, AgentState>) -> Result<(), String> {
+pub async fn agent_abort(app: AppHandle, state: State<'_, AgentState>) -> Result<(), String> {
   // Whatever went wrong, the turn is as stopped as it is going to get, and the
   // panel settles on this answer rather than waiting for a frame that may never
   // come. The failure is in the log.
-  stop_running(&state).await.map_err(|()| {
-    "the turn did not stop; the panel has settled but the host may still be finishing it".to_string()
-  })
+  let _operation = state.operations.lock().await;
+  stop_running(&app, &state).await;
+  Ok(())
 }
 
 /// Asks the live turn to stop and waits for it to be over. Instant when nothing
 /// is running. The error is about a turn that could not be torn down, which the
 /// caller can log but not do anything about.
-async fn stop_running(state: &AgentState) -> Result<(), ()> {
+async fn stop_running(app: &AppHandle, state: &AgentState) {
   let Some(turn) = state.stop_running() else {
-    return Ok(());
+    return;
   };
   ::log::info!("[agent] stopping turn {}", turn.serial());
-  tokio::time::timeout(STOP_TIMEOUT, turn.finished())
-    .await
-    .map_err(|_| {
-      ::log::error!(
-        "[agent] turn {} did not stop within {}s",
-        turn.serial(),
-        STOP_TIMEOUT.as_secs()
-      );
-    })
+  emit_stopping(app, &turn);
+  turn.finished().await;
 }
 
 /// Stops the running turn without waiting for it, for the window going away.
@@ -174,8 +153,8 @@ pub struct AgentStatus {
   /// the last one that was otherwise — which is what the next prompt will be
   /// called, so a panel that reads this never has to count on its own.
   pub turn: u64,
-  /// Whether a turn is running.
-  pub running: bool,
+  /// The host-owned phase that drives the composer.
+  pub phase: String,
   /// How long the live turn has been running.
   ///
   /// A duration and not a timestamp, deliberately: the panel's clock and this
@@ -204,7 +183,7 @@ pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, S
     let (context, records) = turn.measured();
     return Ok(AgentStatus {
       turn: turn.serial(),
-      running: true,
+      phase: if turn.is_stopped() { "stopping" } else { "running" }.into(),
       age_ms: turn.age().as_millis() as u64,
       context,
       records,
@@ -213,7 +192,7 @@ pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, S
   let conversation = state.conversation.lock().await;
   Ok(AgentStatus {
     turn: state.turn_number(),
-    running: false,
+    phase: "idle".into(),
     age_ms: 0,
     context: conversation.context(),
     records: conversation.records(),
@@ -230,10 +209,50 @@ pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, S
 /// just emptied — a model left remembering a conversation that is no longer on
 /// screen, which is the one outcome clearing exists to prevent.
 #[tauri::command]
-pub async fn agent_clear(state: State<'_, AgentState>) -> Result<(), String> {
-  if let Err(()) = stop_running(&state).await {
-    ::log::warn!("[agent] the running turn did not stop; clearing behind it anyway");
-  }
-  state.conversation.lock().await.clear();
+pub async fn agent_clear(app: AppHandle, state: State<'_, AgentState>) -> Result<(), String> {
+  let _operation = state.operations.lock().await;
+  stop_running(&app, &state).await;
+  let mut conversation = state.conversation.lock().await;
+  conversation.clear();
+  let context = conversation.context();
+  drop(conversation);
+  emit(
+    &app,
+    Frame::Status {
+      turn: state.turn_number(),
+      phase: "idle".into(),
+      age_ms: 0,
+      context,
+      records: 0,
+    },
+  );
   Ok(())
+}
+
+fn emit_running(app: &AppHandle, turn: &agent_loop::Turn) {
+  let (context, records) = turn.measured();
+  emit(
+    app,
+    Frame::Status {
+      turn: turn.serial(),
+      phase: "running".into(),
+      age_ms: turn.age().as_millis() as u64,
+      context,
+      records,
+    },
+  );
+}
+
+fn emit_stopping(app: &AppHandle, turn: &agent_loop::Turn) {
+  let (context, records) = turn.measured();
+  emit(
+    app,
+    Frame::Status {
+      turn: turn.serial(),
+      phase: "stopping".into(),
+      age_ms: turn.age().as_millis() as u64,
+      context,
+      records,
+    },
+  );
 }

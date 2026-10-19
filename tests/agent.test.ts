@@ -38,7 +38,7 @@ function installBridge() {
   answerSend = () => {};
   // Nothing to adopt: a host with no turn and an empty transcript, which is what
   // a panel starting before anything has happened actually finds.
-  status = { turn: 0, running: false, ageMs: 0, context: 0, records: 0 };
+  status = { turn: 0, phase: 'idle', ageMs: 0, context: 0, records: 0 };
   (globalThis as Record<string, unknown>).__TAURI__ = {
     core: {
       invoke: async (cmd: string, args?: Record<string, unknown>) => {
@@ -48,7 +48,14 @@ function installBridge() {
           hostSerial += 1;
           if (holdSend) await new Promise<void>((resolve) => (answerSend = resolve));
         }
-        if (cmd === 'agent_abort') await new Promise<void>((resolve) => (stopHost = resolve));
+        if (cmd === 'agent_abort') {
+          frame?.({ type: 'agent.status', turn: hostSerial, phase: 'stopping', age_ms: 1, context: 0, records: 1 });
+          await new Promise<void>((resolve) => (stopHost = resolve));
+          frame?.({ type: 'agent.status', turn: hostSerial, phase: 'idle', age_ms: 0, context: 0, records: 1 });
+        }
+        if (cmd === 'agent_clear') {
+          frame?.({ type: 'agent.status', turn: hostSerial, phase: 'idle', age_ms: 0, context: 0, records: 0 });
+        }
       },
     },
     event: {
@@ -71,7 +78,10 @@ afterEach(() => {
  * way, because that announcement is the only thing that tells the panel what the
  * turn is called.
  */
-const started = () => frame?.({ type: 'turn.start', turn: hostSerial });
+const started = () => {
+  frame?.({ type: 'turn.start', turn: hostSerial });
+  frame?.({ type: 'agent.status', turn: hostSerial, phase: 'running', age_ms: 0, context: 0, records: 1 });
+};
 
 /** Lets the microtasks behind a handover or a stop drain, so a test can assert
  *  on the state between two awaits that are each waiting on the other. */
@@ -94,8 +104,18 @@ async function panel() {
 async function turn(agent: ReturnType<typeof createAgent>, prompt: string, frames: unknown[]) {
   await agent.send(prompt, '/root');
   started();
-  for (const f of frames) frame?.(f);
+  let context = 0;
+  for (const f of frames) {
+    frame?.(f);
+    if ((f as { type?: string; context?: number }).type === 'usage') context = (f as { context: number }).context;
+    if ((f as { type?: string }).type === 'turn.end') {
+      frame?.({ type: 'agent.status', turn: (f as { turn: number }).turn, phase: 'idle', age_ms: 0, context, records: 1 });
+    }
+  }
 }
+
+const idle = (turn: number, context = 0, records = 1) =>
+  frame?.({ type: 'agent.status', turn, phase: 'idle', age_ms: 0, context, records });
 
 const texts = (agent: ReturnType<typeof createAgent>) =>
   agent
@@ -243,9 +263,12 @@ describe('agent store: 轮次身份', () => {
     const agent = createAgent();
 
     const sending = agent.send('go', '/root');
+    expect(agent.busy()).toBe(true);
+    expect(agent.stoppable()).toBe(false);
     started();
     frame?.({ type: 'error', message: 'No model configured.' });
     frame?.({ type: 'turn.end', turn: 1, reason: 'error' });
+    idle(1);
     expect(agent.busy()).toBe(false);
 
     answerSend();
@@ -302,8 +325,7 @@ describe('agent store: 清空', () => {
     stopHost();
     await clearing;
 
-    // 走的是停止按钮那条路，不是另一条特殊路径。
-    expect(calls.map((c) => c.cmd)).toEqual(['agent_send', 'agent_abort', 'agent_clear']);
+    expect(calls.map((c) => c.cmd)).toEqual(['agent_send', 'agent_clear']);
     // 空的 transcript，而不是一条孤零零的统计行。
     expect(agent.items()).toEqual([]);
     expect(agent.busy()).toBe(false);
@@ -331,7 +353,7 @@ describe('agent store: 与宿主对齐', () => {
     // 手里有六万 token，是同一类谎话——只是这一次谎的是上下文条。
     installBridge();
     hostSerial = 3;
-    status = { turn: 3, running: false, ageMs: 0, context: 61_000, records: 14 };
+    status = { turn: 3, phase: 'idle', ageMs: 0, context: 61_000, records: 14 };
     const agent = await panel();
 
     expect(agent.context()).toBe(61_000);
@@ -340,7 +362,7 @@ describe('agent store: 与宿主对齐', () => {
   it('宿主还在跑，面板就认下这一轮：按钮是停止，计时接得上', async () => {
     installBridge();
     hostSerial = 3;
-    status = { turn: 3, running: true, ageMs: 42_000, context: 48_000, records: 12 };
+    status = { turn: 3, phase: 'running', ageMs: 42_000, context: 48_000, records: 12 };
     const agent = await panel();
 
     expect(agent.busy()).toBe(true);
@@ -356,11 +378,12 @@ describe('agent store: 与宿主对齐', () => {
     // 同一件事。
     installBridge();
     hostSerial = 3;
-    status = { turn: 3, running: true, ageMs: 1_000, context: 48_000, records: 12 };
+    status = { turn: 3, phase: 'running', ageMs: 1_000, context: 48_000, records: 12 };
     const agent = await panel();
 
     frame?.({ type: 'assistant.delta', id: 'a1', text: '尾巴' });
     frame?.({ type: 'turn.end', turn: 3, reason: 'stop' });
+    frame?.({ type: 'agent.status', turn: 3, phase: 'idle', age_ms: 0, context: 48_000, records: 12 });
 
     expect(agent.busy()).toBe(false);
     expect(texts(agent)).toEqual(['尾巴']);
@@ -368,7 +391,7 @@ describe('agent store: 与宿主对齐', () => {
 
   it('宿主有对话而面板没有时说一声，而不是假装从头开始', async () => {
     installBridge();
-    status = { turn: 0, running: false, ageMs: 0, context: 9_000, records: 4 };
+    status = { turn: 0, phase: 'idle', ageMs: 0, context: 9_000, records: 4 };
     const agent = await panel();
 
     expect(agent.items().map((i) => i.kind)).toEqual(['notice']);
@@ -378,7 +401,7 @@ describe('agent store: 与宿主对齐', () => {
 
   it('清空过的宿主不说这句话：transcript 空着就是没有对话', async () => {
     installBridge();
-    status = { turn: 4, running: false, ageMs: 0, context: 800, records: 0 };
+    status = { turn: 4, phase: 'idle', ageMs: 0, context: 800, records: 0 };
     const agent = await panel();
 
     // 轮次号还在，但记录数是 0——清空过。系统提示不算记录。
@@ -390,7 +413,7 @@ describe('agent store: 与宿主对齐', () => {
     // 认下 7 号反而会把 1 号这一轮换成别人的名字。
     installBridge();
     holdSend = true;
-    status = { turn: 7, running: true, ageMs: 30_000, context: 90_000, records: 20 };
+    status = { turn: 7, phase: 'running', ageMs: 30_000, context: 90_000, records: 20 };
     const agent = createAgent();
 
     const sending = agent.send('go', '/root');
@@ -400,6 +423,7 @@ describe('agent store: 与宿主对齐', () => {
 
     started();
     frame?.({ type: 'turn.end', turn: 1, reason: 'stop' });
+    idle(1);
     expect(agent.busy()).toBe(false);
     expect(agent.context()).toBe(0);
   });
@@ -430,6 +454,7 @@ describe('agent store: 终止是串行的', () => {
     // does, the stop is still in flight: the button is not pressable and a
     // second prompt would land on a transcript the host is still writing.
     const stopping = agent.abort();
+    expect(agent.stoppable()).toBe(false);
     await Promise.resolve();
     expect(agent.stopping()).toBe(true);
     expect(agent.stoppable()).toBe(false);
@@ -476,6 +501,7 @@ describe('agent store: 终止是串行的', () => {
     await agent.send('first', '/root');
     started();
     frame?.({ type: 'turn.end', turn: 1, reason: 'aborted' });
+    frame?.({ type: 'agent.status', turn: 1, phase: 'idle', age_ms: 0, context: 0, records: 1 });
     await agent.send('second', '/root');
     started();
 
@@ -484,6 +510,7 @@ describe('agent store: 终止是串行的', () => {
     expect(agent.stoppable()).toBe(true);
 
     frame?.({ type: 'turn.end', turn: 2, reason: 'stop' });
+    frame?.({ type: 'agent.status', turn: 2, phase: 'idle', age_ms: 0, context: 0, records: 1 });
     expect(agent.busy()).toBe(false);
   });
 
@@ -500,6 +527,7 @@ describe('agent store: 终止是串行的', () => {
     expect(agent.items().filter((i) => i.kind === 'notice')).toHaveLength(1);
 
     frame?.({ type: 'turn.end', turn: 1, reason: 'error' });
+    idle(1);
     expect(agent.busy()).toBe(false);
   });
 

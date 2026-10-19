@@ -50,7 +50,7 @@ export interface ConfigView {
 export interface AgentStatus {
   /** The number the host has reached. The next prompt will be this plus one. */
   turn: number;
-  running: boolean;
+  phase: 'idle' | 'running' | 'stopping';
   /** How long the live turn has been running. A duration, not a timestamp. */
   ageMs: number;
   /** How large the conversation is, in the terms the panel's meter shows. */
@@ -130,7 +130,7 @@ export const agentApi = {
  * re-serialised and pushed through the same `translate()` the renderer has
  * always used — one classifier, not two that can disagree.
  */
-export function onAgentEvent(handler: (event: UiEvent) => void): () => void {
+export function onAgentEvent(handler: (event: UiEvent) => void, ready?: () => void): () => void {
   const bridge = tauri();
   if (!bridge) return () => {};
 
@@ -148,6 +148,7 @@ export function onAgentEvent(handler: (event: UiEvent) => void): () => void {
       // unsubscribe has to work before the listener handle exists.
       if (cancelled) un();
       else dispose = un;
+      if (!cancelled) ready?.();
     });
 
   return () => {

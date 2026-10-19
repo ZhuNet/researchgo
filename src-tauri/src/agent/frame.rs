@@ -95,6 +95,14 @@ pub enum Frame {
     /// itself grew by only the last of those. This one is a cost, for the rate.
     tokens: u64,
   },
+  #[serde(rename = "agent.status")]
+  Status {
+    turn: u64,
+    phase: String,
+    age_ms: u64,
+    context: u64,
+    records: usize,
+  },
   #[serde(rename = "turn.start")]
   TurnStart {
     /// Which turn has just been allocated and registered.
@@ -196,6 +204,16 @@ mod tests {
       (
         Frame::Usage { context: 1, tokens: 1 },
         "usage",
+      ),
+      (
+        Frame::Status {
+          turn: 1,
+          phase: "running".into(),
+          age_ms: 2,
+          context: 3,
+          records: 4,
+        },
+        "agent.status",
       ),
       (Frame::TurnStart { turn: 1 }, "turn.start"),
       (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop }, "turn.end"),

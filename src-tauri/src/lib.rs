@@ -33,6 +33,7 @@ pub fn run() {
       agent::config::set_active_llm_config,
       agent::agent_send,
       agent::agent_abort,
+      agent::agent_status,
       agent::agent_clear,
       content::file_info,
       content::build_project,
