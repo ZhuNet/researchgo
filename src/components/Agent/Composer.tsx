@@ -1,19 +1,12 @@
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { toast } from '../../store/ui';
 import type { Agent } from '../../store/agent';
 import type { Workspace } from '../../store/workspace';
 
-const MODES = [
-  { id: 'agent', label: 'Agent', hint: 'Edits files, runs commands' },
-  { id: 'plan', label: 'Plan', hint: 'Read-only, proposes a plan' },
-  { id: 'ask', label: 'Ask', hint: 'Answers from context only' },
-] as const;
-
 export function Composer(props: { agent: Agent; ws: Workspace }) {
   const [text, setText] = createSignal('');
-  const [mode, setMode] = createSignal<(typeof MODES)[number]['id']>('agent');
   const [includeSelection, setIncludeSelection] = createSignal(true);
   let area: HTMLTextAreaElement | undefined;
 
@@ -101,20 +94,6 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
 
         <div class="composer__bar">
           <div class="composer__left">
-            <div class="segmented segmented--sm">
-              <For each={MODES}>
-                {(m) => (
-                  <button
-                    class="segmented__item"
-                    classList={{ 'segmented__item--on': mode() === m.id }}
-                    title={m.hint}
-                    onClick={() => setMode(m.id)}
-                  >
-                    {m.label}
-                  </button>
-                )}
-              </For>
-            </div>
             <button
               class="icon-btn"
               title="Attach context"
