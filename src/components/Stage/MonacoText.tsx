@@ -6,7 +6,7 @@ import { langOf } from '../../lib/fs';
 import { SHIKI_LANGS, SHIKI_THEME } from '../../lib/highlight';
 import { initMonaco, monaco } from '../../lib/monaco';
 import { setWrap, theme, toast, wrap } from '../../store/ui';
-import type { Workspace } from '../../store/workspace';
+import type { EditorSelection, Workspace } from '../../store/workspace';
 
 /**
  * Text editing, by Monaco.
@@ -143,24 +143,31 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     setLineCount(model ? model.getLineCount() : 1);
   }
 
-  function publishSelection(): void {
+  function readSelection(): EditorSelection | null {
     const model = editor?.getModel();
     const selection = editor?.getSelection();
-    if (!model || !selection || selection.isEmpty() || !current) {
-      setSelected(0);
-      props.ws.setEditorSelection(null);
-      return;
-    }
+    if (!model || !selection || !current) return null;
     const text = model.getValueInRange(selection);
-    setSelected(text.length);
-    props.ws.setEditorSelection({
+    if (!text.trim()) return null;
+    return {
       path: current,
       text,
       startLine: selection.startLineNumber,
       startColumn: selection.startColumn,
       endLine: selection.endLineNumber,
       endColumn: selection.endColumn,
-    });
+    };
+  }
+
+  function publishSelection(): void {
+    const selection = readSelection();
+    if (!selection) {
+      setSelected(0);
+      props.ws.setEditorSelection(null);
+      return;
+    }
+    setSelected(selection.text.length);
+    props.ws.setEditorSelection(selection);
   }
 
   /**

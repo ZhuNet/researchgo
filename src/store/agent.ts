@@ -16,7 +16,7 @@ export interface AgentTool {
 }
 
 export type Item =
-  | { kind: 'user'; id: string; text: string }
+  | { kind: 'user'; id: string; text: string; context: EditorContext | null; root: string }
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | AgentTool
   | { kind: 'patch'; id: string; path: string; op: 'create' | 'modify' | 'delete'; bytes: number; diff: string }
@@ -366,7 +366,10 @@ export function createAgent() {
     const body = text.trim();
     if (!body || busy()) return;
     setSubmitting(true);
-    setItems((prev) => [...prev, { kind: 'user', id: uid('u'), text: body }]);
+    setItems((prev) => [
+      ...prev,
+      { kind: 'user', id: uid('u'), text: body, context: editorContext, root },
+    ]);
     try {
       await agentApi.send(body, root, editorContext);
     } catch (err) {

@@ -138,13 +138,13 @@ export function closeMenu() {
   setMenu(null);
 }
 
-export async function copyText(text: string, label = 'Copied') {
+export async function copyText(text: string, label = 'Copied', showDetail = true) {
   try {
     await navigator.clipboard.writeText(text);
-    toast('ok', label, text);
+    toast('ok', label, showDetail ? text : undefined);
     return true;
   } catch {
-    toast('error', 'Clipboard unavailable', text);
+    toast('error', 'Clipboard unavailable', showDetail ? text : undefined);
     return false;
   }
 }

@@ -3,6 +3,7 @@ import { createEffect, createSignal, Index, on, Show } from 'solid-js';
 import { Icon } from '../Icon';
 import { updateMarkdown } from '../../lib/markdown';
 import type { Agent, Item } from '../../store/agent';
+import { copyText } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
 
 /** Seconds to one decimal: long enough to stop the digits flickering. */
@@ -138,9 +139,9 @@ function ThreadItem(props: {
   return (
     <>
       <Show when={props.item.kind === 'user'}>
-        <div class="msg msg--user">
-          <div class="bubble">{(props.item as any).text}</div>
-        </div>
+        <UserMessage
+          item={props.item as Extract<Item, { kind: 'user' }>}
+        />
       </Show>
 
       <Show when={props.item.kind === 'assistant'}>
@@ -183,6 +184,63 @@ function ThreadItem(props: {
       </Show>
     </>
   );
+}
+
+function UserMessage(props: {
+  item: Extract<Item, { kind: 'user' }>;
+}) {
+  return (
+    <div class="msg msg--user">
+      <div class="msg__content msg__content--user">
+        <Show when={props.item.context} keyed>
+          {(context) => (
+            <div class="msg__attachment">
+              <div class="msg__attachment-head">
+                <Icon name="paperclip" size={12} />
+                <span>{relativePath(context.path, props.item.root)}</span>
+                <span class="msg__attachment-range">{selectionRange(context)}</span>
+              </div>
+              <pre class="msg__attachment-text">{context.text}</pre>
+            </div>
+          )}
+        </Show>
+        <div class="bubble">{props.item.text}</div>
+        <MessageCopy text={props.item.text} />
+      </div>
+    </div>
+  );
+}
+
+function MessageCopy(props: { text: string }) {
+  return (
+    <div class="msg__actions">
+      <button
+        class="msg__copy"
+        title="Copy message"
+        aria-label="Copy message"
+        onClick={() => void copyText(props.text, 'Message copied', false)}
+      >
+        <Icon name="copy" size={14} />
+      </button>
+    </div>
+  );
+}
+
+function relativePath(path: string, root: string | null): string {
+  if (!root) return path.replaceAll('\\', '/');
+  const relative = path.slice(root.length).replace(/^[\\/]+/, '');
+  return relative.replaceAll('\\', '/') || path.replaceAll('\\', '/');
+}
+
+function selectionRange(context: {
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+}): string {
+  const start = `${context.startLine}:${context.startColumn}`;
+  const end = `${context.endLine}:${context.endColumn}`;
+  return start === end ? start : `${start}–${end}`;
 }
 
 function PatchCard(props: {

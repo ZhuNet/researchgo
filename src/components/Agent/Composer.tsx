@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { toast } from '../../store/ui';
@@ -12,7 +12,7 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
 
   const selection = createMemo(() => {
     const value = props.ws.editorSelection();
-    return value?.path === props.ws.active() && value.text ? value : null;
+    return value?.path === props.ws.active() ? value : null;
   });
 
   const relativePath = () => {
@@ -23,6 +23,10 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
   };
 
   const preview = () => selection()?.text.replace(/\s+/g, ' ').trim() ?? '';
+
+  createEffect(() => {
+    if (selection()) setIncludeSelection(true);
+  });
 
   const grow = () => {
     if (!area) return;

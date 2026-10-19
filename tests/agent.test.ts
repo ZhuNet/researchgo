@@ -378,7 +378,7 @@ describe('agent store: 与宿主对齐', () => {
       context,
     } }]);
     expect(agent.items()).toEqual([
-      expect.objectContaining({ kind: 'user', text: 'explain this' }),
+      expect.objectContaining({ kind: 'user', text: 'explain this', context }),
     ]);
   });
 

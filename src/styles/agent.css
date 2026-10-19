@@ -360,8 +360,20 @@
   justify-content: flex-end;
 }
 
-.bubble {
+.msg__content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.msg__content--user {
+  align-items: flex-end;
+  width: fit-content;
   max-width: 84%;
+}
+
+.bubble {
+  max-width: 100%;
   padding: var(--sp-4) var(--sp-5);
   border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
   font-size: 12.5px;
@@ -371,6 +383,94 @@
   border: 1px solid var(--bd-2);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.msg__attachment {
+  width: 100%;
+  margin-bottom: var(--sp-2);
+  border: 1px solid var(--bd-2);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+.msg__attachment-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--tx-2);
+  border-bottom: 1px solid var(--bd-1);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.msg__attachment-head > span:first-of-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg__attachment-range {
+  margin-left: auto;
+  color: var(--tx-4);
+  white-space: nowrap;
+}
+
+.msg__attachment-text {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  color: var(--tx-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg__actions {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+}
+
+.msg__content--user .msg__actions {
+  justify-content: flex-end;
+}
+
+.msg__copy {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--tx-3);
+  border-radius: var(--r-sm);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), opacity var(--t-fast) var(--ease);
+}
+
+.msg:hover .msg__copy,
+.msg:focus-within .msg__copy {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.msg__copy:hover {
+  color: var(--tx-1);
+  background: var(--bg-4);
+}
+
+@media (hover: none) {
+  .msg__copy {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
 }
 
 .msg__avatar {
@@ -926,6 +1026,10 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.composer__left {
+  gap: 1px;
 }
 
 .composer__count {

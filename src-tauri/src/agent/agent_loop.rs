@@ -366,7 +366,6 @@ fn editor_prompt(prompt: &str, context: &EditorContext, root: &Path) -> Option<S
   let path = Path::new(&context.path).strip_prefix(root).ok()?;
   if path.as_os_str().is_empty()
     || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
-    || context.text.is_empty()
   {
     return None;
   }
