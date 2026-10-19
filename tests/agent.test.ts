@@ -399,13 +399,12 @@ describe('agent store: 与宿主对齐', () => {
     expect(texts(agent)).toEqual(['尾巴']);
   });
 
-  it('宿主有对话而面板没有时说一声，而不是假装从头开始', async () => {
+  it('刷新后不为未展示的历史增加特殊提示', async () => {
     installBridge();
     status = { turn: 0, phase: 'idle', ageMs: 0, context: 9_000, records: 4 };
     const agent = await panel();
 
-    expect(agent.items().map((i) => i.kind)).toEqual(['notice']);
-    expect(agent.items()[0]).toMatchObject({ tone: 'info' });
+    expect(agent.items()).toEqual([]);
     expect(agent.context()).toBe(9_000);
   });
 

@@ -351,20 +351,6 @@ export function createAgent() {
       // that started just now is the same kind of lie this read exists to stop.
       startedAt = performance.now() - status.ageMs;
       startTimer();
-    } else if (status.records > 0 && !items().length) {
-      // The host holds a conversation this panel is not showing. Saying so is
-      // the whole of what a panel with nothing on screen can honestly do about
-      // it: the transcript is the host's, and the records behind it are not
-      // something this side can rebuild from a count.
-      setItems((prev) => [
-        ...prev,
-        {
-          kind: 'notice',
-          id: uid('n'),
-          tone: 'info',
-          text: `This panel is not showing an earlier conversation the agent still has — ${status.records} transcript records. It will still answer from them.`,
-        },
-      ]);
     }
   }
 
