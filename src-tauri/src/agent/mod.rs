@@ -18,11 +18,22 @@ pub mod log;
 pub mod tools;
 
 use std::path::PathBuf;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use self::frame::Frame;
 use agent_loop::{emit, AgentState};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorContext {
+  pub path: String,
+  pub text: String,
+  pub start_line: u32,
+  pub start_column: u32,
+  pub end_line: u32,
+  pub end_column: u32,
+}
 
 /// Registers the state the commands share. Called once from `lib.rs`.
 pub fn init(app: &mut tauri::App) {
@@ -43,6 +54,7 @@ pub async fn agent_send(
   state: State<'_, AgentState>,
   prompt: String,
   root: String,
+  context: Option<EditorContext>,
 ) -> Result<(), String> {
   let prompt = prompt.trim().to_string();
   if prompt.is_empty() {
@@ -84,7 +96,9 @@ pub async fn agent_send(
     let shared = handle.state::<AgentState>();
     let (context, records) = {
       let mut conversation = shared.conversation.lock().await;
-      conversation.turn(&handle, &prompt, &turn, root).await;
+      conversation
+        .turn(&handle, &prompt, context.as_ref(), &turn, root)
+        .await;
       (conversation.context(), conversation.records())
     };
     // Only now is the transcript free, which is what makes a stop a wait for the

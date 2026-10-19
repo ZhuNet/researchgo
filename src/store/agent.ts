@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 
-import { agentApi, onAgentEvent, type AgentStatus } from '../lib/agent';
+import { agentApi, onAgentEvent, type AgentStatus, type EditorContext } from '../lib/agent';
 import type { UiEvent } from '../lib/bridge';
 
 export interface AgentTool {
@@ -362,13 +362,13 @@ export function createAgent() {
    * which is why the spinner below is driven by `phase` rather than by a timer
    * that has to be cancelled when the model turns out to be slow.
    */
-  async function send(text: string, root: string) {
+  async function send(text: string, root: string, editorContext: EditorContext | null = null) {
     const body = text.trim();
     if (!body || busy()) return;
     setSubmitting(true);
     setItems((prev) => [...prev, { kind: 'user', id: uid('u'), text: body }]);
     try {
-      await agentApi.send(body, root);
+      await agentApi.send(body, root, editorContext);
     } catch (err) {
       setItems((prev) => [
         ...prev,

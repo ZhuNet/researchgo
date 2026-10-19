@@ -27,6 +27,15 @@ import {
 
 export type StageMode = 'code' | 'pdf' | 'split';
 
+export interface EditorSelection {
+  path: string;
+  text: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+}
+
 const ls = typeof localStorage !== 'undefined' ? localStorage : null;
 /** Re-reading a stale listing never walks more than this many pages at once. */
 const RELOAD_PAGES = 64;
@@ -100,6 +109,7 @@ export function createWorkspace(
   const [active, setActive] = createSignal<string | null>(restored.active ?? null);
   const [stageMode, setStageModeRaw] = createSignal<StageMode>(restored.stageMode ?? 'code');
   const [selected, setSelected] = createSignal<string[]>([]);
+  const [editorSelection, setEditorSelection] = createSignal<EditorSelection | null>(null);
   const buildScope = () => {
     const base = root();
     return base ? (selected().at(-1) ?? base) : null;
@@ -999,6 +1009,7 @@ export function createWorkspace(
       setTabs([]);
       setActive(null);
       setSelected([]);
+      setEditorSelection(null);
       setDirty(new Set<string>());
       recount();
       bump();
@@ -1031,6 +1042,8 @@ export function createWorkspace(
       setExpandedRaw(new Set<string>());
       setTabs([]);
       setActive(null);
+      setSelected([]);
+      setEditorSelection(null);
       recount();
       bump();
     });
@@ -1316,6 +1329,8 @@ export function createWorkspace(
     setStageMode,
     selected,
     setSelected,
+    editorSelection,
+    setEditorSelection,
     renaming,
     setRenaming,
     creating,

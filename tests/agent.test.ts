@@ -358,6 +358,30 @@ describe('agent store: 清空', () => {
 });
 
 describe('agent store: 与宿主对齐', () => {
+  it('把编辑器选区作为独立上下文发送，用户消息仍只显示输入文本', async () => {
+    installBridge();
+    const agent = await panel();
+    const context = {
+      path: '/root/main/t.txt',
+      text: 'selected text',
+      startLine: 2,
+      startColumn: 3,
+      endLine: 2,
+      endColumn: 16,
+    };
+
+    await agent.send('explain this', '/root', context);
+
+    expect(calls).toEqual([{ cmd: 'agent_send', args: {
+      prompt: 'explain this',
+      root: '/root',
+      context,
+    } }]);
+    expect(agent.items()).toEqual([
+      expect.objectContaining({ kind: 'user', text: 'explain this' }),
+    ]);
+  });
+
   it('重载后不谎报上下文：meter 用的是宿主实际的对话长度', async () => {
     // 面板自己的 `spent` 是空的，宿主的 transcript 不是。开机显示 0 而模型
     // 手里有六万 token，是同一类谎话——只是这一次谎的是上下文条。

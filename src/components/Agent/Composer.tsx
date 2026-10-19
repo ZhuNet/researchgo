@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, For, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { toast } from '../../store/ui';
@@ -11,16 +11,25 @@ const MODES = [
   { id: 'ask', label: 'Ask', hint: 'Answers from context only' },
 ] as const;
 
-const SUGGESTIONS = [
-  'Why does the tree slow down past 50k nodes?',
-  'Rebuild the paper PDF after tightening Table 1',
-  'Audit the JSONL frame enum against the renderer',
-];
-
 export function Composer(props: { agent: Agent; ws: Workspace }) {
   const [text, setText] = createSignal('');
   const [mode, setMode] = createSignal<(typeof MODES)[number]['id']>('agent');
+  const [includeSelection, setIncludeSelection] = createSignal(true);
   let area: HTMLTextAreaElement | undefined;
+
+  const selection = createMemo(() => {
+    const value = props.ws.editorSelection();
+    return value?.path === props.ws.active() && value.text ? value : null;
+  });
+
+  const relativePath = () => {
+    const value = selection();
+    const root = props.ws.root();
+    if (!value || !root) return '';
+    return value.path.slice(root.length).replace(/^[\\/]+/, '').replaceAll('\\', '/');
+  };
+
+  const preview = () => selection()?.text.replace(/\s+/g, ' ').trim() ?? '';
 
   const grow = () => {
     if (!area) return;
@@ -42,7 +51,7 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
       toast('error', 'No folder open', 'Open a folder first — the agent reads and writes inside it');
       return;
     }
-    void props.agent.send(value, props.ws.root()!);
+    void props.agent.send(value, props.ws.root()!, includeSelection() ? selection() : null);
     setText('');
     queueMicrotask(grow);
   };
@@ -51,17 +60,24 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
 
   return (
     <div class="composer">
-      <Show when={!text().trim()}>
-        <div class="composer__sugg">
-          <For each={SUGGESTIONS}>
-            {(s) => (
-              <button class="sugg" onClick={() => setText(s)}>
-                <Icon name="sparkles" size={11} />
-                <span class="truncate">{s}</span>
-              </button>
-            )}
-          </For>
-        </div>
+      <Show when={selection()}>
+        <button
+          class="composer__selection"
+          classList={{ 'composer__selection--off': !includeSelection() }}
+          onClick={() => setIncludeSelection((value) => !value)}
+          title={includeSelection() ? 'Do not include this selection' : 'Include this selection'}
+          aria-pressed={includeSelection()}
+        >
+          <span class="composer__selection-check">
+            <Show when={includeSelection()}>
+              <Icon name="check" size={11} stroke={2} />
+            </Show>
+          </span>
+          <span class="composer__selection-text">
+            <strong>{relativePath()}</strong>
+            <span>[{preview()}]</span>
+          </span>
+        </button>
       </Show>
 
       <div class="composer__box">

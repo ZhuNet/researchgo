@@ -59,6 +59,15 @@ export interface AgentStatus {
   records: number;
 }
 
+export interface EditorContext {
+  path: string;
+  text: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+}
+
 /** The event the host emits every JSONL frame on. */
 const STREAM = 'agent:frame';
 
@@ -105,7 +114,8 @@ export const agentApi = {
     invoke<ConfigView>('set_active_llm_config', { name, model }),
 
   /** Starts a turn. Resolves once the host has accepted it, not when it ends. */
-  send: (prompt: string, root: string) => invoke<void>('agent_send', { prompt, root }),
+  send: (prompt: string, root: string, context: EditorContext | null = null) =>
+    invoke<void>('agent_send', { prompt, root, context }),
 
   /** Asks the host what it is doing. See `AgentStatus`. */
   status: () => invoke<AgentStatus>('agent_status'),

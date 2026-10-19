@@ -143,6 +143,26 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     setLineCount(model ? model.getLineCount() : 1);
   }
 
+  function publishSelection(): void {
+    const model = editor?.getModel();
+    const selection = editor?.getSelection();
+    if (!model || !selection || selection.isEmpty() || !current) {
+      setSelected(0);
+      props.ws.setEditorSelection(null);
+      return;
+    }
+    const text = model.getValueInRange(selection);
+    setSelected(text.length);
+    props.ws.setEditorSelection({
+      path: current,
+      text,
+      startLine: selection.startLineNumber,
+      startColumn: selection.startColumn,
+      endLine: selection.endLineNumber,
+      endColumn: selection.endColumn,
+    });
+  }
+
   /**
    * Points the editor at a file, or at content that changed underneath it.
    *
@@ -162,6 +182,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       const view = views.get(path);
       if (view) editor.restoreViewState(view);
       else editor.setPosition({ lineNumber: 1, column: 1 });
+      publishSelection();
       density(content.length);
       return;
     }
@@ -216,10 +237,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       editor.onDidChangeCursorPosition((e) =>
         setCaret({ line: e.position.lineNumber, col: e.position.column }),
       );
-      editor.onDidChangeCursorSelection((e) => {
-        const model = editor?.getModel();
-        setSelected(model ? model.getValueLengthInRange(e.selection) : 0);
-      });
+      editor.onDidChangeCursorSelection(publishSelection);
       editor.onDidChangeModel(countLines);
       editor.onDidChangeModelContent(countLines);
       adopt(props.path, props.ws.contentOf(props.path), props.ws.isLoaded(props.path));
