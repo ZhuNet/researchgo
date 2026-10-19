@@ -88,9 +88,12 @@ export function AgentThread(props: { agent: Agent; ws: Workspace }) {
         </Index>
 
         <Show when={props.agent.busy()}>
-          <div class="thread__working">
-            <span class="pulse" />
-            <span>working · turn {props.agent.items().filter((i) => i.kind === 'tool').length + 1}</span>
+          <div class="thread__working" aria-label="Agent is working">
+            <span class="thread__breath">
+              <i />
+              <i />
+              <i />
+            </span>
           </div>
         </Show>
       </div>
@@ -173,8 +176,9 @@ function ThreadItem(props: {
       {/* The turn's own figure, closing out its own rows. */}
       <Show when={props.item.kind === 'stat'}>
         <div class="thread__stat">
-          {secs((props.item as any).ms)}
-          <span class="thread__statrate">{rate((props.item as any).tokens, (props.item as any).ms)}</span>
+          <span>{secs((props.item as any).ms)}</span>
+          <span>{rate((props.item as any).tokens, (props.item as any).ms)}</span>
+          <span>{(props.item as any).tools} {(props.item as any).tools === 1 ? 'tool' : 'tools'}</span>
         </div>
       </Show>
     </>

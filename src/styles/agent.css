@@ -260,9 +260,42 @@
 .thread__working {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
-  font-size: 11px;
-  color: var(--tx-3);
+  height: 22px;
+}
+
+.thread__breath {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.thread__breath > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ac-hi);
+  transform: scale(0.65);
+  opacity: 0.28;
+  animation: agentBreath 1.2s ease-in-out infinite;
+}
+
+.thread__breath > i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.thread__breath > i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes agentBreath {
+  0%, 100% {
+    transform: scale(0.65);
+    opacity: 0.28;
+  }
+  35% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
 }
 
 /* How a turn ended, closing its rows. Faint on purpose: it is a footnote to
@@ -277,8 +310,21 @@
   opacity: 0.8;
 }
 
-.thread__statrate::before {
+.thread__stat > span + span::before {
   content: '·';
+  margin-right: var(--sp-3);
+}
+
+.thread__stat > span:empty {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread__breath > i {
+    animation: none;
+    transform: scale(0.85);
+    opacity: 0.65;
+  }
 }
 
 .thread__jump {

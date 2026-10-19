@@ -127,6 +127,7 @@ pub enum Frame {
     /// working.
     turn: u64,
     reason: TurnReason,
+    tools: u64,
   },
   #[serde(rename = "error")]
   Error {
@@ -216,7 +217,7 @@ mod tests {
         "agent.status",
       ),
       (Frame::TurnStart { turn: 1 }, "turn.start"),
-      (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop }, "turn.end"),
+      (Frame::TurnEnd { turn: 1, reason: TurnReason::Stop, tools: 2 }, "turn.end"),
       (Frame::Error { message: "e".into() }, "error"),
     ];
 

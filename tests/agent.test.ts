@@ -25,6 +25,7 @@ let hostSerial = 0;
  *  before the host's reply to the prompt has made it back to the panel. */
 let holdSend = false;
 let answerSend: () => void = () => {};
+let hostTools = 0;
 
 /** What the host answers when a panel asks what it is doing. */
 let status: Partial<AgentStatus> | undefined;
@@ -36,6 +37,7 @@ function installBridge() {
   hostSerial = 0;
   holdSend = false;
   answerSend = () => {};
+  hostTools = 0;
   // Nothing to adopt: a host with no turn and an empty transcript, which is what
   // a panel starting before anything has happened actually finds.
   status = { turn: 0, phase: 'idle', ageMs: 0, context: 0, records: 0 };
@@ -60,7 +62,14 @@ function installBridge() {
     },
     event: {
       listen: async (_name: string, cb: (msg: { payload: unknown }) => void) => {
-        frame = (payload: unknown) => cb({ payload });
+        frame = (payload: unknown) => {
+          const event = payload as { type?: string; tools?: number };
+          if (event.type === 'turn.start') hostTools = 0;
+          if (event.type === 'tool.start') hostTools += 1;
+          cb({ payload: event.type === 'turn.end' && event.tools === undefined
+            ? { ...event, tools: hostTools }
+            : payload });
+        };
         return () => {};
       },
     },
@@ -144,6 +153,7 @@ describe('agent store: 轮次身份', () => {
     expect(agent.items().map((i) => i.kind)).toEqual(['user', 'assistant', 'tool', 'stat']);
     expect(texts(agent)).toEqual(['你好']);
     expect(tools(agent)[0]).toMatchObject({ output: '内容', status: 'ok' });
+    expect(agent.items().find((i) => i.kind === 'stat')).toMatchObject({ tools: 1 });
 
     // The backend numbers every turn from `a1` again, and the endpoint hands
     // out the same call ids. The second turn must land on its own rows, not
@@ -564,6 +574,7 @@ describe('agent store: 上下文与消耗', () => {
     // 而不是「最近一轮」这一个随轮次改写的值。
     expect(stats).toHaveLength(2);
     expect(stats.map((s) => s.tokens)).toEqual([21_000, 12_000]);
+    expect(stats.map((s) => s.tools)).toEqual([0, 0]);
     expect(stats[0].ms).toBeGreaterThanOrEqual(0);
     // 第二轮的统计行落在第二轮的末尾，而不是被挪到最前面。
     expect(agent.items().map((i) => i.kind)).toEqual([

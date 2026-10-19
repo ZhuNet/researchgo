@@ -9,7 +9,7 @@ export type RawEvent =
   | { type: 'usage'; context: number; tokens: number }
   | { type: 'agent.status'; turn: number; phase: 'idle' | 'running' | 'stopping'; age_ms: number; context: number; records: number }
   | { type: 'turn.start'; turn: number }
-  | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
+  | { type: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error'; tools: number }
   | { type: 'error'; message: string };
 
 export type UiEvent =
@@ -23,7 +23,7 @@ export type UiEvent =
   | { kind: 'usage'; context: number; tokens: number }
   | { kind: 'status'; turn: number; phase: 'idle' | 'running' | 'stopping'; ageMs: number; context: number; records: number }
   | { kind: 'turn.start'; turn: number }
-  | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error' }
+  | { kind: 'turn.end'; turn: number; reason: 'stop' | 'aborted' | 'error'; tools: number }
   | { kind: 'error'; message: string };
 
 export function translate(line: string): UiEvent[] {
@@ -84,7 +84,7 @@ export function translate(line: string): UiEvent[] {
       // stopped turn settles itself, so the `turn.end` announcing that can
       // still be in flight when the next prompt starts; the consumer needs to be
       // able to tell that one from the frame that ends the turn it is running.
-      return [{ kind: 'turn.end', turn: raw.turn, reason: raw.reason }];
+      return [{ kind: 'turn.end', turn: raw.turn, reason: raw.reason, tools: raw.tools }];
     case 'error':
       return [{ kind: 'error', message: raw.message }];
     default: {

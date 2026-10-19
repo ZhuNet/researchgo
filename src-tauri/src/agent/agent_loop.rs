@@ -356,6 +356,7 @@ fn finish(app: &AppHandle, turn: &Turn, reason: TurnReason) {
     Frame::TurnEnd {
       turn: turn.serial(),
       reason,
+      tools: turn.tool_count(),
     },
   );
 }
@@ -373,6 +374,7 @@ async fn run_one_tool(
   call: &ToolCall,
   turn: &Arc<Turn>,
 ) -> ToolOutcome {
+  turn.count_tool();
   // Parsed once: the frame and the log record both want the arguments as JSON,
   // while the transcript has them as the text the endpoint streamed.
   let input = parse_args(&call.arguments);
@@ -860,6 +862,8 @@ pub struct Turn {
   /// its whole life — and a panel starting mid-turn needs the figure most
   /// exactly when waiting for it would be worst.
   measured: std::sync::Mutex<(u64, usize)>,
+  /// Tools that actually started, rather than calls skipped after a stop.
+  tools: AtomicU64,
 }
 
 impl Turn {
@@ -870,6 +874,7 @@ impl Turn {
       serial,
       started: Instant::now(),
       measured: std::sync::Mutex::new((0, 0)),
+      tools: AtomicU64::new(0),
     })
   }
 
@@ -898,6 +903,14 @@ impl Turn {
   /// What `publish` recorded, for a panel asking about a turn it did not start.
   pub fn measured(&self) -> (u64, usize) {
     *self.measured.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
+  fn count_tool(&self) {
+    self.tools.fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub fn tool_count(&self) -> u64 {
+    self.tools.load(Ordering::Relaxed)
   }
 
   /// The cheap check, for the points in the loop where stopping is free.
@@ -1146,6 +1159,15 @@ mod tests {
       turn.age() >= started + std::time::Duration::from_millis(4),
       "a turn a panel adopted has to be able to say how old it is"
     );
+  }
+
+  #[test]
+  fn a_turn_counts_tools_that_started() {
+    let turn = Turn::detached();
+    assert_eq!(turn.tool_count(), 0);
+    turn.count_tool();
+    turn.count_tool();
+    assert_eq!(turn.tool_count(), 2);
   }
 
   #[test]

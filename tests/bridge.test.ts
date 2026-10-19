@@ -88,10 +88,11 @@ describe('translate: 补丁与用量', () => {
     // The turn number is what lets the panel tell a late `turn.end` from one
     // that closes the turn it is running, so it has to survive translation.
     for (const reason of ['stop', 'aborted', 'error'] as const) {
-      expect(one({ type: 'turn.end', turn: 7, reason })).toEqual({
+      expect(one({ type: 'turn.end', turn: 7, reason, tools: 3 })).toEqual({
         kind: 'turn.end',
         turn: 7,
         reason,
+        tools: 3,
       });
     }
   });

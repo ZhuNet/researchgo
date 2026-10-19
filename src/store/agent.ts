@@ -28,7 +28,7 @@ export type Item =
    * it describes: held apart from the transcript it could only ever describe
    * whichever turn ran last, which is the wrong answer as soon as there are two.
    */
-  | { kind: 'stat'; id: string; ms: number; tokens: number };
+  | { kind: 'stat'; id: string; ms: number; tokens: number; tools: number };
 
 let n = 0;
 const uid = (p: string) => `${p}_${++n}`;
@@ -153,7 +153,7 @@ export function createAgent() {
    * cannot be closed twice — by its own `turn.end` and by the stop that
    * superseded it.
    */
-  function finishTurn() {
+  function finishTurn(tools: number) {
     if (endedTurn === activeTurn) return;
     endedTurn = activeTurn;
     const ms = performance.now() - startedAt;
@@ -162,7 +162,7 @@ export function createAgent() {
     // conversation is still that long — zeroing it would make the meter claim
     // an empty context between prompts. The next turn's first usage frame
     // supersedes it, and by then it has grown again.
-    setItems((prev) => [...prev, { kind: 'stat', id: uid('s'), ms, tokens: spent().tokens }]);
+    setItems((prev) => [...prev, { kind: 'stat', id: uid('s'), ms, tokens: spent().tokens, tools }]);
     setSpent({ context: spent().context, tokens: 0 });
   }
 
@@ -297,7 +297,7 @@ export function createAgent() {
         // flight, or one that began before this panel existed. Applying it would
         // close the turn that replaced it.
         if (ev.turn !== activeTurn) break;
-        finishTurn();
+        finishTurn(ev.tools);
         break;
       case 'error':
         setItems((prev) => [
