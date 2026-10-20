@@ -191,6 +191,14 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       else editor.setPosition({ lineNumber: 1, column: 1 });
       publishSelection();
       density(content.length);
+      // Restoring a view restores the caret's position, but not DOM focus. A tab
+      // click leaves focus on the tab button, so Monaco keeps the restored caret
+      // hidden until the reader clicks inside the text again. Run after the
+      // activation event has settled so the editor, rather than the tab button,
+      // owns focus and paints the caret immediately.
+      queueMicrotask(() => {
+        if (editor && current === path) editor.focus();
+      });
       return;
     }
     const model = editor.getModel();
