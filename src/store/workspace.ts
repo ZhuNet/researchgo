@@ -716,6 +716,10 @@ export function createWorkspace(
     syncWatch();
   }
 
+  function focusEditor(path: string): void {
+    if (active() === path) monacoDocuments.focus(path);
+  }
+
   /**
    * Reads a file into the editor, which is what decides whether it can be held
    * whole at all: a large or binary file comes back as a mode rather than as text.
@@ -740,6 +744,7 @@ export function createWorkspace(
     if (disposed || !tabs().includes(path)) return;
     // Record the bytes written; the watcher can still report a subsequent change.
     editor.setContent(path, content);
+    preservedRecoveryStamps.delete(path);
     setMissingTabs((prev) => { const next = new Set(prev); next.delete(path); return next; });
     setDirty((prev) => {
       if (!prev.has(path)) return prev;
@@ -777,6 +782,7 @@ export function createWorkspace(
         monacoDocuments.release(path);
         editor.forget(path);
         tabStamps.delete(path);
+        preservedRecoveryStamps.delete(path);
         visibleTabs.delete(path);
       }
     });
@@ -855,12 +861,19 @@ export function createWorkspace(
     if (!parent) return null;
     const target = joinPath(parent, clean);
     if (exists(target)) return null;
-    await backend.renameEntry(path, target);
-    batch(() => {
-      remap(path, target);
-      cache.delete(path);
-      forgetRows(path);
-    });
+    const operation = { from: path, to: target };
+    internalRenames.add(operation);
+    try {
+      await backend.renameEntry(path, target);
+      await preserveRenamedDirty(path, target);
+      batch(() => {
+        remap(path, target);
+        cache.delete(path);
+        forgetRows(path);
+      });
+    } finally {
+      internalRenames.delete(operation);
+    }
     await refresh(parent);
     setActive(target);
     return target;
@@ -908,12 +921,19 @@ export function createWorkspace(
     if (parentOf(from, base) === destDir) return from;
     if (exists(target)) return null;
     const fromParent = parentOf(from, base);
-    await backend.renameEntry(from, target);
-    batch(() => {
-      remap(from, target);
-      cache.delete(from);
-      forgetRows(from);
-    });
+    const operation = { from, to: target };
+    internalRenames.add(operation);
+    try {
+      await backend.renameEntry(from, target);
+      await preserveRenamedDirty(from, target);
+      batch(() => {
+        remap(from, target);
+        cache.delete(from);
+        forgetRows(from);
+      });
+    } finally {
+      internalRenames.delete(operation);
+    }
     // A move crosses directories, and a watcher only reports the destination, so
     // the source listing has to be told explicitly.
     if (fromParent) await refresh(fromParent);
@@ -961,6 +981,12 @@ export function createWorkspace(
     }
     setMissingTabs((prev) => new Set([...prev].map(apply)));
     visibleTabs = new Set([...visibleTabs].map(apply));
+    for (const [path, stamp] of [...preservedRecoveryStamps]) {
+      const next = apply(path);
+      if (next === path) continue;
+      preservedRecoveryStamps.delete(path);
+      preservedRecoveryStamps.set(next, stamp);
+    }
     setTabs((prev) => prev.map(apply));
     setActive((prev) => (prev ? apply(prev) : prev));
     setExpandedRaw((prev) => new Set([...prev].map(apply)));
@@ -1006,6 +1032,7 @@ export function createWorkspace(
       watchedTree.clear();
       visibleTabs.clear();
       tabStamps.clear();
+      preservedRecoveryStamps.clear();
       setMissingTabs(new Set<string>());
       treeWindowKnown = false;
       failedDirs.clear();
@@ -1045,6 +1072,7 @@ export function createWorkspace(
       watchedTree.clear();
       visibleTabs.clear();
       tabStamps.clear();
+      preservedRecoveryStamps.clear();
       setMissingTabs(new Set<string>());
       treeWindowKnown = false;
       failedDirs.clear();
@@ -1130,6 +1158,33 @@ export function createWorkspace(
   let repaintQueued = false;
   let reconcileQueued = false;
 
+  /** Renames initiated here whose native watcher echoes must not re-read tabs. */
+  const internalRenames = new Set<{ from: string; to: string }>();
+
+  function under(path: string, root: string): boolean {
+    return path === root || path.startsWith(`${root}/`);
+  }
+
+  function internalRenameOwns(path: string): boolean {
+    for (const operation of internalRenames) {
+      if (under(path, operation.from) || under(path, operation.to)) return true;
+    }
+    return false;
+  }
+
+  async function preserveRenamedDirty(from: string, to: string): Promise<void> {
+    const affected = [...dirty()].filter((path) => under(path, from));
+    await Promise.all(affected.map(async (path) => {
+      const next = path === from ? to : `${to}${path.slice(from.length)}`;
+      try {
+        const info = await backend.fileInfo(next);
+        preservedRecoveryStamps.set(next, `${info.size}:${info.mtimeMs}:${info.binary}`);
+      } catch {
+        // A path that disappeared again will be handled as missing normally.
+      }
+    }));
+  }
+
   function onDiskChange(change: Change): void {
     const base = root();
     if (!base || (change.dir !== base && !change.dir.startsWith(base === '/' ? '/' : `${base}/`))) return;
@@ -1143,6 +1198,7 @@ export function createWorkspace(
     }
     for (const path of monitoredTabs()) {
       if (path === touched || path.startsWith(`${touched}/`) || path === old || path.startsWith(`${old}/`)) {
+        if (internalRenameOwns(path)) continue;
         void checkTab(path, true);
       }
     }
@@ -1216,6 +1272,15 @@ export function createWorkspace(
   const checkingTabs = new Map<string, Promise<void>>();
   const tabAgain = new Set<string>();
   const tabStamps = new Map<string, string>();
+  /**
+   * Disk fingerprint that brought a dirty missing path back.
+   *
+   * Native watchers commonly report one rename as `created` followed by
+   * `changed`. Both describe the same bytes. Remembering the fingerprint lets the
+   * second hint remain a no-op without using a timing window; a genuinely later
+   * disk edit has a different fingerprint and follows the normal disk-wins path.
+   */
+  const preservedRecoveryStamps = new Map<string, string>();
 
   /**
    * Calibrates one open tab against the disk.
@@ -1237,6 +1302,7 @@ export function createWorkspace(
       do {
         tabAgain.delete(path);
         let present = false;
+        let currentStamp: string | undefined;
         try { present = await backend.pathKind(path) === 'file'; } catch { /* gone */ }
         if (disposed || !tabs().includes(path)) return;
         const wasMissing = missingTabs().has(path);
@@ -1245,6 +1311,7 @@ export function createWorkspace(
             const info = await backend.fileInfo(path);
             if (disposed || !tabs().includes(path)) return;
             const stamp = `${info.size}:${info.mtimeMs}:${info.binary}`;
+            currentStamp = stamp;
             const previous = tabStamps.get(path);
             if (previous !== undefined && previous !== stamp) content = true;
             tabStamps.set(path, stamp);
@@ -1257,7 +1324,19 @@ export function createWorkspace(
           if (present) next.delete(path); else next.add(path);
           return next;
         });
-        if (present && (content || wasMissing)) {
+        // A missing dirty tab still owns the only unsaved version. When its path
+        // reappears, remove the missing state above but do not let the disk copy
+        // replace that buffer or mark it clean. A clean recovered tab, and an
+        // ordinary external content change, continue to follow the disk.
+        const recoveredStamp = preservedRecoveryStamps.get(path);
+        const sameRecovery = currentStamp !== undefined && recoveredStamp === currentStamp;
+        const keepUnsaved = dirty().has(path) && (wasMissing || sameRecovery);
+        if (keepUnsaved && wasMissing && currentStamp !== undefined) {
+          preservedRecoveryStamps.set(path, currentStamp);
+        } else if (currentStamp !== undefined && recoveredStamp !== undefined && !sameRecovery) {
+          preservedRecoveryStamps.delete(path);
+        }
+        if (present && (content || wasMissing) && !keepUnsaved) {
           if (editor.isResident(path) || active() === path) {
             await reloadText(path);
             if (disposed || !tabs().includes(path)) return;
@@ -1382,6 +1461,7 @@ export function createWorkspace(
     forgetWriteAccess,
     revealPath,
     openFile,
+    focusEditor,
     closeTab,
     closeTabs,
     moveBy,

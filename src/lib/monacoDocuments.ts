@@ -55,6 +55,21 @@ export class MonacoDocuments {
     return () => this.editors.delete(editor);
   }
 
+  /** Gives an already visible document keyboard focus, including a repeated tab click. */
+  focus(path: string): void {
+    const model = this.models.get(path);
+    if (!model) return;
+    queueMicrotask(() => {
+      if (this.models.get(path) !== model) return;
+      for (const editor of this.editors) {
+        if (editor.getModel() === model) {
+          editor.focus();
+          return;
+        }
+      }
+    });
+  }
+
   isExternal(model: Monaco.editor.ITextModel): boolean {
     return this.external.has(model);
   }

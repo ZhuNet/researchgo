@@ -47,4 +47,21 @@ describe('Monaco 文档生命周期', () => {
     expect(documents.model('/paper.tex')).toBeUndefined();
     expect(documents.view('/paper.tex')).toBeUndefined();
   });
+
+  it('重复点击当前 tab 时重新聚焦绑定该文档的编辑器', async () => {
+    const documents = new MonacoDocuments();
+    const focus = vi.fn();
+    const model = { dispose: vi.fn() } as unknown as Monaco.editor.ITextModel;
+    const editor = {
+      getModel: () => model,
+      focus,
+    } as unknown as Monaco.editor.IStandaloneCodeEditor;
+
+    documents.setModel('/a.txt', model);
+    documents.registerEditor(editor);
+    documents.focus('/a.txt');
+    await Promise.resolve();
+
+    expect(focus).toHaveBeenCalledOnce();
+  });
 });

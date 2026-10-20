@@ -507,6 +507,63 @@ describe('磁盘同步', () => {
     });
   });
 
+  it('应用内重命名及其 watcher 回声不会覆盖 dirty 缓冲', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'local unsaved');
+      ws.setDirty(new Set(['/README.md']));
+
+      expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+      fs.emit({ dir: '/', name: 'GUIDE.md', from: 'README.md', kind: 'renamed', isDir: false });
+      fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'changed' });
+      await flush();
+
+      expect(ws.tabs()).toEqual(['/GUIDE.md']);
+      expect(ws.contentOf('/GUIDE.md')).toBe('local unsaved');
+      expect(ws.dirty().has('/GUIDE.md')).toBe(true);
+
+      fs.files.set('/GUIDE.md', 'later disk version');
+      fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'changed' });
+      await flush();
+      expect(ws.contentOf('/GUIDE.md')).toBe('later disk version');
+      expect(ws.dirty().has('/GUIDE.md')).toBe(false);
+    });
+  });
+
+  it('dirty tab 的原路径恢复时保留未保存内容和 dirty', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'local unsaved');
+      ws.setDirty(new Set(['/README.md']));
+
+      fs.rename('/README.md', '/renamed.md');
+      fs.emit({ dir: '/', name: 'renamed.md', from: 'README.md', kind: 'renamed', isDir: false });
+      await flush();
+      expect(ws.missingTabs().has('/README.md')).toBe(true);
+
+      fs.rename('/renamed.md', '/README.md');
+      fs.emit({ dir: '/', name: 'README.md', from: 'renamed.md', kind: 'renamed', isDir: false });
+      // notify commonly follows a rename/create with a changed hint for the same
+      // bytes. It belongs to the same recovery and must not erase local edits.
+      fs.emit({ dir: '/', name: 'README.md', kind: 'changed' });
+      await flush();
+
+      expect(ws.missingTabs().has('/README.md')).toBe(false);
+      expect(ws.contentOf('/README.md')).toBe('local unsaved');
+      expect(ws.dirty().has('/README.md')).toBe(true);
+
+      // A later, genuinely different disk version still follows the existing
+      // disk-wins policy.
+      fs.files.set('/README.md', 'later disk version');
+      fs.emit({ dir: '/', name: 'README.md', kind: 'changed' });
+      await flush();
+      expect(ws.contentOf('/README.md')).toBe('later disk version');
+      expect(ws.dirty().has('/README.md')).toBe(false);
+    });
+  });
+
   it('裁掉的目录停止监听，重新进入窗口时校准缓存', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');

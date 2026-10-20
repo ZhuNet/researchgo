@@ -232,7 +232,10 @@ export function TabBar(props: { ws: Workspace }) {
                     e.preventDefault();
                     commitDrop(dropAt() ?? item.index);
                   }}
-                  onClick={() => props.ws.openFile(item.path)}
+                  onClick={() => {
+                    void props.ws.openFile(item.path);
+                    props.ws.focusEditor(item.path);
+                  }}
                   onContextMenu={(e) => menuFor(e, item.path)}
                   onAuxClick={(e) => {
                     if (e.button === 1) {
