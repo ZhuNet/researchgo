@@ -981,6 +981,16 @@ export function createWorkspace(
     }
     setMissingTabs((prev) => new Set([...prev].map(apply)));
     visibleTabs = new Set([...visibleTabs].map(apply));
+    // The disk fingerprint belongs to the file, not to its name. A rename moves
+    // the bytes, so it has to move what we last saw of them: without this the new
+    // path has no stamp, the watcher echo cannot tell "renamed, same bytes" from
+    // "content replaced", and the only shield left is a second best-effort stat.
+    for (const [path, stamp] of [...tabStamps]) {
+      const next = apply(path);
+      if (next === path) continue;
+      tabStamps.delete(path);
+      tabStamps.set(next, stamp);
+    }
     for (const [path, stamp] of [...preservedRecoveryStamps]) {
       const next = apply(path);
       if (next === path) continue;
@@ -1303,6 +1313,7 @@ export function createWorkspace(
         tabAgain.delete(path);
         let present = false;
         let currentStamp: string | undefined;
+        let previousStamp: string | undefined;
         try { present = await backend.pathKind(path) === 'file'; } catch { /* gone */ }
         if (disposed || !tabs().includes(path)) return;
         const wasMissing = missingTabs().has(path);
@@ -1312,8 +1323,8 @@ export function createWorkspace(
             if (disposed || !tabs().includes(path)) return;
             const stamp = `${info.size}:${info.mtimeMs}:${info.binary}`;
             currentStamp = stamp;
-            const previous = tabStamps.get(path);
-            if (previous !== undefined && previous !== stamp) content = true;
+            previousStamp = tabStamps.get(path);
+            if (previousStamp !== undefined && previousStamp !== stamp) content = true;
             tabStamps.set(path, stamp);
           } catch { /* Keep existence separate from read permission. */ }
         } else tabStamps.delete(path);
@@ -1328,9 +1339,19 @@ export function createWorkspace(
         // reappears, remove the missing state above but do not let the disk copy
         // replace that buffer or mark it clean. A clean recovered tab, and an
         // ordinary external content change, continue to follow the disk.
+        //
+        // Two more ways the disk has *not* moved under a dirty buffer, both of
+        // which used to fall through to a reload that threw the edits away:
+        // `sameBytes` — the stamp we already had for this tab is still the one
+        // on disk, which is exactly what an in-app rename is (bytes moved, name
+        // changed); and `statFailed` — a stat that could not be read is
+        // "unknown", not "changed", so it must not be treated as evidence
+        // against the local copy.
         const recoveredStamp = preservedRecoveryStamps.get(path);
         const sameRecovery = currentStamp !== undefined && recoveredStamp === currentStamp;
-        const keepUnsaved = dirty().has(path) && (wasMissing || sameRecovery);
+        const sameBytes = previousStamp !== undefined && previousStamp === currentStamp;
+        const statFailed = present && currentStamp === undefined;
+        const keepUnsaved = dirty().has(path) && (wasMissing || sameRecovery || sameBytes || statFailed);
         if (keepUnsaved && wasMissing && currentStamp !== undefined) {
           preservedRecoveryStamps.set(path, currentStamp);
         } else if (currentStamp !== undefined && recoveredStamp !== undefined && !sameRecovery) {

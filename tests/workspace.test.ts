@@ -564,6 +564,200 @@ describe('磁盘同步', () => {
     });
   });
 
+  it('重命名期间 stat 失败，dirty 仍随路径保留', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalInfo = backend.fileInfo;
+    let failing = false;
+    backend.fileInfo = (path) => {
+      if (failing && path === '/GUIDE.md') throw new Error('stat failed');
+      return originalInfo(path);
+    };
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.openFile('/README.md');
+        ws.editor.setContent('/README.md', 'local unsaved');
+        ws.setDirty(new Set(['/README.md']));
+
+        failing = true;
+        expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+        failing = false;
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'created', isDir: false });
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'changed' });
+        await flush();
+
+        expect(ws.contentOf('/GUIDE.md')).toBe('local unsaved');
+        expect(ws.dirty().has('/GUIDE.md')).toBe(true);
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('回声时 stat 失败（存在性可知但读不到属性），不把未保存缓冲当作磁盘变更', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalInfo = backend.fileInfo;
+    let armed = false;
+    backend.fileInfo = (path) => {
+      if (armed && path === '/GUIDE.md') return Promise.reject(new Error('open failed'));
+      return originalInfo(path);
+    };
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.openFile('/README.md');
+        ws.editor.setContent('/README.md', 'local unsaved');
+        ws.setDirty(new Set(['/README.md']));
+        expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+        fs.rename('/README.md', '/GUIDE.md');
+
+        armed = true;
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'created', isDir: false });
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'changed' });
+        await flush();
+        armed = false;
+
+        expect(ws.dirty().has('/GUIDE.md')).toBe(true);
+        expect(ws.contentOf('/GUIDE.md')).toBe('local unsaved');
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('回声在 renameEntry 还在飞的时候到达，dirty 不受影响', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalRename = backend.renameEntry;
+    backend.renameEntry = async (from, to) => {
+      fs.rename(from, to);
+      const name = to.slice(to.lastIndexOf('/') + 1);
+      const old = from.slice(from.lastIndexOf('/') + 1);
+      fs.emit({ dir: '/', name: old, kind: 'removed', isDir: false });
+      fs.emit({ dir: '/', name, kind: 'created', isDir: false });
+      fs.emit({ dir: '/', name, kind: 'changed' });
+      await originalRename(from, to);
+    };
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.openFile('/README.md');
+        ws.editor.setContent('/README.md', 'local unsaved');
+        ws.setDirty(new Set(['/README.md']));
+
+        expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+        // No follow-up echo: the suppressed in-flight one was the only chance for
+        // a premature "removed" to mark the old path missing and let remap carry
+        // that struck state onto the new path.
+        await flush();
+
+        expect(ws.tabs()).toEqual(['/GUIDE.md']);
+        expect(ws.contentOf('/GUIDE.md')).toBe('local unsaved');
+        expect(ws.dirty().has('/GUIDE.md')).toBe(true);
+        expect(ws.missingTabs().size).toBe(0);
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('从未盖过指纹的 dirty tab 重命名时，链路上那次 stat 读到的指纹兜底', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalInfo = backend.fileInfo;
+    let unstamped = true;
+    backend.fileInfo = (path) => {
+      // 打开期间 stat 一直失败（例如杀毒软件锁着文件）：这条 tab 从头到尾
+      // 没有 tabStamps 指纹可搬。
+      if (unstamped && path === '/README.md') throw new Error('stat failed');
+      return originalInfo(path);
+    };
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.openFile('/README.md');
+        ws.editor.setContent('/README.md', 'local unsaved');
+        ws.setDirty(new Set(['/README.md']));
+
+        unstamped = false;
+        expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+        fs.rename('/README.md', '/GUIDE.md');
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'created', isDir: false });
+        fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'changed' });
+        await flush();
+
+        expect(ws.dirty().has('/GUIDE.md')).toBe(true);
+        expect(ws.contentOf('/GUIDE.md')).toBe('local unsaved');
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('含 dirty 子文件的目录重命名后，子路径与未保存内容一起保留', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/docs/guide.md');
+      ws.editor.setContent('/docs/guide.md', 'dir dirty');
+      ws.setDirty(new Set(['/docs/guide.md']));
+
+      expect(await ws.renameEntry('/docs', 'handbook')).toBe('/handbook');
+      fs.rename('/docs', '/handbook');
+      fs.emit({ dir: '/', name: 'handbook', from: 'docs', kind: 'renamed', isDir: true });
+      fs.emit({ dir: '/', name: 'handbook', kind: 'changed' });
+      await flush();
+
+      expect(ws.tabs()).toEqual(['/handbook/guide.md']);
+      expect(ws.contentOf('/handbook/guide.md')).toBe('dir dirty');
+      expect(ws.dirty().has('/handbook/guide.md')).toBe(true);
+    });
+  });
+
+  it('连续两次重命名，dirty 一路跟着路径走', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'local unsaved');
+      ws.setDirty(new Set(['/README.md']));
+
+      expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+      fs.rename('/README.md', '/GUIDE.md');
+      fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'created', isDir: false });
+      await flush();
+
+      expect(await ws.renameEntry('/GUIDE.md', 'MANUAL.md')).toBe('/MANUAL.md');
+      fs.rename('/GUIDE.md', '/MANUAL.md');
+      fs.emit({ dir: '/', name: 'MANUAL.md', kind: 'created', isDir: false });
+      fs.emit({ dir: '/', name: 'MANUAL.md', kind: 'changed' });
+      await flush();
+
+      expect(ws.dirty().has('/MANUAL.md')).toBe(true);
+      expect(ws.contentOf('/MANUAL.md')).toBe('local unsaved');
+    });
+  });
+
+  it('重命名之间磁盘被静默改过：内容真的变了，磁盘优先', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'local unsaved');
+      ws.setDirty(new Set(['/README.md']));
+
+      expect(await ws.renameEntry('/README.md', 'GUIDE.md')).toBe('/GUIDE.md');
+      fs.rename('/README.md', '/GUIDE.md');
+      fs.emit({ dir: '/', name: 'GUIDE.md', kind: 'created', isDir: false });
+      await flush();
+      // No event: the disk moved on silently while nothing was watching it.
+      fs.files.set('/GUIDE.md', 'disk moved on silently');
+      expect(await ws.renameEntry('/GUIDE.md', 'MANUAL.md')).toBe('/MANUAL.md');
+      fs.rename('/GUIDE.md', '/MANUAL.md');
+      fs.emit({ dir: '/', name: 'MANUAL.md', kind: 'created', isDir: false });
+      fs.emit({ dir: '/', name: 'MANUAL.md', kind: 'changed' });
+      await flush();
+
+      expect(ws.contentOf('/MANUAL.md')).toBe('disk moved on silently');
+      expect(ws.dirty().has('/MANUAL.md')).toBe(false);
+    });
+  });
+
   it('裁掉的目录停止监听，重新进入窗口时校准缓存', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');
