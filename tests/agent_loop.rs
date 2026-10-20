@@ -64,6 +64,41 @@ async fn text_arrives_before_the_response_finishes() {
   assert_eq!(reply.message["content"], "你好!");
 }
 
+#[tokio::test]
+async fn a_final_done_without_a_trailing_newline_completes_an_empty_reply() {
+  let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let server = std::thread::spawn(move || {
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut length = 0;
+    loop {
+      let mut line = String::new();
+      assert!(reader.read_line(&mut line).unwrap() > 0);
+      if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+        length = value.trim().parse::<usize>().unwrap();
+      }
+      if line.trim().is_empty() { break; }
+    }
+    let mut body = vec![0; length];
+    std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+    socket.write_all(
+      b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: [DONE]"
+    ).unwrap();
+  });
+  let cfg = ResolvedModel {
+    url: format!("http://127.0.0.1:{port}/v1"),
+    api_key: "sk-test".into(), name: "mock".into(), model: "test-model".into(),
+  };
+
+  let reply = agent_loop::call_model(&cfg, &[], &Turn::detached())
+    .await
+    .expect("an explicitly completed empty response is valid");
+  server.join().unwrap();
+  assert!(reply.text.is_empty());
+  assert!(reply.tool_calls.is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_does_not_wait_for_the_endpoint_to_finish_streaming() {
   // The server sends one delta and then holds the connection open for far

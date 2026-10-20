@@ -223,6 +223,14 @@ impl Conversation {
         break TurnReason::Aborted;
       }
 
+      // An explicitly completed response may legitimately contain no visible
+      // text and no tool request. It ends this turn, but is otherwise ignored:
+      // retaining an assistant `{content:null}` with no tool calls adds no
+      // information and some compatible endpoints reject it on the next turn.
+      if reply.text.is_empty() && reply.tool_calls.is_empty() {
+        break TurnReason::Stop;
+      }
+
       self.record(&reply.message, None);
 
       if reply.tool_calls.is_empty() {
@@ -246,7 +254,7 @@ impl Conversation {
             Some(ToolRecord {
               call_id: call.id.clone(),
               name: call.name.clone(),
-              input: parse_args(&call.arguments),
+              input: tool_input(&call.arguments),
               ok: false,
               summary: tools::STOPPED.into(),
               ms: 0,
@@ -419,7 +427,45 @@ async fn run_one_tool(
   turn.count_tool();
   // Parsed once: the frame and the log record both want the arguments as JSON,
   // while the transcript has them as the text the endpoint streamed.
-  let input = parse_args(&call.arguments);
+  let input = match parse_args(&call.arguments) {
+    Ok(input) => input,
+    Err(message) => {
+      let input = json!({ "_parse_error": message });
+      emit(
+        app,
+        Frame::ToolStart {
+          id: msg_id.to_string(),
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          input: input.clone(),
+        },
+      );
+      emit(
+        app,
+        Frame::ToolOutput {
+          id: msg_id.to_string(),
+          call_id: call.id.clone(),
+          chunk: format!("Error: {}", input["_parse_error"].as_str().unwrap_or("invalid tool arguments")),
+        },
+      );
+      emit(
+        app,
+        Frame::ToolEnd {
+          id: msg_id.to_string(),
+          call_id: call.id.clone(),
+          ok: false,
+          summary: "invalid JSON arguments".into(),
+        },
+      );
+      return ToolOutcome {
+        content: format!("Error: {}", input["_parse_error"].as_str().unwrap_or("invalid tool arguments")),
+        input,
+        ok: false,
+        summary: "invalid JSON arguments".into(),
+        elapsed: 0,
+      };
+    }
+  };
   emit(
     app,
     Frame::ToolStart {
@@ -666,6 +712,12 @@ pub async fn call_model_streaming(
   };
 
   let status = response.status();
+  let content_type = response
+    .headers()
+    .get(reqwest::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .unwrap_or("")
+    .to_ascii_lowercase();
   log::info!("[agent] POST {endpoint} -> {status}");
   if !status.is_success() {
     // The body carries the provider's own complaint, which is the only thing
@@ -678,13 +730,36 @@ pub async fn call_model_streaming(
     )));
   }
 
+  // A few compatible gateways accept `stream: true` but still answer with one
+  // ordinary Chat Completion. That is a complete response, not an empty SSE
+  // stream, so parse it according to its advertised representation.
+  if content_type.contains("application/json") {
+    let bytes = tokio::select! {
+      biased;
+      _ = turn.stopped() => return Err(CallError::Stopped),
+      result = response.bytes() => result.map_err(|e| CallError::Failed(format!("response failed: {e}")))?,
+    };
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
+      CallError::Failed(format!("model returned invalid JSON: {e}"))
+    })?;
+    if let Some(err) = provider_error(&value) {
+      return Err(CallError::Failed(err));
+    }
+    let reply = complete_reply(&value)?;
+    if !reply.text.is_empty() {
+      on_text(&reply.text);
+    }
+    return Ok(reply);
+  }
+
   let mut content = String::new();
   let mut tool_calls: Vec<ToolCall> = Vec::new();
   let mut buffer = Vec::new();
+  let mut ended = false;
 
   let mut stream = response.bytes_stream();
   use futures_util::StreamExt;
-  loop {
+  'stream: loop {
     // Raced per chunk rather than around the whole stream, so a stop lands on
     // the chunk already in flight instead of on the end of a reply that may be
     // minutes away.
@@ -715,22 +790,39 @@ pub async fn call_model_streaming(
       buffer.drain(..=pos);
       if let Some(data) = line.strip_prefix("data:") {
         let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-          continue;
-        }
-        if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-          let before = content.len();
-          absorb(&chunk, &mut content, &mut tool_calls);
+        let before = content.len();
+        if absorb_event(data, &mut content, &mut tool_calls)? {
           if content.len() > before {
             on_text(&content[before..]);
           }
+          ended = true;
+          break 'stream;
+        }
+        if content.len() > before {
+          on_text(&content[before..]);
         }
       }
     }
   }
 
-  if content.is_empty() && tool_calls.is_empty() {
-    return Err(CallError::Failed("the model returned an empty reply".into()));
+  // A legal final SSE line need not end in `\n`. Do not lose the provider's
+  // last content, error, or completion marker merely because the connection
+  // closed immediately after it.
+  if !ended && !buffer.is_empty() {
+    let line = String::from_utf8_lossy(&buffer).trim().to_string();
+    if let Some(data) = line.strip_prefix("data:") {
+      let before = content.len();
+      ended = absorb_event(data.trim(), &mut content, &mut tool_calls)?;
+      if content.len() > before {
+        on_text(&content[before..]);
+      }
+    }
+  }
+
+  if !ended {
+    return Err(CallError::Failed(
+      "model stream ended before [DONE] or finish_reason".into(),
+    ));
   }
   log::info!(
     "[agent] stream ended: content_len={} tool_calls={}",
@@ -738,6 +830,142 @@ pub async fn call_model_streaming(
     tool_calls.len()
   );
 
+  Ok(Reply {
+    message: assistant_message(&content, &tool_calls),
+    text: content,
+    tool_calls,
+  })
+}
+
+/// Consumes one SSE `data:` value. Empty deltas are ordinary stream traffic;
+/// only an explicit completion marker returns `true`.
+fn absorb_event(
+  data: &str,
+  content: &mut String,
+  tool_calls: &mut Vec<ToolCall>,
+) -> Result<bool, CallError> {
+  if data.is_empty() {
+    return Ok(false);
+  }
+  if data == "[DONE]" {
+    validate_tool_calls(tool_calls)?;
+    return Ok(true);
+  }
+
+  let chunk: Value = serde_json::from_str(data).map_err(|e| {
+    CallError::Failed(format!("model stream returned invalid JSON: {e}"))
+  })?;
+  if let Some(err) = provider_error(&chunk) {
+    return Err(CallError::Failed(err));
+  }
+
+  absorb(&chunk, content, tool_calls);
+  let Some(reason) = chunk.pointer("/choices/0/finish_reason") else {
+    return Ok(false);
+  };
+  if reason.is_null() {
+    return Ok(false);
+  }
+  let reason = reason.as_str().ok_or_else(|| {
+    CallError::Failed("model returned a non-string finish_reason".into())
+  })?;
+  finish_reason(reason, tool_calls)?;
+  Ok(true)
+}
+
+fn finish_reason(reason: &str, tool_calls: &[ToolCall]) -> Result<(), CallError> {
+  match reason {
+    // A few compatible gateways emit tool calls but still label the final
+    // choice `stop`. Accept that shape, but apply the same protocol checks as
+    // the standard `tool_calls` finish reason before anything can execute.
+    "stop" if !tool_calls.is_empty() => validate_tool_calls(tool_calls),
+    "stop" => Ok(()),
+    "tool_calls" if !tool_calls.is_empty() => validate_tool_calls(tool_calls),
+    "tool_calls" => Err(CallError::Failed(
+      "model ended with finish_reason=tool_calls but returned no tool call".into(),
+    )),
+    "length" => Err(CallError::Failed(
+      "model output stopped because its completion length limit was reached".into(),
+    )),
+    "content_filter" => Err(CallError::Failed(
+      "model output was blocked by the provider's content filter".into(),
+    )),
+    other => Err(CallError::Failed(format!(
+      "model ended with unsupported finish_reason={other}"
+    ))),
+  }
+}
+
+fn validate_tool_calls(tool_calls: &[ToolCall]) -> Result<(), CallError> {
+  for (index, call) in tool_calls.iter().enumerate() {
+    if call.id.trim().is_empty() {
+      return Err(CallError::Failed(format!(
+        "model returned tool call {index} without an id, call_id, or tool_call_id"
+      )));
+    }
+    if call.name.trim().is_empty() {
+      return Err(CallError::Failed(format!(
+        "model returned tool call {index} without a function name"
+      )));
+    }
+  }
+  Ok(())
+}
+
+/// Extracts an error carried inside a successful HTTP response. Compatible
+/// gateways use both `{error:{message,code}}` and `{type:"error",message}`.
+fn provider_error(value: &Value) -> Option<String> {
+  if let Some(error) = value.get("error") {
+    if let Some(message) = error.get("message").and_then(Value::as_str) {
+      let code = error.get("code").and_then(Value::as_str);
+      return Some(match code {
+        Some(code) => format!("model provider error ({code}): {message}"),
+        None => format!("model provider error: {message}"),
+      });
+    }
+    if let Some(message) = error.as_str() {
+      return Some(format!("model provider error: {message}"));
+    }
+    return Some(format!("model provider error: {error}"));
+  }
+  if value.get("type").and_then(Value::as_str) == Some("error") {
+    let message = value
+      .get("message")
+      .and_then(Value::as_str)
+      .unwrap_or("unknown provider error");
+    return Some(format!("model provider error: {message}"));
+  }
+  None
+}
+
+/// Parses a complete, non-streaming Chat Completion returned by a gateway that
+/// ignored `stream: true`.
+fn complete_reply(value: &Value) -> Result<Reply, CallError> {
+  let choice = value.pointer("/choices/0").ok_or_else(|| {
+    CallError::Failed("model returned JSON without choices[0]".into())
+  })?;
+  let message = choice.get("message").ok_or_else(|| {
+    CallError::Failed("model returned JSON without choices[0].message".into())
+  })?;
+  let mut content = message
+    .get("content")
+    .and_then(Value::as_str)
+    .unwrap_or_default()
+    .to_string();
+  let mut tool_calls = Vec::new();
+  absorb(
+    &json!({ "choices": [{ "delta": {
+      "content": std::mem::take(&mut content),
+      "tool_calls": message.get("tool_calls").cloned().unwrap_or(Value::Null),
+    }}] }),
+    &mut content,
+    &mut tool_calls,
+  );
+  if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+    finish_reason(reason, &tool_calls)?;
+  } else {
+    validate_tool_calls(&tool_calls)?;
+  }
   Ok(Reply {
     message: assistant_message(&content, &tool_calls),
     text: content,
@@ -815,6 +1043,7 @@ fn absorb(
   };
   for fragment in fragments {
     let index = fragment.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let is_new = tool_calls.len() <= index;
     while tool_calls.len() <= index {
       tool_calls.push(ToolCall {
         id: String::new(),
@@ -824,7 +1053,24 @@ fn absorb(
     }
 
     let function = fragment.get("function");
-    if let Some(id) = fragment.get("id").and_then(|v| v.as_str()) {
+    if is_new {
+      let fields = fragment
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+      let function_fields = function
+        .and_then(Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+      log::info!(
+        "[agent] tool call {index} fields={fields:?} function_fields={function_fields:?}"
+      );
+    }
+    // OpenAI sends `id`, while some compatible gateways call the same field
+    // `call_id` or `tool_call_id`. A few put that alias inside `function`.
+    // Normalize all of them here so the assistant call and its later tool
+    // result always carry the same non-empty identifier.
+    if let Some(id) = tool_call_id(fragment, function) {
       tool_calls[index].id = id.to_string();
     }
     if let Some(name) = function.and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
@@ -843,11 +1089,30 @@ fn absorb(
 
 /// The transcript stores arguments as text because that is how they arrive;
 /// this is where they become the JSON a tool can read.
-fn parse_args(raw: &Value) -> Value {
+fn parse_args(raw: &Value) -> Result<Value, String> {
   match raw {
-    Value::String(s) => serde_json::from_str(s).unwrap_or(json!({})),
-    other => other.clone(),
+    Value::String(s) => serde_json::from_str(s)
+      .map_err(|err| format!("tool arguments are not valid JSON: {err}")),
+    other if other.is_object() => Ok(other.clone()),
+    other => Err(format!("tool arguments must be a JSON object, got {other}")),
   }
+}
+
+fn tool_call_id<'a>(fragment: &'a Value, function: Option<&'a Value>) -> Option<&'a str> {
+  ["id", "call_id", "tool_call_id"]
+    .into_iter()
+    .find_map(|key| fragment.get(key).and_then(Value::as_str).filter(|id| !id.trim().is_empty()))
+    .or_else(|| {
+      function.and_then(|function| {
+        ["id", "call_id", "tool_call_id"]
+          .into_iter()
+          .find_map(|key| function.get(key).and_then(Value::as_str).filter(|id| !id.trim().is_empty()))
+      })
+    })
+}
+
+fn tool_input(raw: &Value) -> Value {
+  parse_args(raw).unwrap_or_else(|message| json!({ "_parse_error": message }))
 }
 
 fn chunks(text: &str, size: usize) -> Vec<String> {
@@ -1331,6 +1596,75 @@ mod tests {
   }
 
   #[test]
+  fn empty_deltas_wait_and_done_completes_without_an_error() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+
+    assert!(!absorb_event(
+      r#"{"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
+      &mut content,
+      &mut calls,
+    ).expect("empty delta is valid"));
+    assert!(absorb_event("[DONE]", &mut content, &mut calls).expect("done is valid"));
+    assert!(content.is_empty());
+    assert!(calls.is_empty());
+  }
+
+  #[test]
+  fn an_empty_stop_is_a_normal_completion() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+    assert!(absorb_event(
+      r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+      &mut content,
+      &mut calls,
+    ).expect("an explicit stop may have no content"));
+  }
+
+  #[test]
+  fn provider_errors_are_reported_with_their_message_and_code() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+    let err = absorb_event(
+      r#"{"error":{"code":"model_busy","message":"try again later"}}"#,
+      &mut content,
+      &mut calls,
+    ).expect_err("provider error must fail");
+    assert_eq!(err.to_string(), "model provider error (model_busy): try again later");
+  }
+
+  #[test]
+  fn length_and_content_filter_have_specific_errors() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+    let length = absorb_event(
+      r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+      &mut content,
+      &mut calls,
+    ).expect_err("length is not a successful completion");
+    assert!(length.to_string().contains("completion length limit"));
+
+    let filtered = absorb_event(
+      r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#,
+      &mut content,
+      &mut calls,
+    ).expect_err("filtering is not an empty reply");
+    assert!(filtered.to_string().contains("content filter"));
+  }
+
+  #[test]
+  fn a_complete_json_chat_reply_is_supported_even_when_empty() {
+    let reply = complete_reply(&json!({
+      "choices": [{
+        "message": { "role": "assistant", "content": "" },
+        "finish_reason": "stop"
+      }]
+    })).expect("empty stop is valid");
+    assert!(reply.text.is_empty());
+    assert!(reply.tool_calls.is_empty());
+  }
+
+  #[test]
   fn tool_call_arguments_stream_in_fragments() {
     // This is the case that breaks a naive implementation: a long `edit` call
     // arrives as several deltas whose arguments are only valid JSON once
@@ -1356,7 +1690,7 @@ mod tests {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].id, "call_a");
     assert_eq!(calls[0].name, "edit");
-    let args = parse_args(&calls[0].arguments);
+    let args = parse_args(&calls[0].arguments).expect("valid tool arguments");
     assert_eq!(args["path"], "a.ts");
     assert_eq!(args["old_string"], "x");
   }
@@ -1378,8 +1712,72 @@ mod tests {
 
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].name, "read");
-    assert_eq!(parse_args(&calls[0].arguments)["path"], "a");
-    assert_eq!(parse_args(&calls[1].arguments)["path"], "b");
+    assert_eq!(parse_args(&calls[0].arguments).expect("valid arguments")["path"], "a");
+    assert_eq!(parse_args(&calls[1].arguments).expect("valid arguments")["path"], "b");
+  }
+
+  #[test]
+  fn compatible_tool_call_id_aliases_are_normalized() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+    absorb(
+      &json!({
+        "choices": [{ "delta": { "tool_calls": [
+          {
+            "index": 0,
+            "call_id": "call_from_gateway",
+            "function": { "name": "read", "arguments": "{\"path\":\"a\"}" }
+          },
+          {
+            "index": 1,
+            "function": {
+              "name": "read",
+              "arguments": "{\"path\":\"b\"}",
+              "tool_call_id": "call_inside_function"
+            }
+          }
+        ] } }]
+      }),
+      &mut content,
+      &mut calls,
+    );
+
+    assert_eq!(calls[0].id, "call_from_gateway");
+    assert_eq!(calls[1].id, "call_inside_function");
+    validate_tool_calls(&calls).expect("compatible ids are valid after normalization");
+  }
+
+  #[test]
+  fn a_completed_tool_call_without_any_supported_id_is_rejected() {
+    let mut content = String::new();
+    let mut calls = Vec::new();
+    absorb(
+      &json!({
+        "choices": [{ "delta": { "tool_calls": [{
+          "index": 0,
+          "function": { "name": "glob", "arguments": "{\"pattern\":\"**/main.tex\"}" }
+        }] } }]
+      }),
+      &mut content,
+      &mut calls,
+    );
+
+    let err = absorb_event("[DONE]", &mut content, &mut calls)
+      .expect_err("an empty tool id must not reach the next model request");
+    assert!(err.to_string().contains("without an id, call_id, or tool_call_id"));
+  }
+
+  #[test]
+  fn malformed_tool_arguments_are_not_silently_replaced_with_an_empty_object() {
+    let err = parse_args(&Value::String(r#"{"path":"unterminated"#.into()))
+      .expect_err("malformed model output must stay a parse failure");
+    assert!(err.contains("tool arguments are not valid JSON"));
+
+    let input = tool_input(&Value::String(r#"{"path":"unterminated"#.into()));
+    assert!(input["_parse_error"]
+      .as_str()
+      .expect("parse error is exposed to the tool card and log")
+      .contains("tool arguments are not valid JSON"));
   }
 
   #[test]
