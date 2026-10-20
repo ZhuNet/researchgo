@@ -13,6 +13,7 @@ import {
   type DirCacheOptions,
   type DirListing,
 } from '../lib/dircache';
+import { monacoDocuments } from '../lib/monacoDocuments';
 import { createEditor, type EditorLimits } from './editor';
 import { toast } from './ui';
 import {
@@ -771,7 +772,9 @@ export function createWorkspace(
       });
       setDirty((prev) => new Set([...prev].filter((p) => !doomed.has(p))));
       setMissingTabs((prev) => new Set([...prev].filter((p) => !doomed.has(p))));
+      setEditorSelection((prev) => prev && doomed.has(prev.path) ? null : prev);
       for (const path of doomed) {
+        monacoDocuments.release(path);
         editor.forget(path);
         tabStamps.delete(path);
         visibleTabs.delete(path);
@@ -949,7 +952,13 @@ export function createWorkspace(
   function remap(from: string, to: string): void {
     const apply = (p: string) =>
       p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p;
-    for (const path of tabs()) if (apply(path) !== path) editor.moveBuffer(path, apply(path));
+    for (const path of tabs()) if (apply(path) !== path) {
+      // Monaco models have immutable URIs. A rename therefore ends the old-path
+      // document before its resident text is moved to the new path; the mounted
+      // view adopts a fresh model after the tab paths below are remapped.
+      monacoDocuments.release(path);
+      editor.moveBuffer(path, apply(path));
+    }
     setMissingTabs((prev) => new Set([...prev].map(apply)));
     visibleTabs = new Set([...visibleTabs].map(apply));
     setTabs((prev) => prev.map(apply));
@@ -989,6 +998,7 @@ export function createWorkspace(
     const opened = await backend.openFolder(path);
     batch(() => {
       cache.clear();
+      monacoDocuments.clear();
       editor.clearAll();
       rowCache.clear();
       moreCache.clear();
@@ -1029,6 +1039,7 @@ export function createWorkspace(
       cache.clear();
       rowCache.clear();
       moreCache.clear();
+      monacoDocuments.clear();
       editor.clearAll();
       lastWatched = '';
       watchedTree.clear();
@@ -1044,6 +1055,7 @@ export function createWorkspace(
       setActive(null);
       setSelected([]);
       setEditorSelection(null);
+      setDirty(new Set<string>());
       recount();
       bump();
     });

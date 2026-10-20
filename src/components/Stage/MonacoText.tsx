@@ -5,6 +5,7 @@ import { Icon } from '../Icon';
 import { langOf } from '../../lib/fs';
 import { SHIKI_LANGS, SHIKI_THEME } from '../../lib/highlight';
 import { initMonaco, monaco } from '../../lib/monaco';
+import { monacoDocuments } from '../../lib/monacoDocuments';
 import { setWrap, theme, toast, wrap } from '../../store/ui';
 import type { EditorSelection, Workspace } from '../../store/workspace';
 
@@ -23,26 +24,6 @@ function languageFor(path: string): string {
 }
 
 /**
- * Models outlive the view.
- *
- * A model holds the buffer, the undo stack and the language, and it is what makes a
- * tab switch instant. Keeping them outside the component means a view that is torn
- * down and rebuilt — switching the stage to the PDF preview and back — does not take
- * unsaved edits with it. They are released when their tab closes.
- */
-const models = new Map<string, Monaco.editor.ITextModel>();
-const views = new Map<string, Monaco.editor.ICodeEditorViewState>();
-const externalModels = new Set<Monaco.editor.ITextModel>();
-const modelListeners = new Map<Monaco.editor.ITextModel, {
-  owner: symbol;
-  subscription: Monaco.IDisposable;
-}>();
-
-function modelKey(path: string): string {
-  return monaco.Uri.file(path).toString();
-}
-
-/**
  * Above this many characters the editor turns off the parts that cost the most per
  * line — the minimap, folding, occurrence highlighting — so a big file still types
  * and scrolls smoothly. It is far above any source file and well below the 64 MB
@@ -54,8 +35,8 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   const listenerOwner = Symbol('monaco-text');
   let host: HTMLDivElement | undefined;
   let editor: Monaco.editor.IStandaloneCodeEditor | undefined;
+  let unregisterEditor: (() => void) | undefined;
   let current = '';
-  /** Set while this app writes to a model, so a write is not mistaken for an edit. */
   /** Whether the file on screen is big enough that the heavy options are off. */
   let large = false;
 
@@ -94,8 +75,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
 
   function modelFor(path: string, content: string): Monaco.editor.ITextModel {
     const uri = monaco.Uri.file(path);
-    const key = modelKey(path);
-    let model = models.get(key);
+    let model = monacoDocuments.model(path);
     if (!model) {
       // Monaco's registry outlives editor views. A model that is not in this
       // document registry has no current workspace owner or change listener, so
@@ -103,39 +83,23 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       monaco.editor.getModel(uri)?.dispose();
       model = monaco.editor.createModel(content, languageFor(path), uri);
     }
-    models.set(key, model);
+    monacoDocuments.setModel(path, model);
+    if (model.getValue() !== content) {
+      monacoDocuments.writeExternal(model, () => model.setValue(content));
+    }
     // Models deliberately outlive this component, but the workspace store does
     // not necessarily do so: a dev refresh can rebuild the app while Monaco keeps
     // the model. Rebind on every adoption so edits are delivered to the current
     // workspace rather than to the store captured by the old component instance.
-    modelListeners.get(model)?.subscription.dispose();
     const subscription = model.onDidChangeContent(() => {
-      if (externalModels.has(model)) return;
+      if (monacoDocuments.isExternal(model)) return;
       batch(() => {
         markDirty(path);
         props.ws.editor.setContent(path, model.getValue());
       });
     });
-    modelListeners.set(model, { owner: listenerOwner, subscription });
+    monacoDocuments.bind(model, listenerOwner, subscription);
     return model;
-  }
-
-  function disposeModel(model: Monaco.editor.ITextModel): void {
-    modelListeners.get(model)?.subscription.dispose();
-    modelListeners.delete(model);
-    externalModels.delete(model);
-    model.dispose();
-  }
-
-  function releaseClosedModels(): void {
-    const open = props.ws.tabs();
-    for (const [key, model] of models) {
-      const path = open.find((candidate) => modelKey(candidate) === key);
-      if (path) continue;
-      if (editor?.getModel() === model) editor.setModel(null);
-      disposeModel(model);
-      models.delete(key);
-    }
   }
 
   function countLines(): void {
@@ -182,11 +146,13 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     if (path !== current) {
       if (current) {
         const saved = editor.saveViewState();
-        if (saved) views.set(current, saved as Monaco.editor.ICodeEditorViewState);
+        if (props.ws.tabs().includes(current)) {
+          monacoDocuments.saveView(current, saved as Monaco.editor.ICodeEditorViewState | null);
+        }
       }
       current = path;
       editor.setModel(modelFor(path, content));
-      const view = views.get(path);
+      const view = monacoDocuments.view(path);
       if (view) editor.restoreViewState(view);
       else editor.setPosition({ lineNumber: 1, column: 1 });
       publishSelection();
@@ -197,7 +163,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       // activation event has settled so the editor, rather than the tab button,
       // owns focus and paints the caret immediately.
       queueMicrotask(() => {
-        if (editor && current === path) editor.focus();
+        if (editor && current === path && props.ws.tabs().includes(path)) editor.focus();
       });
       return;
     }
@@ -209,9 +175,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     // the editor — once per reload. Skip until the content is actually resident.
     if (!loaded && content === '') return;
     if (model.getValue() === content) return;
-    externalModels.add(model);
-    model.setValue(content);
-    externalModels.delete(model);
+    monacoDocuments.writeExternal(model, () => model.setValue(content));
     density(content.length);
   }
 
@@ -248,6 +212,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         renderWhitespace: 'selection',
         scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
       });
+      unregisterEditor = monacoDocuments.registerEditor(editor);
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
       editor.onDidChangeCursorPosition((e) =>
         setCaret({ line: e.position.lineNumber, col: e.position.column }),
@@ -259,20 +224,16 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     });
     onCleanup(() => {
       alive = false;
-      if (current && editor) {
+      if (current && editor && props.ws.tabs().includes(current)) {
         const saved = editor.saveViewState();
-        if (saved) views.set(current, saved as Monaco.editor.ICodeEditorViewState);
-        if (!props.ws.tabs().some((path) => modelKey(path) === modelKey(current))) views.delete(current);
+        monacoDocuments.saveView(current, saved as Monaco.editor.ICodeEditorViewState | null);
       }
-      releaseClosedModels();
       // A replacement component may already have adopted the same model. Only
       // remove subscriptions that still belong to this instance, otherwise an
       // overlapping HMR cleanup would disconnect the new workspace again.
-      for (const [model, binding] of modelListeners) {
-        if (binding.owner !== listenerOwner) continue;
-        binding.subscription.dispose();
-        modelListeners.delete(model);
-      }
+      monacoDocuments.unbind(listenerOwner);
+      unregisterEditor?.();
+      unregisterEditor = undefined;
       editor?.dispose();
       editor = undefined;
       current = '';
@@ -296,28 +257,6 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   createEffect(() => {
     const on = wrap();
     editor?.updateOptions({ wordWrap: on && !large ? 'on' : 'off' });
-  });
-
-  // Letting go of a closed tab's model is what keeps this from becoming a record of
-  // every file ever opened. Until then, keeping it is what preserves unsaved edits.
-  createEffect(() => {
-    const open = new Set(props.ws.tabs());
-    releaseClosedModels();
-    for (const [key, model] of models) {
-      const path = props.ws.tabs().find((candidate) => modelKey(candidate) === key);
-      if (!path) continue;
-      const content = props.ws.editor.contentOf(path);
-      if (!open.has(path) || (content === undefined && path !== props.ws.active() && !props.ws.dirty().has(path))) {
-        if (editor?.getModel() === model) editor.setModel(null);
-        disposeModel(model);
-        models.delete(key);
-        if (!open.has(path)) views.delete(path);
-      } else if (content !== undefined && model.getValue() !== content) {
-        externalModels.add(model);
-        model.setValue(content);
-        externalModels.delete(model);
-      }
-    }
   });
 
   return (
