@@ -860,7 +860,11 @@ export function createWorkspace(
     const parent = parentOf(path, base);
     if (!parent) return null;
     const target = joinPath(parent, clean);
-    if (exists(target)) return null;
+    // A refusal has to carry its reason. Returning null here fed the caller's
+    // "renamed ?? name" fallback, which announced the requested name as applied
+    // even though nothing moved; the backend rejects the same clash with an
+    // error when the listing is not resident, so both paths now speak alike.
+    if (exists(target)) throw new Error(`${clean} already exists in ${parent}`);
     const operation = { from: path, to: target };
     internalRenames.add(operation);
     try {
@@ -875,7 +879,11 @@ export function createWorkspace(
       internalRenames.delete(operation);
     }
     await refresh(parent);
-    setActive(target);
+    // Only an open file becomes active. A folder (or an unopened file) is not
+    // a tab, and pointing `active` at a non-tab path deselected every tab and
+    // left the stage rendering an empty document; remap() above already
+    // carried `active` for the renamed-and-open case.
+    if (tabs().includes(target)) setActive(target);
     return target;
   }
 

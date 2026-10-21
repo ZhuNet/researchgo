@@ -345,7 +345,16 @@ export function FileTree(props: { ws: Workspace }) {
     if (!name) return;
     void ws()
       .renameEntry(path, name)
-      .then((renamed) => toast('ok', 'Renamed', renamed ?? name))
+      .then((renamed) => {
+        // null means the store refused (no workspace, invalid name, path outside
+        // the root). It used to fall through `renamed ?? name` into the success
+        // toast below, so a rename that never happened was announced as done.
+        if (renamed === null) {
+          toast('error', 'Rename failed', `${name} was not renamed`);
+          return;
+        }
+        toast('ok', 'Renamed', renamed);
+      })
       .catch((err: unknown) => toast('error', 'Rename failed', String(err)));
   }
 
@@ -917,8 +926,17 @@ function TreeRow(props: {
   const blocked = () => props.ws.unreadable().has(row().path);
 
   let input: HTMLInputElement | undefined;
+  // Enter and blur both fire for one confirmation: committing swaps the input
+  // out, and that unmount fires blur in Chromium. Without this guard the blur
+  // re-ran the commit with the same path and name, racing a second renameEntry
+  // into the backend — the loser was answered "already exists", comparing the
+  // new name against the entry the first call had just renamed. Same guard
+  // CreateRow needs for the same reason.
+  let settled = false;
   createEffect(() => {
     if (props.renaming) {
+      // A fresh editing session may commit again.
+      settled = false;
       input?.focus();
       const dot = row().name.lastIndexOf('.');
       input?.setSelectionRange(0, dot > 0 ? dot : row().name.length);
@@ -985,10 +1003,23 @@ function TreeRow(props: {
             value={row().name}
             onKeyDown={(e) => {
               e.stopPropagation();
-              if (e.key === 'Enter') props.onRename(e.currentTarget.value);
-              if (e.key === 'Escape') props.onRenameEnd();
+              if (e.key === 'Enter') {
+                if (settled) return;
+                settled = true;
+                props.onRename(e.currentTarget.value);
+              }
+              if (e.key === 'Escape') {
+                // Escape cancels: mark settled too, or the blur that follows
+                // the input's removal would commit the very name just rejected.
+                settled = true;
+                props.onRenameEnd();
+              }
             }}
-            onBlur={(e) => props.onRename(e.currentTarget.value)}
+            onBlur={(e) => {
+              if (settled) return;
+              settled = true;
+              props.onRename(e.currentTarget.value);
+            }}
           />
         }
       >

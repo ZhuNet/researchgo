@@ -365,6 +365,20 @@ describe('文件操作', () => {
     });
   });
 
+  it('重命名到已存在的名字会被拒绝并给出原因', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.createEntry('/', 'GUIDE.md', 'file');
+      // 曾经静默返回 null：UI 的 `renamed ?? name` 把拒绝渲染成“改名成功”。
+      // 现在必须带着原因失败，才能由错误 toast 呈现。
+      await expect(ws.renameEntry('/README.md', 'GUIDE.md')).rejects.toThrow(/already exists/);
+      expect(ws.tabs()).toEqual([]);
+      expect(paths(ws)).toContain('/README.md');
+      expect(paths(ws)).toContain('/GUIDE.md');
+      expect(fs.dirs.get('/')?.has('README.md')).toBe(true);
+    });
+  });
+
   it('删除文件移除树行，但保留失效 tab 与内容', async () => {
     await withWs(async (ws) => {
       await ws.openFolder('/');
@@ -708,6 +722,32 @@ describe('磁盘同步', () => {
       expect(ws.tabs()).toEqual(['/handbook/guide.md']);
       expect(ws.contentOf('/handbook/guide.md')).toBe('dir dirty');
       expect(ws.dirty().has('/handbook/guide.md')).toBe(true);
+      // 目录不是 tab：active 必须留在重映射后的子 tab 上，而不是被指到
+      // 目录路径上——那会让 tab 失去选中、编辑器渲染空文档。
+      expect(ws.active()).toBe('/handbook/guide.md');
+    });
+  });
+
+  it('重命名不含打开 tab 的目录时，active 留在原 tab 上', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+
+      expect(await ws.renameEntry('/docs', 'handbook')).toBe('/handbook');
+
+      expect(ws.active()).toBe('/README.md');
+    });
+  });
+
+  it('重命名未打开的文件不会把 active 指向不存在的 tab', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+
+      expect(await ws.renameEntry('/docs/guide.md', 'manual.md')).toBe('/docs/manual.md');
+
+      expect(ws.tabs()).toEqual(['/README.md']);
+      expect(ws.active()).toBe('/README.md');
     });
   });
 
