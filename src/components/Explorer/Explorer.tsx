@@ -25,26 +25,26 @@ export function Explorer(props: { ws: Workspace }) {
             <Match when={view() === 'files'}>
               <button
                 class="icon-btn"
-                title="New file  ⌘N"
-                onClick={() => void props.ws.startCreating('file')}
-              >
-                <Icon name="file" size={15} />
-              </button>
-              <button
-                class="icon-btn"
-                title="New folder"
-                onClick={() => void props.ws.startCreating('dir')}
-              >
-                <Icon name="folder" size={15} />
-              </button>
-              <button
-                class="icon-btn"
                 title="Open Folder…"
                 onClick={() =>
                   void props.ws.pickFolder().then((ok) => {
                     if (ok) toast('ok', 'Folder opened', props.ws.rootName());
                   })
                 }
+              >
+                <Icon name="folder" size={15} />
+              </button>
+              <button
+                class="icon-btn"
+                title="New file  ⌘N"
+                onClick={() => void props.ws.startCreating('file')}
+              >
+                <Icon name="filePlus" size={15} />
+              </button>
+              <button
+                class="icon-btn"
+                title="New folder"
+                onClick={() => void props.ws.startCreating('dir')}
               >
                 <Icon name="folderPlus" size={15} />
               </button>

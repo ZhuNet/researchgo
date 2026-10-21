@@ -12,6 +12,8 @@ const P: Record<string, string> = {
     '<path d="M3 8.4V7.5A1.5 1.5 0 0 1 4.5 6h3.3a1.5 1.5 0 0 1 1.1.5l1.2 1.4h8.4A1.5 1.5 0 0 1 20 9.4v.6"/><path d="M3.3 10h17.2a.9.9 0 0 1 .87 1.15l-1.6 6.3a1.5 1.5 0 0 1-1.46 1.13H5.3a1.5 1.5 0 0 1-1.46-1.13l-1.4-5.5A.9.9 0 0 1 3.3 10z"/>',
   file:
     '<path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9A1.5 1.5 0 0 0 18 19.5V7z"/><path d="M14 3v4.5h4"/>',
+  filePlus:
+    '<path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9A1.5 1.5 0 0 0 18 19.5V7z"/><path d="M14 3v4.5h4"/><path d="M12 11.5v6M9 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/>',
   fileText:
     '<path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9A1.5 1.5 0 0 0 18 19.5V7z"/><path d="M14 3v4.5h4M9 13h6M9 16.5h4"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.2-4.2"/>',
