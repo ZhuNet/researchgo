@@ -121,7 +121,7 @@
 }
 
 .row--active .row__name {
-  color: #fff;
+  color: var(--tx-active);
 }
 
 /* Both drag kinds mark the target folder the same way: a soft fill. The

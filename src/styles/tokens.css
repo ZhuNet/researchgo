@@ -58,6 +58,10 @@
   --tx-2: #a1a7b3;
   --tx-3: #6e7480;
   --tx-4: #4d525c;
+  /* The file the editor has open: the loudest text on the panel's background,
+     which means the brightest in the dark theme and the darkest in the light
+     one. */
+  --tx-active: #ffffff;
 
   --ac: #5e6ad2;
   --ac-hi: #8b93f0;
@@ -103,6 +107,7 @@
   --tx-2: #5a5f6b;
   --tx-3: #858b97;
   --tx-4: #a8adb7;
+  --tx-active: #0d0e13;
 
   --ac: #5b5bd6;
   --ac-hi: #4747c9;
