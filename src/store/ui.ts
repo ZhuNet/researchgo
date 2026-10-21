@@ -7,7 +7,7 @@ export interface Toast {
   kind: 'info' | 'ok' | 'error';
   title: string;
   detail?: string;
-  /** Sticky toasts ignore the auto-dismiss timer and wait for the × button. */
+  /** Sticky toasts ignore the auto-dismiss timer and wait for a click. */
   sticky: boolean;
 }
 

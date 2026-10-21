@@ -8,7 +8,20 @@ export function Toaster() {
     <div class="toaster">
       <For each={toasts()}>
         {(toast) => (
-          <div class="toast rise-in" classList={{ [`toast--${toast.kind}`]: true }}>
+          <div
+            class="toast rise-in"
+            classList={{ [`toast--${toast.kind}`]: true }}
+            role="button"
+            tabIndex={0}
+            title="Dismiss"
+            onClick={() => dismissToast(toast.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                dismissToast(toast.id);
+              }
+            }}
+          >
             <span class="toast__icon">
               <Icon
                 name={toast.kind === 'ok' ? 'check' : toast.kind === 'error' ? 'alert' : 'info'}
@@ -24,15 +37,6 @@ export function Toaster() {
                 <span class="toast__detail">{toast.detail}</span>
               </Show>
             </div>
-            <button
-              class="toast__close"
-              type="button"
-              title="Dismiss"
-              aria-label="Dismiss"
-              onClick={() => dismissToast(toast.id)}
-            >
-              <Icon name="x" size={12} stroke={2} />
-            </button>
           </div>
         )}
       </For>

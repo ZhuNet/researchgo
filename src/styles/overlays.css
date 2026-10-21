@@ -562,8 +562,20 @@
   background: var(--bg-3);
   border: 1px solid var(--bd-2);
   box-shadow: var(--sh-3);
-  /* The container is click-through; each card opts back in so the × is live. */
+  /* The container is click-through; each card opts back in so it can be
+     clicked to dismiss. */
   pointer-events: auto;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+.toast:hover {
+  border-color: var(--bd-3);
+}
+
+.toast:focus-visible {
+  outline: 1px solid var(--ac-line);
+  outline-offset: 1px;
 }
 
 .toast__icon {
@@ -614,21 +626,4 @@
   color: var(--tx-3);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.toast__close {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  flex: none;
-  margin-top: 1px;
-  border-radius: var(--r-sm);
-  color: var(--tx-4);
-  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
-}
-
-.toast__close:hover {
-  background: var(--bg-4);
-  color: var(--tx-1);
 }
