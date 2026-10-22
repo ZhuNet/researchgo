@@ -728,6 +728,111 @@ describe('磁盘同步', () => {
     });
   });
 
+  it('目录连续改名和移动在父目录刷新完成前仍保留展开的子树', async () => {
+    await createRoot(async () => {
+      const fs = new FakeFs(SAMPLE_TREE);
+      const backend = fakeBackend(fs);
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.toggleDir('/src');
+        await ws.toggleDir('/src/util');
+        await ws.toggleDir('/docs');
+        const original = backend.listDirPage;
+        for (const [from, to, dest] of [
+          ['/src', '/source', null],
+          ['/source', '/code', null],
+          ['/code', '/docs/code', '/docs'],
+        ] as const) {
+          const gate = deferred<void>();
+          let checked = false;
+          backend.listDirPage = async (dir, offset, limit) => {
+            if (!checked) {
+              checked = true;
+              const visible = paths(ws);
+              expect(visible).toContain(`${to}/util`);
+              expect(visible).toContain(`${to}/util/helper.rs`);
+              expect(visible).not.toContain(from);
+              expect(ws.expanded().has(`${to}/util`)).toBe(true);
+              await gate.promise;
+            }
+            return original(dir, offset, limit);
+          };
+          const operation = dest ? ws.move(from, dest) : ws.renameEntry(from, to.slice(1));
+          const result = operation.then((value) => ({ value }), (error: unknown) => ({ error }));
+          await flush();
+          gate.resolve();
+          expect(await result).toEqual({ value: to });
+          expect(checked).toBe(true);
+        }
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('改名映射到已有 missing tab 时合并标签并保留迁移文件的内容和活动状态', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      await ws.removeEntry('/README.md');
+      fs.files.set('/docs/guide.md', 'source');
+      await ws.openFile('/docs/guide.md');
+      ws.editor.setContent('/docs/guide.md', 'unsaved source');
+      ws.setDirty(new Set(['/docs/guide.md']));
+      await ws.renameEntry('/docs/guide.md', 'README.md');
+      await ws.move('/docs/README.md', '/');
+      expect(ws.tabs()).toEqual(['/README.md']);
+      expect(ws.active()).toBe('/README.md');
+      expect(ws.contentOf('/README.md')).toBe('unsaved source');
+      expect(ws.dirty().has('/README.md')).toBe(true);
+      expect(ws.missingTabs().has('/README.md')).toBe(false);
+    });
+  });
+
+  it('目标 dirty 来源 clean 时保留目标编辑，监听回声和保存使用同一份文本', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'target unsaved');
+      ws.setDirty(new Set(['/README.md']));
+      await ws.removeEntry('/README.md');
+      await ws.openFile('/docs/guide.md');
+      await ws.renameEntry('/docs/guide.md', 'README.md');
+      await ws.move('/docs/README.md', '/');
+      fs.emit({ dir: '/', name: 'README.md', kind: 'changed' });
+      await flush();
+      expect(ws.tabs()).toEqual(['/README.md']);
+      expect(ws.contentOf('/README.md')).toBe('target unsaved');
+      expect(ws.dirty().has('/README.md')).toBe(true);
+      await ws.saveFile('/README.md', ws.contentOf('/README.md'));
+      expect(fs.files.get('/README.md')).toBe('target unsaved');
+      expect(ws.dirty().size).toBe(0);
+    });
+  });
+
+  it('不同的双 dirty 文档在移动前拒绝合并，磁盘和两份编辑均保留', async () => {
+    await withWs(async (ws, fs) => {
+      await ws.openFolder('/');
+      await ws.openFile('/README.md');
+      ws.editor.setContent('/README.md', 'target unsaved');
+      ws.setDirty(new Set(['/README.md']));
+      await ws.removeEntry('/README.md');
+      await ws.openFile('/docs/guide.md');
+      await ws.renameEntry('/docs/guide.md', 'README.md');
+      ws.editor.setContent('/docs/README.md', 'source unsaved');
+      ws.setDirty(new Set(['/README.md', '/docs/README.md']));
+      await expect(ws.move('/docs/README.md', '/')).rejects.toThrow('不同的未保存修改');
+      expect(ws.contentOf('/README.md')).toBe('target unsaved');
+      expect(ws.contentOf('/docs/README.md')).toBe('source unsaved');
+      expect(fs.files.has('/docs/README.md')).toBe(true);
+      expect(fs.files.has('/README.md')).toBe(false);
+      ws.editor.setContent('/docs/README.md', 'target unsaved');
+      await ws.move('/docs/README.md', '/');
+      expect(ws.tabs()).toEqual(['/README.md']);
+      expect(ws.contentOf('/README.md')).toBe('target unsaved');
+      expect(ws.dirty().has('/README.md')).toBe(true);
+    });
+  });
+
   it('重命名不含打开 tab 的目录时，active 留在原 tab 上', async () => {
     await withWs(async (ws) => {
       await ws.openFolder('/');

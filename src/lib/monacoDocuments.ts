@@ -9,6 +9,7 @@ import type * as Monaco from 'monaco-editor';
  */
 export class MonacoDocuments {
   private readonly models = new Map<string, Monaco.editor.ITextModel>();
+  private readonly paths = new Map<Monaco.editor.ITextModel, string>();
   private readonly views = new Map<string, Monaco.editor.ICodeEditorViewState>();
   private readonly external = new Set<Monaco.editor.ITextModel>();
   private readonly listeners = new Map<Monaco.editor.ITextModel, {
@@ -23,6 +24,28 @@ export class MonacoDocuments {
 
   setModel(path: string, model: Monaco.editor.ITextModel): void {
     this.models.set(path, model);
+    this.paths.set(model, path);
+  }
+
+  path(model: Monaco.editor.ITextModel): string | undefined {
+    return this.paths.get(model);
+  }
+
+  /** A path change keeps the model, undo history, listeners and live view. */
+  move(from: string, to: string): void {
+    if (from === to) return;
+    const model = this.models.get(from);
+    let view = this.views.get(from);
+    if (model) {
+      for (const editor of this.editors) {
+        if (editor.getModel() === model) view = editor.saveViewState() ?? view;
+      }
+    }
+    this.release(to);
+    this.models.delete(from);
+    this.views.delete(from);
+    if (model) this.setModel(to, model);
+    if (view) this.views.set(to, view);
   }
 
   view(path: string): Monaco.editor.ICodeEditorViewState | undefined {
@@ -95,6 +118,7 @@ export class MonacoDocuments {
       this.external.delete(model);
       model.dispose();
       this.models.delete(path);
+      this.paths.delete(model);
     }
     this.views.delete(path);
   }

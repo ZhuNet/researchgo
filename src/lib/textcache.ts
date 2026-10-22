@@ -118,6 +118,21 @@ export class TextCache<T> {
     return this.drop(key);
   }
 
+  /** Changes a key without re-admitting or evicting its resident value. */
+  move(from: string, to: string): void {
+    if (from === to) return;
+    const slot = this.values.get(from);
+    if (slot) this.drop(to);
+    this.values.delete(from);
+    if (slot) {
+      this.values.set(to, slot);
+      for (const entry of this.queue) {
+        if (entry.key === from && entry.seq === slot.seq) entry.key = to;
+      }
+    }
+    if (this.pinned.delete(from)) this.pinned.add(to);
+  }
+
   clear(): void {
     this.values.clear();
     this.queue.length = 0;

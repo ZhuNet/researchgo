@@ -167,14 +167,18 @@ export function createEditor(
 
   /** Moves a resident buffer after a rename, keeping its place in the queue. */
   function moveBuffer(from: string, to: string): void {
-    const text = texts.get(from);
+    cancelReads(from);
+    cancelReads(to);
     const probe = probes.get(from);
-    if (text === undefined && probe === undefined) return;
-    texts.delete(from);
+    const reason = reasons.get(from);
+    texts.move(from, to);
     probes.delete(from);
     reasons.delete(from);
-    if (text !== undefined) texts.put(to, text, bytesOf(text));
+    probes.delete(to);
+    reasons.delete(to);
     if (probe) probes.set(to, { ...probe, path: to });
+    if (reason !== undefined) reasons.set(to, reason);
+    if (pins.delete(from)) pins.add(to);
     bump();
   }
 

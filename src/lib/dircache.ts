@@ -236,6 +236,45 @@ export class DirCache {
     if (listing) listing.stale = true;
   }
 
+  /** Moves resident listings and entries together, preserving paging and FIFO. */
+  remap(from: string, to: string): void {
+    const apply = (path: string) => path === from ? to
+      : path.startsWith(`${from}/`) ? `${to}${path.slice(from.length)}` : path;
+    const parent = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
+    if (parent(from) !== parent(to)) {
+      const source = this.get(parent(from))?.find((entry) => entry.path === from);
+      if (source) {
+        this.patchRemove(parent(from), source.name);
+        this.patchCreate(parent(to), to.slice(to.lastIndexOf('/') + 1), source.kind);
+      }
+    }
+    const moved = [...this.listings.values()].filter((listing) => apply(listing.dir) !== listing.dir);
+    for (const listing of moved) {
+      this.delete(apply(listing.dir));
+      this.listings.delete(listing.dir);
+    }
+    for (const listing of moved) {
+      listing.dir = apply(listing.dir);
+      this.listings.set(listing.dir, listing);
+    }
+    for (const slot of this.order) slot.dir = apply(slot.dir);
+    this.protectedDirs = new Set([...this.protectedDirs].map(apply));
+    for (const listing of this.listings.values()) {
+      for (let i = 0; i < listing.entries.length; i++) {
+        const entry = listing.entries[i];
+        const path = apply(entry.path);
+        if (path === entry.path) continue;
+        entry.path = path;
+        if (path === to) {
+          entry.name = to.slice(to.lastIndexOf('/') + 1);
+          listing.entries.splice(i, 1);
+          listing.entries.splice(insertAt(listing.entries, entry), 0, entry);
+          break;
+        }
+      }
+    }
+  }
+
   /** Replaces the protected set: the visible window plus explicit pins. */
   protect(dirs: Iterable<string>): void {
     this.protectedDirs = new Set(dirs);

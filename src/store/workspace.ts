@@ -865,6 +865,7 @@ export function createWorkspace(
     // even though nothing moved; the backend rejects the same clash with an
     // error when the listing is not resident, so both paths now speak alike.
     if (exists(target)) throw new Error(`${clean} already exists in ${parent}`);
+    assertMergeable(path, target);
     const operation = { from: path, to: target };
     internalRenames.add(operation);
     try {
@@ -872,8 +873,6 @@ export function createWorkspace(
       await preserveRenamedDirty(path, target);
       batch(() => {
         remap(path, target);
-        cache.delete(path);
-        forgetRows(path);
       });
     } finally {
       internalRenames.delete(operation);
@@ -928,6 +927,7 @@ export function createWorkspace(
     if (target === from) return from;
     if (parentOf(from, base) === destDir) return from;
     if (exists(target)) return null;
+    assertMergeable(from, target);
     const fromParent = parentOf(from, base);
     const operation = { from, to: target };
     internalRenames.add(operation);
@@ -936,8 +936,6 @@ export function createWorkspace(
       await preserveRenamedDirty(from, target);
       batch(() => {
         remap(from, target);
-        cache.delete(from);
-        forgetRows(from);
       });
     } finally {
       internalRenames.delete(operation);
@@ -977,17 +975,39 @@ export function createWorkspace(
     return out;
   }
 
+  function assertMergeable(from: string, to: string): void {
+    for (const path of tabs()) {
+      if (!under(path, from)) continue;
+      const next = `${to}${path.slice(from.length)}`;
+      if (dirty().has(path) && dirty().has(next) && editor.contentOf(path) !== editor.contentOf(next)) {
+        throw new Error(`无法合并 ${next}：两个标签页包含不同的未保存修改，请先保存或处理其中一份。`);
+      }
+    }
+  }
+
   function remap(from: string, to: string): void {
     const apply = (p: string) =>
       p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p;
-    for (const path of tabs()) if (apply(path) !== path) {
-      // Monaco models have immutable URIs. A rename therefore ends the old-path
-      // document before its resident text is moved to the new path; the mounted
-      // view adopts a fresh model after the tab paths below are remapped.
-      monacoDocuments.release(path);
-      editor.moveBuffer(path, apply(path));
+    for (const path of new Set(tabs())) if (apply(path) !== path) {
+      const next = apply(path);
+      // Select a whole document, never combine a dirty flag with another buffer.
+      if (!dirty().has(next) || dirty().has(path)) {
+        monacoDocuments.move(path, next);
+        editor.moveBuffer(path, next);
+      } else {
+        monacoDocuments.release(path);
+        editor.forget(path);
+      }
     }
-    setMissingTabs((prev) => new Set([...prev].map(apply)));
+    cache.remap(from, to);
+    forgetRows(from);
+    setMissingTabs((prev) => {
+      const next = new Set([...prev].map(apply));
+      for (const path of tabs()) {
+        if (apply(path) !== path && !prev.has(path)) next.delete(apply(path));
+      }
+      return next;
+    });
     visibleTabs = new Set([...visibleTabs].map(apply));
     // The disk fingerprint belongs to the file, not to its name. A rename moves
     // the bytes, so it has to move what we last saw of them: without this the new
@@ -1005,11 +1025,13 @@ export function createWorkspace(
       preservedRecoveryStamps.delete(path);
       preservedRecoveryStamps.set(next, stamp);
     }
-    setTabs((prev) => prev.map(apply));
+    setTabs((prev) => [...new Set(prev.map(apply))]);
     setActive((prev) => (prev ? apply(prev) : prev));
     setExpandedRaw((prev) => new Set([...prev].map(apply)));
     setDirty((prev) => new Set([...prev].map(apply)));
     setSelected((prev) => prev.map(apply));
+    setEditorSelection((prev) => prev ? { ...prev, path: apply(prev.path) } : prev);
+    bump();
     syncWatch();
   }
 
@@ -1191,7 +1213,8 @@ export function createWorkspace(
   }
 
   async function preserveRenamedDirty(from: string, to: string): Promise<void> {
-    const affected = [...dirty()].filter((path) => under(path, from));
+    const affected = tabs().filter((path) => under(path, from) &&
+      (dirty().has(path) || dirty().has(`${to}${path.slice(from.length)}`)));
     await Promise.all(affected.map(async (path) => {
       const next = path === from ? to : `${to}${path.slice(from.length)}`;
       try {
@@ -1220,6 +1243,10 @@ export function createWorkspace(
         void checkTab(path, true);
       }
     }
+    // The operation publishes the path and its resident subtree atomically.
+    // Applying an early watcher echo would expose the new row before that cache
+    // has moved, briefly hiding the children of an expanded directory.
+    if (internalRenameOwns(touched) || internalRenameOwns(old)) return;
     // Nothing resident for that directory: no rows to fix, nothing to re-read.
     if (!cache.has(change.dir)) return;
     const list = queued.get(change.dir);

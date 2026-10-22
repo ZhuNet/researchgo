@@ -30,6 +30,7 @@ function languageFor(path: string): string {
  * ceiling the store refuses to open past.
  */
 const LARGE_FILE_CHARS = 2 * 1024 * 1024;
+let nextModelUri = 0;
 
 export function MonacoText(props: { ws: Workspace; path: string }) {
   const listenerOwner = Symbol('monaco-text');
@@ -74,15 +75,20 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
   }
 
   function modelFor(path: string, content: string): Monaco.editor.ITextModel {
-    const uri = monaco.Uri.file(path);
+    let uri = monaco.Uri.file(path);
     let model = monacoDocuments.model(path);
     if (!model) {
-      // Monaco's registry outlives editor views. A model that is not in this
-      // document registry has no current workspace owner or change listener, so
-      // adopting it would join this tab to stale data. Remove the orphan instead.
-      monaco.editor.getModel(uri)?.dispose();
+      // Renamed documents retain their immutable URI and undo history. Opening
+      // their former path must get an independent model, not dispose that owner.
+      const existing = monaco.editor.getModel(uri);
+      if (existing && monacoDocuments.path(existing) !== undefined) {
+        do { uri = uri.with({ query: `document=${++nextModelUri}` }); }
+        while (monaco.editor.getModel(uri));
+      } else existing?.dispose();
       model = monaco.editor.createModel(content, languageFor(path), uri);
     }
+    const language = languageFor(path);
+    if (model.getLanguageId() !== language) monaco.editor.setModelLanguage(model, language);
     monacoDocuments.setModel(path, model);
     if (model.getValue() !== content) {
       monacoDocuments.writeExternal(model, () => model.setValue(content));
@@ -93,9 +99,11 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
     // workspace rather than to the store captured by the old component instance.
     const subscription = model.onDidChangeContent(() => {
       if (monacoDocuments.isExternal(model)) return;
+      const currentPath = monacoDocuments.path(model);
+      if (!currentPath) return;
       batch(() => {
-        markDirty(path);
-        props.ws.editor.setContent(path, model.getValue());
+        markDirty(currentPath);
+        props.ws.editor.setContent(currentPath, model.getValue());
       });
     });
     monacoDocuments.bind(model, listenerOwner, subscription);
@@ -143,7 +151,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
    */
   function adopt(path: string, content: string, loaded: boolean): void {
     if (!editor) return;
-    if (path !== current) {
+    if (path !== current || editor.getModel() !== monacoDocuments.model(path)) {
       if (current) {
         const saved = editor.saveViewState();
         if (props.ws.tabs().includes(current)) {
@@ -151,10 +159,13 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         }
       }
       current = path;
-      editor.setModel(modelFor(path, content));
-      const view = monacoDocuments.view(path);
-      if (view) editor.restoreViewState(view);
-      else editor.setPosition({ lineNumber: 1, column: 1 });
+      const model = modelFor(path, content);
+      if (editor.getModel() !== model) {
+        editor.setModel(model);
+        const view = monacoDocuments.view(path);
+        if (view) editor.restoreViewState(view);
+        else editor.setPosition({ lineNumber: 1, column: 1 });
+      }
       publishSelection();
       density(content.length);
       // Restoring a view restores the caret's position, but not DOM focus. A tab
