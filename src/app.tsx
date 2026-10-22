@@ -10,6 +10,7 @@ import { Splitter } from './components/Splitter';
 import { Stage } from './components/Stage/Stage';
 import { Titlebar } from './components/Titlebar';
 import { Toaster } from './components/Toaster';
+import { Tooltip } from './components/Tooltip';
 import { warm } from './lib/highlight';
 import { createAgent } from './store/agent';
 import { createWorkspace } from './store/workspace';
@@ -111,6 +112,7 @@ export default function App() {
         <Settings />
       </Show>
       <Toaster />
+      <Tooltip />
     </div>
   );
 }

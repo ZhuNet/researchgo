@@ -19,13 +19,23 @@ export function Explorer(props: { ws: Workspace }) {
   return (
     <aside class="explorer">
       <div class="explorer__head">
-        <h2 class="explorer__title">{TITLES[view()]}</h2>
+        <h2
+          class="explorer__title"
+          data-tooltip={view() === 'files' && props.ws.root()
+            ? props.ws.fileCount() === null
+              ? 'listing…'
+              : `${props.ws.fileCount()!.toLocaleString()}${props.ws.countTruncated() ? '+' : ''} files listed`
+            : undefined}
+        >
+          {TITLES[view()]}
+        </h2>
         <div class="explorer__actions">
           <Switch>
             <Match when={view() === 'files'}>
               <button
                 class="icon-btn"
-                title="Open Folder…"
+                aria-label="Open Folder…"
+                data-tooltip="Open Folder…"
                 onClick={() =>
                   void props.ws.pickFolder().then((ok) => {
                     if (ok) toast('ok', 'Folder opened', props.ws.rootName());
@@ -36,33 +46,36 @@ export function Explorer(props: { ws: Workspace }) {
               </button>
               <button
                 class="icon-btn"
-                title="New file  ⌘N"
+                aria-label="New file"
+                data-tooltip="New file  ⌘N"
                 onClick={() => void props.ws.startCreating('file')}
               >
                 <Icon name="filePlus" size={15} />
               </button>
               <button
                 class="icon-btn"
-                title="New folder"
+                aria-label="New folder"
+                data-tooltip="New folder"
                 onClick={() => void props.ws.startCreating('dir')}
               >
                 <Icon name="folderPlus" size={15} />
               </button>
             </Match>
             <Match when={view() === 'search'}>
-              <button class="icon-btn" title="Clear" onClick={() => toast('info', 'Search cleared')}>
+              <button class="icon-btn" aria-label="Clear" data-tooltip="Clear" onClick={() => toast('info', 'Search cleared')}>
                 <Icon name="x" size={15} />
               </button>
             </Match>
             <Match when={view() === 'changes'}>
-              <button class="icon-btn" title="Refresh" onClick={() => toast('info', 'Index refreshed')}>
+              <button class="icon-btn" aria-label="Refresh" data-tooltip="Refresh" onClick={() => toast('info', 'Index refreshed')}>
                 <Icon name="refresh" size={15} />
               </button>
             </Match>
           </Switch>
           <button
             class="icon-btn"
-            title="More"
+            aria-label="More"
+            data-tooltip="More"
             onClick={(e) =>
               openMenu(
                 e.clientX,
@@ -101,19 +114,9 @@ export function Explorer(props: { ws: Workspace }) {
       </div>
 
       <Show when={view() === 'files' && props.ws.root()}>
-        <div class="explorer__foot">
+        <div class="explorer__foot" data-tooltip={props.ws.root() ?? undefined}>
           <Icon name="folder" size={12} class="explorer__branch" />
-          <span class="truncate">{props.ws.rootName()}</span>
-          <span class="explorer__dot" />
-          {/* Files in the directories the tree has actually listed — nothing here
-              walks the project, so the number grows with what you look at and "+"
-              means "at least this many". */}
-          <Show when={props.ws.fileCount() !== null} fallback={<span>listing…</span>}>
-            <span>
-              {props.ws.fileCount()!.toLocaleString()}
-              {props.ws.countTruncated() ? '+' : ''} files listed
-            </span>
-          </Show>
+          <span class="truncate">{props.ws.root()}</span>
         </div>
       </Show>
     </aside>

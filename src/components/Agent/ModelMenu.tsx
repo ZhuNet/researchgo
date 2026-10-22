@@ -84,7 +84,8 @@ export function ModelMenu(props: {
       <button
         class="modelbtn"
         classList={{ 'modelbtn--unset': !active() }}
-        title={active() ? 'Switch model' : 'Configure a model'}
+        aria-label={active() ? 'Switch model' : 'Configure a model'}
+        data-tooltip={active() ? 'Switch model' : 'Configure a model'}
         onClick={toggle}
       >
         <Icon name="cpu" size={12} />

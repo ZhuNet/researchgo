@@ -105,7 +105,8 @@ export function SearchPanel(props: { ws: Workspace }) {
             class="searchbox__toggle"
             classList={{ 'searchbox__toggle--on': caseSensitive() }}
             onClick={() => setCaseSensitive(!caseSensitive())}
-            title="Match case"
+            aria-label="Match case"
+            data-tooltip="Match case"
           >
             Aa
           </button>

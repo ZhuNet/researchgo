@@ -61,13 +61,6 @@
   border-top: 1px solid var(--bd-1);
 }
 
-.explorer__dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--tx-4);
-}
-
 .tree {
   flex: 1;
   min-height: 0;

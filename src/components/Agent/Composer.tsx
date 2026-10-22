@@ -62,7 +62,8 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
           class="composer__selection"
           classList={{ 'composer__selection--off': !includeSelection() }}
           onClick={() => setIncludeSelection((value) => !value)}
-          title={includeSelection() ? 'Do not include this selection' : 'Include this selection'}
+          aria-label={includeSelection() ? 'Do not include this selection' : 'Include this selection'}
+          data-tooltip={includeSelection() ? 'Do not include this selection' : 'Include this selection'}
           aria-pressed={includeSelection()}
         >
           <span class="composer__selection-check">
@@ -100,14 +101,16 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
           <div class="composer__left">
             <button
               class="icon-btn"
-              title="Attach context"
+              aria-label="Attach context"
+              data-tooltip="Attach context"
               onClick={() => toast('info', 'Context picker', 'Renderer-only stub for now')}
             >
               <Icon name="paperclip" size={14} />
             </button>
             <button
               class="icon-btn"
-              title="Reference a file"
+              aria-label="Reference a file"
+              data-tooltip="Reference a file"
               onClick={() => toast('info', 'File reference', 'Type @ to search the tree')}
             >
               <Icon name="hash" size={14} />
@@ -125,7 +128,8 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
                   class="send"
                   classList={{ 'send--ready': text().trim().length > 0 }}
                   onClick={submit}
-                  title="Send  ⏎"
+                  aria-label="Send"
+                  data-tooltip="Send  ⏎"
                 >
                   <Icon name="arrowUp" size={15} stroke={2} />
                 </button>
@@ -141,7 +145,8 @@ export function Composer(props: { agent: Agent; ws: Workspace }) {
                 classList={{ 'send--busy': !props.agent.stoppable() }}
                 disabled={!props.agent.stoppable()}
                 onClick={() => void props.agent.abort()}
-                title={props.agent.stopping() ? 'Stopping…' : 'Interrupt'}
+                aria-label={props.agent.stopping() ? 'Stopping…' : 'Interrupt'}
+                data-tooltip={props.agent.stopping() ? 'Stopping…' : 'Interrupt'}
               >
                 <Show
                   when={props.agent.stopping()}

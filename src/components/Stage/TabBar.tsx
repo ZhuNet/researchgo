@@ -243,7 +243,7 @@ export function TabBar(props: { ws: Workspace }) {
                       props.ws.closeTab(item.path);
                     }
                   }}
-                  title={item.path}
+                  data-tooltip={item.path}
                 >
                   <FileGlyph path={item.path} size={13} />
                   <span class="tab__name truncate">{item.path.split('/').pop()}</span>

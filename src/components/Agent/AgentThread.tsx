@@ -216,8 +216,8 @@ function MessageCopy(props: { text: string }) {
     <div class="msg__actions">
       <button
         class="msg__copy"
-        title="Copy message"
         aria-label="Copy message"
+        data-tooltip="Copy message"
         onClick={() => void copyText(props.text, 'Message copied', false)}
       >
         <Icon name="copy" size={14} />

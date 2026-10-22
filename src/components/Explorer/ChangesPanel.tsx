@@ -60,7 +60,8 @@ export function ChangesPanel(props: { ws: Workspace }) {
                   </button>
                   <button
                     class="change__save"
-                    title="Write to disk"
+                    aria-label="Write to disk"
+                    data-tooltip="Write to disk"
                     onClick={() => {
                       const text = ws().contentOf(file.path);
                       void ws()

@@ -1031,7 +1031,7 @@ function TreeRow(props: {
         </Show>
         <span class="row__name truncate">{row().name}</span>
         <Show when={pending() || blocked()}>
-          <span class="row__hint" title={props.ws.reasonOf(row().path) ?? ''}>
+          <span class="row__hint" data-tooltip={props.ws.reasonOf(row().path) ?? ''}>
             {blocked() ? '无法读取' : 'loading…'}
           </span>
         </Show>
@@ -1071,7 +1071,7 @@ function MoreRow(props: { ws: Workspace; row: Row }) {
       <Icon name="more" size={14} class="row__glyph" />
       <span
         class="row__name row__name--more truncate"
-        title={props.ws.reasonOf(props.row.path) ?? ''}
+        data-tooltip={props.ws.reasonOf(props.row.path) ?? ''}
       >
         {blocked() ? '无法读取' : busy() ? 'loading…' : `${remaining().toLocaleString()} more`}
       </span>

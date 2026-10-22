@@ -87,7 +87,8 @@ export function AgentPanel(props: { agent: Agent; ws: Workspace }) {
         <div class="agent__actions">
           <button
             class="icon-btn"
-            title="Agent options"
+            aria-label="Agent options"
+            data-tooltip="Agent options"
             onClick={(e) => {
               // Re-read on the way in: a model may have been added or removed
               // since the panel last looked.

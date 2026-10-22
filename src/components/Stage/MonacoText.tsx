@@ -275,9 +275,9 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
       <div class="viewer__monaco" ref={host} />
       <div class="statusbar">
         <div class="statusbar__left">
-          <button class="statusbar__btn" title="Problems">0 errors</button>
+          <button class="statusbar__btn" data-tooltip="Problems">0 errors</button>
           <Show when={selected() > 0}>
-            <span class="statusbar__btn" title="Selection">
+            <span class="statusbar__btn" data-tooltip="Selection">
               {selected()} selected
             </span>
           </Show>
@@ -289,13 +289,14 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
             class="statusbar__btn"
             classList={{ 'statusbar__btn--on': wrap() }}
             onClick={() => setWrap(!wrap())}
-            title="Toggle word wrap"
+            aria-label="Toggle word wrap"
+            data-tooltip="Toggle word wrap"
           >
             <Icon name="wrapText" size={12} />
             Wrap
           </button>
           <Show when={dirty()}>
-            <button class="statusbar__btn statusbar__btn--warn" onClick={save} title="Save  ⌘S">
+            <button class="statusbar__btn statusbar__btn--warn" onClick={save} data-tooltip="Save  ⌘S">
               <Icon name="save" size={12} />
               Save
             </button>

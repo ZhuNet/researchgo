@@ -13,7 +13,8 @@ export function Toaster() {
             classList={{ [`toast--${toast.kind}`]: true }}
             role="button"
             tabIndex={0}
-            title="Dismiss"
+            aria-label="Dismiss"
+            data-tooltip="Dismiss"
             onClick={() => dismissToast(toast.id)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {

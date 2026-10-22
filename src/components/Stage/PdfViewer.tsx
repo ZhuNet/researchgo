@@ -678,7 +678,7 @@ function PlanHint(props: { plan: BuildPlan | null }) {
         <dl class="pdf__plan">
           <div class="pdf__planrow">
             <dt>Command</dt>
-            <dd title={props.plan!.command ?? undefined}>
+            <dd data-tooltip={props.plan!.command ?? undefined}>
               {props.plan!.command}
             </dd>
           </div>
@@ -691,7 +691,7 @@ function PlanHint(props: { plan: BuildPlan | null }) {
           <Show when={props.plan!.artifact}>
             <div class="pdf__planrow">
               <dt>Result</dt>
-              <dd title={props.plan!.artifact ?? undefined}>
+              <dd data-tooltip={props.plan!.artifact ?? undefined}>
                 {props.plan!.artifact}
               </dd>
             </div>

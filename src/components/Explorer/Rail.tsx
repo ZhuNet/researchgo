@@ -19,7 +19,8 @@ export function Rail() {
               class="rail__btn"
               classList={{ 'rail__btn--on': railView() === item.id }}
               onClick={() => setRailView(item.id)}
-              title={`${item.label}  ${item.hint}`}
+              aria-label={item.label}
+              data-tooltip={`${item.label}  ${item.hint}`}
             >
               <span class="rail__indicator" />
               <Icon name={item.icon} size={17} />
@@ -34,7 +35,8 @@ export function Rail() {
           class="rail__btn"
           classList={{ 'rail__btn--on': !agentCollapsed() }}
           onClick={() => setAgentCollapsed(!agentCollapsed())}
-          title="Agent workspace"
+          aria-label="Agent workspace"
+          data-tooltip="Agent workspace"
         >
           <span class="rail__indicator" />
           <Icon name="sparkles" size={17} />
@@ -43,7 +45,7 @@ export function Rail() {
         {/* Left alone for a global settings surface later; the agent's own
             configuration lives behind the panel's overflow menu, where it is
             next to the thing it configures. */}
-        <button class="rail__btn" title="Settings">
+        <button class="rail__btn" aria-label="Settings" data-tooltip="Settings">
           <span class="rail__indicator" />
           <Icon name="sliders" size={17} />
           <span class="rail__label">Settings</span>

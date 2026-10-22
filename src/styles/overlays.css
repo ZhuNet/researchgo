@@ -1,3 +1,22 @@
+.tooltip {
+  position: fixed;
+  z-index: calc(var(--z-toast) + 1);
+  max-width: min(480px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--bd-3);
+  border-radius: var(--r-md);
+  background: var(--bg-3);
+  color: var(--tx-1);
+  box-shadow: var(--sh-3);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 .ctxmenu {
   position: fixed;
   z-index: var(--z-menu);

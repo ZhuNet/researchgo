@@ -63,7 +63,7 @@ export function Settings() {
       >
         <header class="modal__head">
           <h2>Models</h2>
-          <button class="icon-btn" onClick={close} title="Close">
+          <button class="icon-btn" onClick={close} aria-label="Close" data-tooltip="Close">
             <Icon name="x" size={15} />
           </button>
         </header>
@@ -170,7 +170,8 @@ function ConfigRow(props: {
         class="model__pick"
         onClick={props.onActivate}
         disabled={props.busy || props.config.active || props.config.models.length === 0}
-        title={
+        aria-label="Use this model"
+        data-tooltip={
           props.config.active
             ? 'In use'
             : props.config.models.length === 0
@@ -189,7 +190,7 @@ function ConfigRow(props: {
       </button>
 
       <Show when={!props.config.ready}>
-        <span class="chip chip--warn" title="missing url, key or model">
+        <span class="chip chip--warn" data-tooltip="missing url, key or model">
           incomplete
         </span>
       </Show>
@@ -198,7 +199,8 @@ function ConfigRow(props: {
         class="icon-btn icon-btn--danger"
         onClick={props.onDelete}
         disabled={props.busy}
-        title={`Delete ${props.config.name}`}
+        aria-label={`Delete ${props.config.name}`}
+        data-tooltip={`Delete ${props.config.name}`}
       >
         <Icon name="trash" size={14} />
       </button>
@@ -385,7 +387,8 @@ function ConfigForm(props: {
           <button
             type="button"
             class="icon-btn"
-            title={reveal() ? 'Hide' : 'Show'}
+            aria-label={reveal() ? 'Hide' : 'Show'}
+            data-tooltip={reveal() ? 'Hide' : 'Show'}
             onClick={() => setReveal(!reveal())}
           >
             <Icon name={reveal() ? 'eyeOff' : 'eye'} size={14} />
@@ -430,7 +433,8 @@ function ConfigForm(props: {
               <button
                 type="button"
                 class="icon-btn icon-btn--danger"
-                title={models().length === 1 ? 'At least one model is required' : 'Remove model'}
+                aria-label="Remove model"
+                data-tooltip={models().length === 1 ? 'At least one model is required' : 'Remove model'}
                 disabled={models().length === 1}
                 onClick={() => removeModel(i)}
               >

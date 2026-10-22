@@ -66,7 +66,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
       }}
     >
       <div class="titlebar__left">
-        <div class="mark" title="ResearchGO">
+        <div class="mark" data-tooltip="ResearchGO">
           <svg viewBox="0 0 1024 1024" width="17" height="17" aria-hidden="true">
             <path
               d="M364 728V296h132a100 100 0 0 1 0 200H364"
@@ -98,7 +98,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
               class="segmented__item"
               classList={{ 'segmented__item--on': props.ws.stageMode() === m.id }}
               onClick={() => props.ws.setStageMode(m.id)}
-              title={`${m.label} view`}
+              aria-label={`${m.label} view`}
+              data-tooltip={`${m.label} view`}
             >
               <Icon name={m.icon} size={13} />
               <span>{m.label}</span>
@@ -106,7 +107,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           ))}
         </div>
 
-        <button class="omni" onClick={() => setPaletteOpen(true)} title="Search or run a command">
+        <button class="omni" onClick={() => setPaletteOpen(true)} aria-label="Search or run a command" data-tooltip="Search or run a command">
           <Icon name="search" size={13} />
           <span class="omni__text">Search files, run commands</span>
           <span class="kbd">⌘K</span>
@@ -118,7 +119,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           class="icon-btn"
           classList={{ 'icon-btn--on': agentCollapsed() }}
           onClick={() => setAgentCollapsed(!agentCollapsed())}
-          title="Toggle agent panel"
+          aria-label="Toggle agent panel"
+          data-tooltip="Toggle agent panel"
         >
           <Icon name="panelRight" size={15} />
         </button>
@@ -126,7 +128,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
         <button
           class="icon-btn"
           onClick={() => setTheme(theme() === 'dark' ? 'light' : 'dark')}
-          title="Toggle theme"
+          aria-label="Toggle theme"
+          data-tooltip="Toggle theme"
         >
           <Show when={theme() === 'dark'} fallback={<Icon name="sun" size={15} />}>
             <Icon name="moon" size={15} />
@@ -137,7 +140,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           <button
             class="winctl__btn"
             onClick={() => windowCtl.minimize()}
-            title={desktop ? 'Minimize' : 'Minimize (needs the desktop shell)'}
+            aria-label="Minimize"
+            data-tooltip={desktop ? 'Minimize' : 'Minimize (needs the desktop shell)'}
             disabled={!desktop}
           >
             <Icon name="minus" size={15} stroke={1.4} />
@@ -145,7 +149,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           <button
             class="winctl__btn"
             onClick={() => windowCtl.toggleMaximize()}
-            title={desktop ? 'Maximize' : 'Maximize (needs the desktop shell)'}
+            aria-label="Maximize"
+            data-tooltip={desktop ? 'Maximize' : 'Maximize (needs the desktop shell)'}
             disabled={!desktop}
           >
             <Icon name="maximize" size={13} stroke={1.4} />
@@ -153,7 +158,8 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           <button
             class="winctl__btn winctl__btn--danger"
             onClick={() => windowCtl.close()}
-            title={desktop ? 'Close' : 'Close (needs the desktop shell)'}
+            aria-label="Close"
+            data-tooltip={desktop ? 'Close' : 'Close (needs the desktop shell)'}
             disabled={!desktop}
           >
             <Icon name="x" size={14} stroke={1.5} />
