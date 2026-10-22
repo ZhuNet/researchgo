@@ -657,6 +657,7 @@ fn scan(path: &Path, mut sink: impl FnMut(Rec) -> Result<(), String>) -> Result<
   let iter = fs::read_dir(path).map_err(|e| format!("read_dir failed: {e}"))?;
   for entry in iter.flatten() {
     let name = entry.file_name().to_string_lossy().into_owned();
+    if crate::fsops::is_write_probe(&name) { continue; }
     // `file_type` comes from the directory entry itself on the platforms we
     // target, so this stays one syscall per entry. The `metadata` call per entry
     // this replaces is what made opening a huge directory feel like a hang.
@@ -859,6 +860,17 @@ mod tests {
     assert_eq!(page.files, 3);
     assert_eq!(page.dirs, 1);
     assert!(!page.has_more);
+  }
+
+  #[test]
+  fn permission_probes_do_not_enter_directory_pages() {
+    let scratch = Scratch::new("probe");
+    scratch.put(&format!(".researchgo-write-check-{}-123", std::process::id()), false);
+    scratch.put("visible.txt", false);
+    let index = scratch.index();
+    let page = index.page(&scratch.data.to_string_lossy(), 0, 512).unwrap();
+    assert_eq!(names(&page), vec!["visible.txt"]);
+    assert_eq!(page.total, 1);
   }
 
   #[test]

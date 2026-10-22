@@ -158,6 +158,7 @@ fn is_dir_of(path: &Path) -> Option<bool> {
 }
 
 fn change(dir: &Path, name: String, kind: ChangeKind) -> Option<Change> {
+  if crate::fsops::is_write_probe(&name) { return None; }
   Some(Change {
     dir: dir.to_string_lossy().replace('\\', "/"),
     name,
@@ -249,6 +250,17 @@ pub fn init(app: &mut tauri::App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn permission_probes_do_not_publish_tree_changes() {
+    let name = format!(".researchgo-write-check-{}-123", std::process::id());
+    for kind in [EventKind::Create(notify::event::CreateKind::File),
+      EventKind::Remove(notify::event::RemoveKind::File)] {
+      let event = Event { kind, paths: vec![std::env::temp_dir().join(&name)], attrs: Default::default() };
+      assert!(normalize_all(&event).is_empty());
+    }
+    assert!(!crate::fsops::is_write_probe(".researchgo-write-check-not-a-probe"));
+  }
 
   #[test]
   fn split_rename_events_update_both_listings() {

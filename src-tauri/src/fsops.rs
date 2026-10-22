@@ -27,6 +27,13 @@ pub fn dir_writable(dir: &str) -> bool {
   }
 }
 
+/// Only this process's permission probes are implementation details, not files.
+pub(crate) fn is_write_probe(name: &str) -> bool {
+  let prefix = format!(".researchgo-write-check-{}-", std::process::id());
+  name.strip_prefix(&prefix).is_some_and(|suffix|
+    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Windows does not expose POSIX `access(W_OK)`. Probe the operation the UI
 /// needs to perform instead, using a unique file and removing it immediately.
 #[cfg(windows)]
