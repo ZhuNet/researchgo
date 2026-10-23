@@ -145,12 +145,18 @@ function ThreadItem(props: {
       </Show>
 
       <Show when={props.item.kind === 'assistant'}>
-        <div class="msg msg--ai">
-          <div class="msg__avatar">
-            <Icon name="sparkles" size={13} />
+        {/* A step that only called tools often streams a whitespace-only content
+            delta before the call; rendering it would put an empty bubble in
+            front of the tool cards. Whitespace is meaningful mid-stream, so
+            only a message that is *entirely* blank is skipped here. */}
+        <Show when={(props.item as any).text.trim() !== ''}>
+          <div class="msg msg--ai">
+            <div class="msg__avatar">
+              <Icon name="sparkles" size={13} />
+            </div>
+            <AssistantText text={(props.item as any).text} />
           </div>
-          <AssistantText text={(props.item as any).text} />
-        </div>
+        </Show>
       </Show>
 
       <Show when={props.item.kind === 'tool'}>
