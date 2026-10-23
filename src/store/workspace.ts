@@ -1424,6 +1424,19 @@ export function createWorkspace(
           await reload(dir);
         } catch { cache.markStale(dir); }
       }
+      // A directory that failed to list may have become readable again. Its own
+      // row is never watched (the watch set only covers resident listings) and
+      // the read paths short-circuit on failedDirs, so without this nothing
+      // would ever retry it. The unreadable set is bounded to the visible
+      // window, so this retry cannot fan out; a success clears the record and
+      // repaints the rows itself.
+      for (const dir of unreadable()) {
+        try {
+          await loadPage0(dir);
+        } catch {
+          // Still failing: keep the record and its reason as they are.
+        }
+      }
       for (const path of monitoredTabs()) await checkTab(path, false);
     })().finally(() => { auditing = false; });
   }, 2000);
