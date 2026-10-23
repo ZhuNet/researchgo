@@ -919,10 +919,11 @@ function TreeRow(props: {
   const indent = () => 6 + row().depth * 13;
   // Row objects are recycled across rebuilds so `<For>` does not recreate every
   // visible row. A plain property on them is therefore invisible to Solid: the
-  // chevron has to read the store's signal, or it never updates — same for the
-  // pending state, which is why it reads the revision counter.
+  // chevron has to read the store's signal, or it never updates.
   const isOpen = () => row().kind === 'dir' && props.ws.expanded().has(row().path);
-  const pending = () => props.ws.missing().has(row().path);
+  // No "loading…" state on purpose: the listing arrives async, and painting a
+  // pending class or a hint would dim the name and flash a ghost on every
+  // expand. The rows appear when the data lands — nothing is shown in between.
   const blocked = () => props.ws.unreadable().has(row().path);
 
   let input: HTMLInputElement | undefined;
@@ -952,7 +953,6 @@ function TreeRow(props: {
         'row--drop': !props.dropInto && props.dropTarget === row().path,
         'row--drop-into': props.dropInto && props.dropTarget === row().path,
         'row--dragging': props.dragging,
-        'row--pending': pending(),
         'row--blocked': blocked(),
       }}
       style={{ 'padding-left': `${indent()}px` }}
@@ -1030,9 +1030,9 @@ function TreeRow(props: {
           <FileGlyph path={row().path} size={14} />
         </Show>
         <span class="row__name truncate">{row().name}</span>
-        <Show when={pending() || blocked()}>
+        <Show when={blocked()}>
           <span class="row__hint" data-tooltip={props.ws.reasonOf(row().path) ?? ''}>
-            {blocked() ? '无法读取' : 'loading…'}
+            无法读取
           </span>
         </Show>
       </Show>
