@@ -1254,6 +1254,18 @@ export function createWorkspace(
     else queued.set(change.dir, [change]);
     applyChange(change);
     scheduleReconcile();
+    // A directory that previously failed to list has just reappeared under its
+    // watched parent: clear the record and re-read it now if it is open, the
+    // same event that repaints the parent also revives the child — no need to
+    // wait for the audit pass. (A permission-only recovery sends no event at
+    // all, so that case still falls back to the bounded audit retry.)
+    if (change.kind === 'created') {
+      const reappeared = joinPath(change.dir, change.name);
+      if (failedDirs.has(reappeared)) {
+        forgetUnreadable(reappeared);
+        if (expanded().has(reappeared)) void ensureLoaded(reappeared);
+      }
+    }
   }
 
   /** In-memory only: no I/O, no await, so the row is right in the same frame. */
@@ -1424,11 +1436,11 @@ export function createWorkspace(
           await reload(dir);
         } catch { cache.markStale(dir); }
       }
-      // A directory that failed to list may have become readable again. Its own
-      // row is never watched (the watch set only covers resident listings) and
-      // the read paths short-circuit on failedDirs, so without this nothing
-      // would ever retry it. The unreadable set is bounded to the visible
-      // window, so this retry cannot fan out; a success clears the record and
+      // A directory that failed to list may have become readable again with no
+      // event to say so: "reappears" is caught live in onDiskChange, but a
+      // permission recovery changes nothing on disk, so only this bounded pass
+      // can notice it. The unreadable set is limited to the visible window,
+      // which keeps the retry bounded; a success clears the record and
       // repaints the rows itself.
       for (const dir of unreadable()) {
         try {
