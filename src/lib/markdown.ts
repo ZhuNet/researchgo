@@ -23,6 +23,42 @@ function markdownBlocks(src: string): string[] {
   let i = 0;
   let list: string[] | null = null;
 
+  const tableCells = (line: string): string[] => {
+    const value = line.trim();
+    const withoutEdges = value.startsWith('|') ? value.slice(1) : value;
+    const body = withoutEdges.endsWith('|') ? withoutEdges.slice(0, -1) : withoutEdges;
+    const cells: string[] = [];
+    let cell = '';
+    let escaped = false;
+    for (const char of body) {
+      if (char === '|' && !escaped) {
+        cells.push(cell.trim());
+        cell = '';
+      } else {
+        cell += char;
+      }
+      escaped = char === '\\' && !escaped;
+      if (char !== '\\') escaped = false;
+    }
+    cells.push(cell.trim());
+    return cells;
+  };
+
+  const tableAlignment = (cell: string): 'left' | 'center' | 'right' | undefined => {
+    const value = cell.trim();
+    if (!/^:?-+:?$/.test(value)) return undefined;
+    if (value.startsWith(':') && value.endsWith(':')) return 'center';
+    if (value.endsWith(':')) return 'right';
+    return value.startsWith(':') ? 'left' : undefined;
+  };
+
+  const isTableAt = (index: number): boolean => {
+    if (index + 1 >= lines.length || !lines[index].includes('|')) return false;
+    const header = tableCells(lines[index]);
+    const divider = tableCells(lines[index + 1]);
+    return header.length > 0 && divider.length === header.length && divider.every((cell) => tableAlignment(cell) !== undefined || /^-+$/.test(cell.trim()));
+  };
+
   const flushList = () => {
     if (list) {
       out.push(`<ul class="md__list">${list.map((li) => `<li>${inline(li)}</li>`).join('')}</ul>`);
@@ -82,12 +118,36 @@ function markdownBlocks(src: string): string[] {
       continue;
     }
 
+    if (isTableAt(i)) {
+      flushList();
+      const headers = tableCells(lines[i]);
+      const dividers = tableCells(lines[i + 1]);
+      const alignments = dividers.map(tableAlignment);
+      const cell = (value: string, tag: 'th' | 'td', index: number) => {
+        const align = alignments[index];
+        const style = align ? ` style="text-align:${align}"` : '';
+        return `<${tag}${style}>${inline(value)}</${tag}>`;
+      };
+      const rows: string[] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])) {
+        const values = tableCells(lines[i]);
+        rows.push(`<tr>${headers.map((_, index) => cell(values[index] ?? '', 'td', index)).join('')}</tr>`);
+        i++;
+      }
+      out.push(
+        `<div class="md__table-wrap"><table class="md__table"><thead><tr>${headers.map((value, index) => cell(value, 'th', index)).join('')}</tr></thead>${rows.length ? `<tbody>${rows.join('')}</tbody>` : ''}</table></div>`,
+      );
+      continue;
+    }
+
     flushList();
     const para: string[] = [];
     while (
       i < lines.length &&
       !/^\s*$/.test(lines[i]) &&
-      !/^(#{1,4}\s|```|\s*[-*]\s|\s*>\s?)/.test(lines[i])
+      !/^(#{1,4}\s|```|\s*[-*]\s|\s*>\s?)/.test(lines[i]) &&
+      !isTableAt(i)
     ) {
       para.push(lines[i]);
       i++;
