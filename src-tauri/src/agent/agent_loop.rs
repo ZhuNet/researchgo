@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+use futures_util::future::join_all;
 use tokio::sync::watch;
 
 use super::config::{secret, ResolvedModel};
@@ -44,9 +45,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// legitimately stream for longer than three minutes.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
-// The host knows the absolute workspace path; the model only needs to know
-// that every tool starts inside the folder currently open in the app.
-const WORKSPACE_INSTRUCTIONS: &str = "Your working directory is the currently open project folder. All file paths in read, write, edit, grep and glob, and paths in shell commands, are relative to that folder. For a file directly inside the open folder use its filename (e.g. `1.txt`), not the folder name followed by the filename (e.g. `paper/1.txt` when the open folder is `paper`). Use glob to discover paths when unsure. Do not guess or prepend the open folder's name.";
+const WORKSPACE_INSTRUCTIONS: &str = "Tools are available. Use relative paths within the current directory; use absolute paths elsewhere.";
 
 /// The conversation, kept across turns so the model remembers what it did.
 ///
@@ -184,7 +183,7 @@ impl Conversation {
       turn.publish(ctx, self.messages.len());
       emit(app, Frame::Usage { context: ctx, tokens: tok });
 
-      let result = call_model_streaming(&cfg, &self.messages, turn, |text| {
+      let result = call_model_streaming_in(&cfg, &self.messages, &self.root, turn, |text| {
         emit(app, Frame::AssistantDelta { id: id.clone(), text: text.to_string() });
       })
       .await;
@@ -237,7 +236,23 @@ impl Conversation {
         break TurnReason::Stop;
       }
 
-      for call in reply.tool_calls {
+      let mut pending = reply.tool_calls.as_slice();
+      while !pending.is_empty() {
+        let count = if tools::is_parallel_safe(&pending[0].name) {
+          pending.iter().take(4).take_while(|call| tools::is_parallel_safe(&call.name)).count()
+        } else {
+          1
+        };
+        let (batch, rest) = pending.split_at(count);
+        pending = rest;
+        let outcomes = join_all(batch.iter().map(|call| async {
+          if turn.is_stopped() {
+            None
+          } else {
+            Some(run_one_tool(app, &self.root, &id, call, turn).await)
+          }
+        })).await;
+      for (call, outcome) in batch.iter().zip(outcomes) {
         // Every tool call the model asked for gets an answer, including the ones
         // that will never run. An assistant message carrying `tool_calls` with
         // no matching `tool` message behind it is rejected by the endpoint on
@@ -262,7 +277,9 @@ impl Conversation {
           );
           continue;
         }
-        let outcome = run_one_tool(app, &self.root, &id, &call, turn).await;
+        let Some(outcome) = outcome else {
+          continue;
+        };
         self.record(
           &json!({
             "role": "tool",
@@ -278,6 +295,7 @@ impl Conversation {
             ms: outcome.elapsed,
           }),
         );
+      }
       }
 
       if turn.is_stopped() {
@@ -311,7 +329,7 @@ impl Conversation {
     }
     let context = estimate_tokens(
       &serde_json::to_string(&json!({
-        "messages": model_messages(&self.messages),
+        "messages": model_messages(&self.messages, &self.root),
         "tools": tools::tool_defs(),
       }))
       .unwrap_or_default(),
@@ -677,6 +695,18 @@ pub async fn call_model_streaming(
   cfg: &ResolvedModel,
   messages: &[Value],
   turn: &Arc<Turn>,
+  on_text: impl FnMut(&str),
+) -> Result<Reply, CallError> {
+  let root = std::env::current_dir()
+    .map_err(|e| CallError::Failed(format!("cannot determine current directory: {e}")))?;
+  call_model_streaming_in(cfg, messages, &root, turn, on_text).await
+}
+
+async fn call_model_streaming_in(
+  cfg: &ResolvedModel,
+  messages: &[Value],
+  root: &Path,
+  turn: &Arc<Turn>,
   mut on_text: impl FnMut(&str),
 ) -> Result<Reply, CallError> {
   let client = reqwest::Client::builder()
@@ -689,7 +719,7 @@ pub async fn call_model_streaming(
 
   let body = json!({
     "model": cfg.model,
-    "messages": model_messages(messages),
+    "messages": model_messages(messages, root),
     "tools": tools::tool_defs(),
     "stream": true,
   });
@@ -973,11 +1003,11 @@ fn complete_reply(value: &Value) -> Result<Reply, CallError> {
   })
 }
 
-fn model_messages(messages: &[Value]) -> Vec<Value> {
+fn model_messages(messages: &[Value], root: &Path) -> Vec<Value> {
   // Keep the guidance outside the saved transcript: it stays at the front of
   // every model request without being duplicated on later turns.
   let mut context = Vec::with_capacity(messages.len() + 1);
-  context.push(json!({ "role": "system", "content": WORKSPACE_INSTRUCTIONS }));
+  context.push(json!({ "role": "system", "content": format!("{WORKSPACE_INSTRUCTIONS}\nCurrent directory: {}", root.display()) }));
   context.extend_from_slice(messages);
   context
 }
@@ -1523,9 +1553,13 @@ mod tests {
   #[test]
   fn model_requests_explain_project_relative_paths_without_changing_history() {
     let history = vec![json!({ "role": "user", "content": "read 1.txt" })];
-    let request = model_messages(&history);
+    let root = std::env::current_dir().unwrap();
+    let request = model_messages(&history, &root);
     assert_eq!(request[0]["role"], "system");
-    assert!(request[0]["content"].as_str().unwrap().contains("currently open project folder"));
+    assert!(request[0]["content"].as_str().unwrap().contains(&format!("Current directory: {}", root.display())));
+    let other_root = root.join("other-project");
+    let updated = model_messages(&history, &other_root);
+    assert!(updated[0]["content"].as_str().unwrap().contains(&format!("Current directory: {}", other_root.display())));
     assert_eq!(request[1], history[0]);
     assert_eq!(history.len(), 1);
   }

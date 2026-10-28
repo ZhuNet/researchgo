@@ -317,13 +317,15 @@ function ToolCard(props: {
   const icon = () =>
     tool().name === 'bash' || tool().name === 'latexmk'
       ? 'terminal'
-      : tool().name === 'grep'
-        ? 'search'
-        : tool().name === 'edit' || tool().name === 'write'
-          ? 'pencil'
-          : tool().name === 'read'
-            ? 'fileText'
-            : 'cpu';
+      : tool().name === 'glob'
+          ? 'globe'
+          : tool().name === 'grep'
+          ? 'filter'
+          : tool().name === 'edit' || tool().name === 'write'
+            ? 'pencil'
+            : tool().name === 'read'
+              ? 'fileText'
+              : 'cpu';
 
   return (
     <div class="tool" classList={{ 'tool--open': props.open, 'tool--running': tool().status === 'running' }}>

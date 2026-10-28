@@ -82,7 +82,7 @@ export interface Usage {
 
 const TOOL_META: Record<string, string> = {
   read: 'Read',
-  grep: 'Search',
+  grep: 'grep',
   edit: 'Edit',
   write: 'Write',
   bash: 'Shell',

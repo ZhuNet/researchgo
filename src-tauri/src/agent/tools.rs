@@ -12,12 +12,15 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use globset::{GlobBuilder, GlobMatcher};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
-use serde_json::{json, Value};
+use schemars::{JsonSchema, schema_for};
+use serde::Deserialize;
+use serde_json::{Value, json};
 use similar::TextDiff;
 use tokio::process::Command;
 
@@ -91,24 +94,25 @@ const SKIP_DIRS: [&str; 8] = [
   "__pycache__",
 ];
 
+/// Model protocol understood by the definition adapter.
+#[derive(Debug, Clone, Copy)]
+pub enum ToolProtocol {
+    OpenAiChatCompletions,
+}
+
 /// Every tool definition, in the order the model sees them.
 ///
 /// `read` comes first because it is the one tool that is almost always the
 /// right first move, and a schema listed first is the one a model reaches for.
-pub fn tool_defs() -> Vec<Value> {
-  vec![
+fn openai_chat_tool_defs() -> &'static [Value] {
+    static DEFINITIONS: OnceLock<Vec<Value>> = OnceLock::new();
+    DEFINITIONS.get_or_init(|| vec![
     json!({
       "type": "function",
       "function": {
         "name": "read",
-        "description": "Read a file from the workspace. Returns its contents with line numbers. Truncated past 2000 lines. Prefer this over shell commands for looking at code.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": { "type": "string", "description": "Path relative to the workspace root." }
-          },
-          "required": ["path"]
-        }
+         "description": "Read a file. Returns its contents with line numbers. Truncated past 2000 lines. Prefer this over shell commands for looking at code.",
+        "parameters": schema_for!(ReadArgs)
       }
     }),
     json!({
@@ -116,14 +120,7 @@ pub fn tool_defs() -> Vec<Value> {
       "function": {
         "name": "write",
         "description": "Create a file, or replace an existing one entirely. Use only for new files or when a full rewrite is intended; prefer edit for changes to existing code.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": { "type": "string", "description": "Path relative to the workspace root." },
-            "content": { "type": "string", "description": "The complete file contents." }
-          },
-          "required": ["path", "content"]
-        }
+        "parameters": schema_for!(WriteArgs)
       }
     }),
     json!({
@@ -131,15 +128,7 @@ pub fn tool_defs() -> Vec<Value> {
       "function": {
         "name": "edit",
         "description": "Replace an exact string in a file. The old_string must appear exactly once and be copied verbatim including indentation. Fails loudly on a mismatch rather than guessing which occurrence you meant.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "path": { "type": "string", "description": "Path relative to the workspace root." },
-            "old_string": { "type": "string", "description": "The exact text to replace. Must be unique in the file." },
-            "new_string": { "type": "string", "description": "The replacement text." }
-          },
-          "required": ["path", "old_string", "new_string"]
-        }
+        "parameters": schema_for!(EditArgs)
       }
     }),
     json!({
@@ -155,51 +144,151 @@ pub fn tool_defs() -> Vec<Value> {
            retrying.",
           dialect()
         ),
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "command": { "type": "string", "description": format!("The command line to run. {}", dialect()) }
-          },
-          "required": ["command"]
-        }
+        "parameters": schema_for!(BashArgs)
       }
     }),
     json!({
       "type": "function",
       "function": {
         "name": "glob",
-        "description": "Find files with globset patterns: *, ?, **, character classes and {ts,tsx} alternatives. * and ? do not cross directories; ? matches one byte, so use * for Chinese filenames. Case-sensitive by default. Honors .gitignore/.ignore, includes hidden files, skips build/cache directories and directory links. Returns sorted workspace-relative paths and reports truncation.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": { "type": "string", "description": "Glob pattern relative to the workspace root; ** spans directories." },
-            "caseSensitive": { "type": "boolean", "description": "Defaults to true." },
-            "respectIgnore": { "type": "boolean", "description": "Honor ignore files; defaults to true. False still skips build/cache directories." }
-          },
-          "required": ["pattern"]
-        }
+         "description": "Find files with globset patterns: *, ?, **, character classes and {ts,tsx} alternatives. * and ? do not cross directories; ? matches one byte, so use * for Chinese filenames. Case-sensitive by default. Honors .gitignore/.ignore, includes hidden files, skips build/cache directories and directory links. Returns sorted paths and reports truncation.",
+        "parameters": schema_for!(GlobArgs)
       }
     }),
     json!({
       "type": "function",
       "function": {
         "name": "grep",
-        "description": "Search file contents using ripgrep's Rust regex engine, one line at a time. Case-sensitive regex by default; literal=true searches exact text. Honors .gitignore/.ignore, includes hidden files, skips binary files, files over 2 MiB, build/cache directories and directory links. Returns workspace-relative path:line and matching text; reports limits and shortened lines. Invalid regex returns a tool error.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "pattern": { "type": "string", "description": "Rust regular expression, or literal text when literal=true. No lookaround or backreferences." },
-            "path": { "type": "string", "description": "Optional file or directory to search. Defaults to the workspace root." },
-            "literal": { "type": "boolean", "description": "Treat pattern as literal text; defaults to false." },
-            "caseSensitive": { "type": "boolean", "description": "Defaults to true." },
-            "include": { "type": "string", "description": "Optional glob matching workspace-relative paths, e.g. **/*.{ts,tsx}." },
-            "respectIgnore": { "type": "boolean", "description": "Honor ignore files; defaults to true. False still skips build/cache directories. Explicit files are searched regardless of ignore rules." }
-          },
-          "required": ["pattern"]
-        }
+         "description": "Search file contents using ripgrep's Rust regex engine, one line at a time. Case-sensitive regex by default; literal=true searches exact text. Honors .gitignore/.ignore, includes hidden files, skips binary files, files over 2 MiB, build/cache directories and directory links. Returns path:line and matching text; reports limits and shortened lines. Invalid regex returns a tool error.",
+        "parameters": schema_for!(GrepArgs)
       }
     }),
-  ]
+  ])
+}
+
+/// Converts the internal tool catalogue to the selected model protocol.
+///
+/// The optional allow-list is the first configuration hook for tool
+/// registration. `None` preserves the existing six-tool behaviour.
+pub fn tool_defs_for(_protocol: ToolProtocol, enabled: Option<&[&str]>) -> Vec<Value> {
+    openai_chat_tool_defs()
+        .iter()
+        .cloned()
+        .filter(|definition| {
+            enabled.is_none_or(|names| {
+                names
+                    .iter()
+                    .any(|name| *name == definition["function"]["name"])
+            })
+        })
+        .collect()
+}
+
+pub fn tool_defs() -> Vec<Value> {
+    tool_defs_for(ToolProtocol::OpenAiChatCompletions, None)
+}
+
+/// File reads and searches do not mutate the workspace and can safely share a
+/// dispatch batch. Keeping this policy in the tool layer prevents the agent
+/// loop from accidentally parallelising a future mutating call.
+pub fn is_parallel_safe(name: &str) -> bool {
+    matches!(name, "read" | "glob" | "grep")
+}
+
+fn is_search(name: &str) -> bool {
+    matches!(name, "glob" | "grep")
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    path: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WriteArgs {
+    path: String,
+    /// The complete file contents.
+    content: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EditArgs {
+    path: String,
+    old_string: String,
+    new_string: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BashArgs {
+    command: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GlobArgs {
+    pattern: String,
+    /// Search directory. Defaults to the current directory.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "caseSensitive", default = "default_true")]
+    case_sensitive: bool,
+    #[serde(rename = "respectIgnore", default = "default_true")]
+    respect_ignore: bool,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrepArgs {
+    pattern: String,
+    /// Search file or directory. Defaults to the current directory.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    literal: bool,
+    #[serde(rename = "caseSensitive", default = "default_true")]
+    case_sensitive: bool,
+    #[serde(default)]
+    include: Option<String>,
+    #[serde(rename = "respectIgnore", default = "default_true")]
+    respect_ignore: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Deserialize the complete argument object before execution. Business checks
+/// remain inside each tool implementation.
+fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: &Value) -> Result<T, ToolError> {
+    serde_json::from_value(args.clone())
+        .map_err(|err| ToolError(format!("invalid arguments for `{name}`: {err}")))
+}
+
+#[cfg(test)]
+fn validate_args(name: &str, args: &Value) -> Result<(), ToolError> {
+    match name {
+        "read" => parse_args::<ReadArgs>(name, args).map(|_| ()),
+        "write" => parse_args::<WriteArgs>(name, args).map(|_| ()),
+        "edit" => parse_args::<EditArgs>(name, args).map(|_| ()),
+        "bash" => parse_args::<BashArgs>(name, args).map(|_| ()),
+        "glob" => parse_args::<GlobArgs>(name, args).map(|_| ()),
+        "grep" => parse_args::<GrepArgs>(name, args).map(|_| ()),
+        _ => Err(ToolError(format!("unknown tool `{name}`"))),
+    }
+}
+
+// This wrapper retains the direct async unit-test helper while the dispatch
+// path below passes typed arguments through without parsing them twice.
+#[cfg(test)]
+async fn bash_tool(root: &Path, args: &Value, turn: &Arc<Turn>) -> Result<ToolOutput, ToolError> {
+    bash_tool_typed(root, &parse_args("bash", args)?, turn).await
+}
+#[cfg(test)]
+fn glob_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
+    parse_args("glob", args).and_then(|a| glob_tool_typed(root, &a))
+}
+#[cfg(test)]
+fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
+    parse_args("grep", args).and_then(|a| grep_tool_typed(root, &a))
 }
 
 /// What a tool says when the turn stopped before it could finish.
@@ -225,7 +314,15 @@ pub async fn run(
   call_id: &str,
   turn: &Arc<Turn>,
 ) -> Result<ToolOutput, ToolError> {
-  if matches!(name, "glob" | "grep") {
+    if !matches!(name, "read" | "write" | "edit" | "bash" | "glob" | "grep") {
+        return Err(ToolError(format!(
+            "unknown tool `{name}`; available: read, write, edit, bash, glob, grep"
+        )));
+    }
+    if turn.is_stopped() {
+        return Err(ToolError(STOPPED.into()));
+    }
+    if is_search(name) {
     let root = root.to_path_buf();
     let args = args.clone();
     let name = name.to_string();
@@ -233,21 +330,23 @@ pub async fn run(
       biased;
       _ = turn.stopped() => Err(ToolError(STOPPED.into())),
       result = tokio::task::spawn_blocking(move || {
-        if name == "glob" { glob_tool(&root, &args) } else { grep_tool(&root, &args) }
+            match name.as_str() {
+              "glob" => parse_args::<GlobArgs>("glob", &args).and_then(|a| glob_tool_typed(&root, &a)),
+              "grep" => parse_args::<GrepArgs>("grep", &args).and_then(|a| grep_tool_typed(&root, &a)),
+              _ => unreachable!(),
+            }
       }) =>
         result.map_err(|e| ToolError(format!("search task failed: {e}")))?,
     };
   }
   match name {
-    "read" => read_tool(root, args),
-    "write" => write_tool(root, args),
-    "edit" => edit_tool(root, args),
-    "bash" => bash_tool(root, args, turn).await,
-    "glob" => glob_tool(root, args),
-    "grep" => grep_tool(root, args),
-    other => Err(ToolError(format!(
-      "unknown tool `{other}`; available: read, write, edit, bash, glob, grep"
-    ))),
+        "read" => parse_args::<ReadArgs>("read", args).and_then(|a| read_tool_typed(root, &a)),
+        "write" => parse_args::<WriteArgs>("write", args).and_then(|a| write_tool_typed(root, &a)),
+        "edit" => parse_args::<EditArgs>("edit", args).and_then(|a| edit_tool_typed(root, &a)),
+        "bash" => bash_tool_typed(root, &parse_args::<BashArgs>("bash", args)?, turn).await,
+        "glob" => parse_args::<GlobArgs>("glob", args).and_then(|a| glob_tool_typed(root, &a)),
+        "grep" => parse_args::<GrepArgs>("grep", args).and_then(|a| grep_tool_typed(root, &a)),
+        _ => unreachable!(),
   }
   .map(|mut out| {
     let _ = call_id;
@@ -256,30 +355,28 @@ pub async fn run(
   })
 }
 
-/// Resolves a model-supplied path inside `root`, or refuses.
-///
-/// Rejects anything that escapes: `..` is resolved away and the result is
-/// compared against the root, so a traversal cannot survive by being encoded in
-/// a way a later step undoes. Absolute paths are accepted only when they are
-/// already inside the root — an agent given a project directory should not need
-/// to guess the prefix to address it.
+/// Absolute paths can address any directory. Relative paths stay within `root`.
 fn resolve(root: &Path, raw: &str) -> Result<PathBuf, ToolError> {
   let raw = raw.trim();
   if raw.is_empty() {
     return Err(ToolError("path is empty".into()));
   }
 
-  let candidate = if Path::new(raw).is_absolute() {
-    PathBuf::from(raw)
-  } else {
-    root.join(raw)
-  };
+  let path = Path::new(raw);
+  if path.is_absolute() {
+    return Ok(normalize(path));
+  }
+  // Windows drive-relative and rooted paths are not relative to `root`.
+  if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_))) {
+    return Err(ToolError("use a fully qualified absolute path or a relative path within the current directory".into()));
+  }
+  let candidate = root.join(path);
 
   let resolved = normalize(&candidate);
   let base = normalize(root);
   if !resolved.starts_with(&base) {
     return Err(ToolError(format!(
-      "path `{raw}` is outside the workspace and was refused"
+      "relative path `{raw}` is outside the current directory; use an absolute path"
     )));
   }
   Ok(resolved)
@@ -287,11 +384,7 @@ fn resolve(root: &Path, raw: &str) -> Result<PathBuf, ToolError> {
 
 /// Collapses `.` and `..` lexically.
 ///
-/// `canonicalize` would be the obvious choice and is wrong here: it resolves
-/// symlinks, so a link inside the workspace pointing outside would compare as
-/// outside — correct — but it also fails on a path that does not exist yet, and
-/// `write` creates files. Lexical normalisation is what the check needs; the
-/// filesystem is not required to agree.
+/// Normalize lexically so paths for files that do not exist yet also work.
 fn normalize(path: &Path) -> PathBuf {
   let mut out = PathBuf::new();
   for part in path.components() {
@@ -306,21 +399,13 @@ fn normalize(path: &Path) -> PathBuf {
   out
 }
 
-fn arg_str(args: &Value, key: &str) -> Result<String, ToolError> {
-  args
-    .get(key)
-    .and_then(|v| v.as_str())
-    .map(|s| s.to_string())
-    .ok_or_else(|| ToolError(format!("missing required argument `{key}`")))
-}
-
 fn looks_binary(bytes: &[u8]) -> bool {
   bytes[..bytes.len().min(8192)].contains(&0)
 }
 
-fn read_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
-  let raw = arg_str(args, "path")?;
-  let path = resolve(root, &raw)?;
+fn read_tool_typed(root: &Path, args: &ReadArgs) -> Result<ToolOutput, ToolError> {
+  let raw = &args.path;
+  let path = resolve(root, raw)?;
 
   let meta = fs::metadata(&path).map_err(|e| ToolError(format!("cannot read `{raw}`: {e}")))?;
   if meta.is_dir() {
@@ -366,10 +451,10 @@ fn read_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   })
 }
 
-fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
-  let raw = arg_str(args, "path")?;
-  let content = arg_str(args, "content")?;
-  let path = resolve(root, &raw)?;
+fn write_tool_typed(root: &Path, args: &WriteArgs) -> Result<ToolOutput, ToolError> {
+  let raw = &args.path;
+  let content = &args.content;
+  let path = resolve(root, raw)?;
 
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent)
@@ -378,7 +463,8 @@ fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
 
   let existed = path.exists();
   let before = if existed {
-    let bytes = fs::read(&path).map_err(|e| ToolError(format!("cannot read `{raw}` before writing: {e}")))?;
+        let bytes = fs::read(&path)
+            .map_err(|e| ToolError(format!("cannot read `{raw}` before writing: {e}")))?;
     String::from_utf8_lossy(&bytes).into_owned()
   } else {
     String::new()
@@ -408,11 +494,11 @@ fn write_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   })
 }
 
-fn edit_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
-  let raw = arg_str(args, "path")?;
-  let old = arg_str(args, "old_string")?;
-  let new = arg_str(args, "new_string")?;
-  let path = resolve(root, &raw)?;
+fn edit_tool_typed(root: &Path, args: &EditArgs) -> Result<ToolOutput, ToolError> {
+  let raw = &args.path;
+  let old = &args.old_string;
+  let new = &args.new_string;
+  let path = resolve(root, raw)?;
 
   let bytes = fs::read(&path).map_err(|e| ToolError(format!("cannot read `{raw}`: {e}")))?;
   if looks_binary(&bytes) {
@@ -420,7 +506,7 @@ fn edit_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   }
   let text = String::from_utf8_lossy(&bytes).to_string();
 
-  let count = text.matches(&old).count();
+  let count = text.matches(old.as_str()).count();
   if count == 0 {
     return Err(ToolError(format!(
       "`old_string` not found in `{raw}`. Read the file again and copy the text exactly, including indentation."
@@ -432,7 +518,7 @@ fn edit_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
     )));
   }
 
-  let updated = text.replacen(&old, &new, 1);
+  let updated = text.replacen(old.as_str(), new.as_str(), 1);
   fs::write(&path, &updated).map_err(|e| ToolError(format!("cannot write `{raw}`: {e}")))?;
 
   Ok(ToolOutput {
@@ -459,11 +545,7 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
 }
 
 fn shell() -> &'static str {
-  if cfg!(windows) {
-    "cmd"
-  } else {
-    "sh"
-  }
+    if cfg!(windows) { "cmd" } else { "sh" }
 }
 
 /// The command dialect the model must write for the machine it is running on.
@@ -502,8 +584,12 @@ fn dialect() -> &'static str {
   }
 }
 
-async fn bash_tool(root: &Path, args: &Value, turn: &Arc<Turn>) -> Result<ToolOutput, ToolError> {
-  let command = arg_str(args, "command")?;
+async fn bash_tool_typed(
+    root: &Path,
+    args: &BashArgs,
+    turn: &Arc<Turn>,
+) -> Result<ToolOutput, ToolError> {
+    let command = &args.command;
   if command.trim().is_empty() {
     return Err(ToolError("command is empty".into()));
   }
@@ -596,19 +682,26 @@ async fn bash_tool(root: &Path, args: &Value, turn: &Arc<Turn>) -> Result<ToolOu
   })
 }
 
-fn glob_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
-  let pattern = arg_str(args, "pattern")?;
-  let matcher = compile_glob(&pattern, arg_bool(args, "caseSensitive", true)?)?;
-  let base = normalize(root);
+fn glob_tool_typed(root: &Path, args: &GlobArgs) -> Result<ToolOutput, ToolError> {
+    let pattern = &args.pattern;
+    let matcher = compile_glob(pattern, args.case_sensitive)?;
+  let base = match args.path.as_deref() {
+    Some(path) => resolve(root, path)?,
+    None => normalize(root),
+  };
   let mut hits = Vec::new();
   let mut files = 0usize;
   let mut truncated = false;
-  for entry in workspace_walk(&base, arg_bool(args, "respectIgnore", true)?) {
+    for entry in workspace_walk(&base, args.respect_ignore) {
     let entry = entry.map_err(|e| ToolError(format!("cannot walk workspace: {e}")))?;
-    if !entry.file_type().is_some_and(|t| t.is_file()) { continue; }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
     files += 1;
     let rel = relative(&base, entry.path());
-    if matcher.is_match(&rel) { hits.push(rel); }
+        if matcher.is_match(&rel) {
+            hits.push(relative(root, entry.path()));
+        }
     if files >= GREP_MAX_FILES || hits.len() >= GREP_MAX_FILES_RETURNED {
       truncated = true;
       break;
@@ -637,13 +730,6 @@ fn compile_glob(pattern: &str, case_sensitive: bool) -> Result<GlobMatcher, Tool
     .map_err(|e| ToolError(format!("invalid glob `{pattern}`: {e}")))
 }
 
-fn arg_bool(args: &Value, key: &str, default: bool) -> Result<bool, ToolError> {
-  match args.get(key) {
-    None => Ok(default),
-    Some(value) => value.as_bool().ok_or_else(|| ToolError(format!("`{key}` must be a boolean"))),
-  }
-}
-
 fn workspace_walk(root: &Path, respect_ignore: bool) -> ignore::Walk {
   WalkBuilder::new(root)
     .hidden(false)
@@ -654,22 +740,28 @@ fn workspace_walk(root: &Path, respect_ignore: bool) -> ignore::Walk {
     .require_git(false)
     .follow_links(false)
     .sort_by_file_path(|a, b| a.cmp(b))
-    .filter_entry(|entry| entry.depth() == 0 || !entry.file_type().is_some_and(|t| t.is_dir())
-      || !SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()))
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry.file_type().is_some_and(|t| t.is_dir())
+                || !SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+        })
     .build()
 }
 
 fn relative(root: &Path, path: &Path) -> String {
-  path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
-fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
-  let needle = arg_str(args, "pattern")?;
+fn grep_tool_typed(root: &Path, args: &GrepArgs) -> Result<ToolOutput, ToolError> {
+    let needle = &args.pattern;
   if needle.is_empty() {
     return Err(ToolError("pattern is empty".into()));
   }
 
-  let base = match args.get("path").and_then(|v| v.as_str()) {
+    let base = match args.path.as_deref() {
     Some(sub) if !sub.trim().is_empty() => resolve(root, sub)?,
     _ => normalize(root),
   };
@@ -679,16 +771,16 @@ fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   }
 
   let matcher = RegexMatcherBuilder::new()
-    .case_insensitive(!arg_bool(args, "caseSensitive", true)?)
-    .fixed_strings(arg_bool(args, "literal", false)?)
+    .case_insensitive(!args.case_sensitive)
+    .fixed_strings(args.literal)
     .line_terminator(Some(b'\n'))
     .crlf(true)
     .multi_line(true)
     .build(&needle)
     .map_err(|e| ToolError(format!("invalid regular expression `{needle}`: {e}")))?;
-  let include = match args.get("include") {
+  let include = match args.include.as_deref() {
     None => None,
-    Some(value) => Some(compile_glob(value.as_str().ok_or_else(|| ToolError("`include` must be a string".into()))?, arg_bool(args, "caseSensitive", true)?)?),
+    Some(value) => Some(compile_glob(value, args.case_sensitive)?),
   };
   let mut hits = Vec::new();
   let mut files = 0usize;
@@ -698,7 +790,7 @@ fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   let mut searcher = SearcherBuilder::new()
     .line_terminator(grep_matcher::LineTerminator::crlf())
     .binary_detection(grep_searcher::BinaryDetection::quit(b'\0')).line_number(true).build();
-  for entry in workspace_walk(&base, arg_bool(args, "respectIgnore", true)?) {
+  for entry in workspace_walk(&base, args.respect_ignore) {
     let entry = entry.map_err(|e| ToolError(format!("cannot walk workspace: {e}")))?;
     let path = entry.path();
     if !entry.file_type().is_some_and(|t| t.is_file()) { continue; }
@@ -739,12 +831,8 @@ fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
   })
 }
 
-fn sub_or_root(args: &Value) -> String {
-  args
-    .get("path")
-    .and_then(|v| v.as_str())
-    .unwrap_or("workspace root")
-    .to_string()
+fn sub_or_root(args: &GrepArgs) -> String {
+  args.path.clone().unwrap_or_else(|| "workspace root".to_string())
 }
 
 struct CollectSink<'a> { path: &'a str, hits: &'a mut Vec<(String, u64, String)>, shortened: &'a mut bool }
@@ -790,8 +878,14 @@ mod tests {
   struct Fixture(PathBuf);
   impl Fixture {
     fn new() -> Self {
-      let root = std::env::temp_dir().join(format!("researchgo-search-{}-{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let root = std::env::temp_dir().join(format!(
+                "researchgo-search-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
       fs::create_dir_all(&root).unwrap();
       Self(root)
     }
@@ -802,7 +896,33 @@ mod tests {
     }
   }
   impl Drop for Fixture {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+  }
+
+  #[test]
+  fn file_tools_accept_external_absolute_paths_and_reject_relative_escape() {
+    let workspace = Fixture::new();
+    let external = Fixture::new();
+    external.write("note.txt", "before\n");
+    let path = external.0.join("note.txt");
+    assert!(read_tool_typed(&workspace.0, &ReadArgs { path: path.to_string_lossy().into_owned() }).unwrap().content.contains("before"));
+    edit_tool_typed(&workspace.0, &EditArgs { path: path.to_string_lossy().into_owned(), old_string: "before".into(), new_string: "after".into() }).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "after\n");
+    write_tool_typed(&workspace.0, &WriteArgs { path: path.to_string_lossy().into_owned(), content: "written\n".into() }).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "written\n");
+    let glob = glob_tool(&workspace.0, &json!({"pattern": "*.txt", "path": external.0})).unwrap();
+    assert_eq!(glob.content, relative(&workspace.0, &path));
+    let grep = grep_tool(&workspace.0, &json!({"pattern": "written", "path": external.0})).unwrap();
+    assert!(grep.content.contains(&format!("{}:1: written", relative(&workspace.0, &path))));
+    assert!(read_tool_typed(&workspace.0, &ReadArgs { path: "../note.txt".into() }).is_err());
+    assert!(write_tool_typed(&workspace.0, &WriteArgs { path: "../note.txt".into(), content: "x".into() }).is_err());
+    assert!(edit_tool_typed(&workspace.0, &EditArgs { path: "../note.txt".into(), old_string: "x".into(), new_string: "y".into() }).is_err());
+    assert!(glob_tool(&workspace.0, &json!({"pattern": "*", "path": ".."})).is_err());
+    assert!(grep_tool(&workspace.0, &json!({"pattern": "x", "path": ".."})).is_err());
+    workspace.write("sub/local.txt", "local");
+    assert_eq!(glob_tool(&workspace.0, &json!({"pattern": "*.txt", "path": "sub"})).unwrap().content, "sub/local.txt");
   }
 
   #[test]
@@ -828,14 +948,25 @@ mod tests {
     fixture.write(".hidden/a.txt", "needle");
     fixture.write("node_modules/a.txt", "needle");
     let args = json!({"pattern":"**/*.txt"});
-    assert_eq!(glob_tool(&fixture.0, &args).unwrap().content, ".hidden/a.txt");
-    let out = glob_tool(&fixture.0, &json!({"pattern":"**/*.txt","respectIgnore":false})).unwrap();
+        assert_eq!(
+            glob_tool(&fixture.0, &args).unwrap().content,
+            ".hidden/a.txt"
+        );
+        let out = glob_tool(
+            &fixture.0,
+            &json!({"pattern":"**/*.txt","respectIgnore":false}),
+        )
+        .unwrap();
     assert!(out.content.contains("ignored/a.txt"));
     assert!(out.content.contains("private/a.txt"));
     assert!(!out.content.contains("node_modules"));
     let out = grep_tool(&fixture.0, &json!({"pattern":"needle"})).unwrap();
     assert_eq!(out.content, ".hidden/a.txt:1: needle");
-    let out = grep_tool(&fixture.0, &json!({"pattern":"needle","path":"ignored/a.txt"})).unwrap();
+        let out = grep_tool(
+            &fixture.0,
+            &json!({"pattern":"needle","path":"ignored/a.txt"}),
+        )
+        .unwrap();
     assert_eq!(out.content, "ignored/a.txt:1: needle");
   }
 
@@ -871,7 +1002,7 @@ mod tests {
   }
 
   fn root() -> PathBuf {
-    PathBuf::from("/work")
+    if cfg!(windows) { PathBuf::from("C:\\work") } else { PathBuf::from("/work") }
   }
 
   /// Exits non-zero. No shell is named here: `bash_tool` spawns the right one,
@@ -887,24 +1018,37 @@ mod tests {
 
   #[test]
   fn traversal_is_refused() {
-    // The check the whole sandbox exists for: a model that decides to read
-    // `~/.ssh/id_rsa` must be told no, not allowed to try.
     assert!(resolve(&root(), "../etc/passwd").is_err());
     assert!(resolve(&root(), "../../.ssh/authorized_keys").is_err());
     assert!(resolve(&root(), "a/../../../etc/passwd").is_err());
-    // An absolute path outside the root is refused too, even though it needs
-    // no `..` to get there.
-    assert!(resolve(&root(), "/etc/shadow").is_err());
+  }
+
+  #[test]
+  fn absolute_paths_outside_workspace_resolve() {
+    let outside = root().parent().unwrap().join("other-project").join("file.txt");
+    assert_eq!(resolve(&root(), outside.to_str().unwrap()).unwrap(), outside);
   }
 
   #[test]
   fn in_workspace_paths_resolve() {
-    assert_eq!(resolve(&root(), "src/main.rs").unwrap(), PathBuf::from("/work/src/main.rs"));
+        assert_eq!(
+            resolve(&root(), "src/main.rs").unwrap(),
+            root().join("src/main.rs")
+        );
     // `..` that stays inside is allowed: it is how a model addresses a sibling.
-    assert_eq!(resolve(&root(), "src/../lib/a.ts").unwrap(), PathBuf::from("/work/lib/a.ts"));
-    assert_eq!(resolve(&root(), "./x.txt").unwrap(), PathBuf::from("/work/x.txt"));
+        assert_eq!(
+            resolve(&root(), "src/../lib/a.ts").unwrap(),
+            root().join("lib/a.ts")
+        );
+        assert_eq!(
+            resolve(&root(), "./x.txt").unwrap(),
+            root().join("x.txt")
+        );
     // An absolute path already inside the root is fine.
-    assert_eq!(resolve(&root(), "/work/y.txt").unwrap(), PathBuf::from("/work/y.txt"));
+        assert_eq!(
+            resolve(&root(), root().join("y.txt").to_str().unwrap()).unwrap(),
+            root().join("y.txt")
+        );
   }
 
   #[test]
@@ -923,7 +1067,10 @@ mod tests {
   #[test]
   fn glob_double_star_spans_directories() {
     assert!(matches_glob("src/deep/main.rs", "src/**/*.rs"));
-    assert!(matches_glob("src/main.rs", "src/**/*.rs"), "`**/` also matches zero directories");
+        assert!(
+            matches_glob("src/main.rs", "src/**/*.rs"),
+            "`**/` also matches zero directories"
+        );
     assert!(matches_glob("a/b/c/d.ts", "**/*.ts"));
     assert!(matches_glob("d.ts", "**/*.ts"));
     assert!(!matches_glob("src/main.rs", "src/**/*.ts"));
@@ -957,19 +1104,35 @@ mod tests {
     // tool call, so the transcript drew a tick beside a failed command and the
     // model read a failing test run as a passing one.
     let fixture = Fixture::new();
-    let out = bash_tool(&fixture.0, &json!({ "command": failing_command() }), &Turn::detached()).await.unwrap();
+        let out = bash_tool(
+            &fixture.0,
+            &json!({ "command": failing_command() }),
+            &Turn::detached(),
+        )
+        .await
+        .unwrap();
 
     assert!(!out.ok, "a command that exits non-zero is not a success");
     // The output is the whole point of the call. Turning the failure into a
     // `ToolError` would have kept the tick honest but thrown away everything the
     // model needs in order to fix its own command.
-    assert!(out.content.contains("failed"), "the exit status must reach the model: {}", out.content);
+        assert!(
+            out.content.contains("failed"),
+            "the exit status must reach the model: {}",
+            out.content
+        );
   }
 
   #[tokio::test]
   async fn a_successful_command_reports_success_and_no_summary() {
     let fixture = Fixture::new();
-    let out = bash_tool(&fixture.0, &json!({ "command": succeeding_command() }), &Turn::detached()).await.unwrap();
+        let out = bash_tool(
+            &fixture.0,
+            &json!({ "command": succeeding_command() }),
+            &Turn::detached(),
+        )
+        .await
+        .unwrap();
 
     assert!(out.ok);
     // `cmd` writes CRLF, so the content is compared on the line, not the byte.
@@ -992,8 +1155,67 @@ mod tests {
     let description = bash["function"]["description"].as_str().unwrap_or_default();
 
     let expected = if cfg!(windows) { "cmd.exe" } else { "POSIX" };
-    assert!(description.contains(expected), "description omits the host dialect: {description}");
-    assert!(description.contains(shell()), "the description names a different shell than the one spawned");
+        assert!(
+            description.contains(expected),
+            "description omits the host dialect: {description}"
+        );
+        assert!(
+            description.contains(shell()),
+            "the description names a different shell than the one spawned"
+        );
+    }
+
+    #[test]
+    fn generated_schemas_match_the_wire_contract() {
+        let defs = tool_defs();
+        assert_eq!(defs.len(), 6);
+        let read = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "read")
+            .unwrap();
+        assert_eq!(read["function"]["parameters"]["type"], "object");
+        assert_eq!(read["function"]["parameters"]["required"], json!(["path"]));
+
+        let grep = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "grep")
+            .unwrap();
+        assert!(
+            grep["function"]["parameters"]["properties"]
+                .get("caseSensitive")
+                .is_some()
+        );
+        let required = grep["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert_eq!(required, &[json!("pattern")]);
+        assert!(!required.iter().any(|field| field == "literal"));
+        assert!(!required.iter().any(|field| field == "caseSensitive"));
+        assert!(!required.iter().any(|field| field == "respectIgnore"));
+
+        let glob = defs
+            .iter()
+            .find(|d| d["function"]["name"] == "glob")
+            .unwrap();
+        let required = glob["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert_eq!(required, &[json!("pattern")]);
+    }
+
+    #[test]
+    fn tool_allow_list_is_applied_by_the_protocol_adapter() {
+        let defs = tool_defs_for(ToolProtocol::OpenAiChatCompletions, Some(&["read", "grep"]));
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0]["function"]["name"], "read");
+        assert_eq!(defs[1]["function"]["name"], "grep");
+    }
+
+    #[test]
+    fn arguments_are_strictly_typed_and_reject_unknown_fields() {
+        assert!(validate_args("grep", &json!({"pattern": "x", "path": 42})).is_err());
+        assert!(validate_args("read", &json!({"path": "a", "extra": true})).is_err());
+        assert!(validate_args("read", &json!({"path": "a"})).is_ok());
   }
 
   #[tokio::test]
@@ -1012,7 +1234,15 @@ mod tests {
   async fn read_reports_a_directory_as_such() {
     // Without a temp dir this would depend on the machine; the guard is what
     // matters, and it is checked before any read is attempted.
-    let err = match run(&root(), "read", &json!({ "path": "src" }), "c1", &Turn::detached()).await {
+        let err = match run(
+            &root(),
+            "read",
+            &json!({ "path": "src" }),
+            "c1",
+            &Turn::detached(),
+        )
+        .await
+        {
       Ok(out) => panic!("expected an error, got: {}", out.summary),
       Err(err) => err.0,
     };
