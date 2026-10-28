@@ -17,6 +17,7 @@ const desktop = isDesktop();
 export function Titlebar(props: { ws: Workspace; agent: Agent }) {
   let pending: PointerEvent | null = null;
   let capture: { element: HTMLElement; id: number } | null = null;
+  let frame: number | undefined;
   let drag: {
     pointerX: number;
     pointerY: number;
@@ -25,14 +26,17 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     targetX: number;
     targetY: number;
     applying: boolean;
+    released: boolean;
     scale: number;
   } | null = null;
 
   const stopTracking = () => {
+    if (frame !== undefined) cancelAnimationFrame(frame);
+    frame = undefined;
     pending = null;
     drag = null;
     window.removeEventListener('pointermove', trackDrag);
-    window.removeEventListener('pointerup', stopTracking);
+    window.removeEventListener('pointerup', finishDrag);
     window.removeEventListener('pointercancel', stopTracking);
     window.removeEventListener('blur', stopTracking);
     const held = capture;
@@ -48,7 +52,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     if (!current || current.applying) return;
     current.applying = true;
     try {
-      while (drag === current) {
+      while (drag === current || current.released) {
         const x = current.targetX;
         const y = current.targetY;
         await windowCtl.setPosition({ type: 'Physical', x, y });
@@ -62,6 +66,17 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     }
   };
 
+  const finishDrag = (event: PointerEvent) => {
+    if (drag && event.isPrimary) {
+      drag.targetX = Math.round(drag.windowX + (event.screenX - drag.pointerX) * drag.scale);
+      drag.targetY = Math.round(drag.windowY + (event.screenY - drag.pointerY) * drag.scale);
+      // An in-flight update also delivers the final target after release.
+      drag.released = true;
+      void moveWindow();
+    }
+    stopTracking();
+  };
+
   const trackDrag = (event: PointerEvent) => {
     if (!drag || !event.isPrimary || (event.buttons & 1) === 0) {
       stopTracking();
@@ -69,7 +84,12 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     }
     drag.targetX = Math.round(drag.windowX + (event.screenX - drag.pointerX) * drag.scale);
     drag.targetY = Math.round(drag.windowY + (event.screenY - drag.pointerY) * drag.scale);
-    void moveWindow();
+    if (frame === undefined) {
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        void moveWindow();
+      });
+    }
   };
 
   const beginDrag = async (event: PointerEvent) => {
@@ -82,7 +102,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     element.setPointerCapture(event.pointerId);
     capture = { element, id: event.pointerId };
     element.addEventListener('lostpointercapture', stopTracking);
-    window.addEventListener('pointerup', stopTracking);
+    window.addEventListener('pointerup', finishDrag);
     window.addEventListener('pointercancel', stopTracking);
     window.addEventListener('blur', stopTracking);
     let origin;
@@ -108,6 +128,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
       targetX: origin.x,
       targetY: origin.y,
       applying: false,
+      released: false,
       scale,
     };
     window.addEventListener('pointermove', trackDrag);
