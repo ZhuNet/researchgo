@@ -9,41 +9,108 @@ import {
   theme,
 } from '../store/ui';
 import { isDesktop, windowCtl } from '../lib/bridge';
-import { passedDragThreshold } from '../lib/titlebarDrag';
 import type { Workspace } from '../store/workspace';
 import type { Agent } from '../store/agent';
 
 const desktop = isDesktop();
 
 export function Titlebar(props: { ws: Workspace; agent: Agent }) {
-  let dragOrigin: { x: number; y: number } | null = null;
+  let pending: PointerEvent | null = null;
+  let capture: { element: HTMLElement; id: number } | null = null;
+  let drag: {
+    pointerX: number;
+    pointerY: number;
+    windowX: number;
+    windowY: number;
+    targetX: number;
+    targetY: number;
+    applying: boolean;
+    scale: number;
+  } | null = null;
 
   const stopTracking = () => {
-    dragOrigin = null;
+    pending = null;
+    drag = null;
     window.removeEventListener('pointermove', trackDrag);
     window.removeEventListener('pointerup', stopTracking);
     window.removeEventListener('pointercancel', stopTracking);
+    window.removeEventListener('blur', stopTracking);
+    const held = capture;
+    capture = null;
+    if (held) {
+      held.element.removeEventListener('lostpointercapture', stopTracking);
+      if (held.element.hasPointerCapture(held.id)) held.element.releasePointerCapture(held.id);
+    }
+  };
+
+  const moveWindow = async () => {
+    const current = drag;
+    if (!current || current.applying) return;
+    current.applying = true;
+    try {
+      while (drag === current) {
+        const x = current.targetX;
+        const y = current.targetY;
+        await windowCtl.setPosition({ type: 'Physical', x, y });
+        if (x === current.targetX && y === current.targetY) break;
+      }
+    } catch (error) {
+      if (drag === current) stopTracking();
+      console.error('Window drag failed', error);
+    } finally {
+      current.applying = false;
+    }
   };
 
   const trackDrag = (event: PointerEvent) => {
-    if (!dragOrigin || !event.isPrimary || (event.buttons & 1) === 0) {
+    if (!drag || !event.isPrimary || (event.buttons & 1) === 0) {
       stopTracking();
       return;
     }
-    if (!passedDragThreshold(dragOrigin, { x: event.screenX, y: event.screenY })) return;
-    stopTracking();
-    windowCtl.startDragging();
+    drag.targetX = Math.round(drag.windowX + (event.screenX - drag.pointerX) * drag.scale);
+    drag.targetY = Math.round(drag.windowY + (event.screenY - drag.pointerY) * drag.scale);
+    void moveWindow();
   };
 
-  const beginDrag = (event: PointerEvent) => {
+  const beginDrag = async (event: PointerEvent) => {
     if (!desktop || event.button !== 0 || !event.isPrimary) return;
     const target = event.target as Element | null;
     if (target?.closest("button, input, textarea, select, a, [role='button']")) return;
     stopTracking();
-    dragOrigin = { x: event.screenX, y: event.screenY };
-    window.addEventListener('pointermove', trackDrag);
+    pending = event;
+    const element = event.currentTarget as HTMLElement;
+    element.setPointerCapture(event.pointerId);
+    capture = { element, id: event.pointerId };
+    element.addEventListener('lostpointercapture', stopTracking);
     window.addEventListener('pointerup', stopTracking);
     window.addEventListener('pointercancel', stopTracking);
+    window.addEventListener('blur', stopTracking);
+    let origin;
+    try {
+      origin = await windowCtl.outerPosition();
+    } catch (error) {
+      if (pending === event) stopTracking();
+      console.error('Cannot read window position', error);
+      return;
+    }
+    if (pending !== event) return;
+    if (!origin) {
+      stopTracking();
+      return;
+    }
+    pending = null;
+    const scale = window.devicePixelRatio || 1;
+    drag = {
+      pointerX: event.screenX,
+      pointerY: event.screenY,
+      windowX: origin.x,
+      windowY: origin.y,
+      targetX: origin.x,
+      targetY: origin.y,
+      applying: false,
+      scale,
+    };
+    window.addEventListener('pointermove', trackDrag);
   };
 
   onCleanup(stopTracking);
