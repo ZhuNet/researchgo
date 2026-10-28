@@ -111,6 +111,7 @@ interface TauriBridge {
     getCurrentWindow?: () => {
       minimize: () => void;
       toggleMaximize: () => void;
+      isMaximized: () => Promise<boolean>;
       close: () => void;
       outerPosition: () => Promise<{ x: number; y: number }>;
       setPosition: (position: { type: 'Physical'; x: number; y: number }) => Promise<void>;
@@ -129,6 +130,7 @@ export function isDesktop(): boolean {
 export const windowCtl = {
   minimize: () => tauri()?.window?.getCurrentWindow?.().minimize(),
   toggleMaximize: () => tauri()?.window?.getCurrentWindow?.().toggleMaximize(),
+  isMaximized: () => tauri()?.window?.getCurrentWindow?.().isMaximized(),
   close: () => tauri()?.window?.getCurrentWindow?.().close(),
   outerPosition: () => tauri()?.window?.getCurrentWindow?.().outerPosition(),
   setPosition: (position: { type: 'Physical'; x: number; y: number }) =>

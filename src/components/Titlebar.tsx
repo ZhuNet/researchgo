@@ -1,4 +1,4 @@
-import { onCleanup, Show } from 'solid-js';
+import { createSignal, onCleanup, onMount, Show } from 'solid-js';
 
 import { Icon } from './Icon';
 import {
@@ -15,6 +15,26 @@ import type { Agent } from '../store/agent';
 const desktop = isDesktop();
 
 export function Titlebar(props: { ws: Workspace; agent: Agent }) {
+  const [maximized, setMaximized] = createSignal(false);
+  onMount(() => {
+    if (!desktop) return;
+    let disposed = false;
+    const updateIcon = async () => {
+      try {
+        const value = await windowCtl.isMaximized();
+        if (!disposed) setMaximized(value ?? false);
+      } catch (error) {
+        console.error('Cannot read maximized state', error);
+      }
+    };
+    void updateIcon();
+    window.addEventListener('resize', updateIcon);
+    onCleanup(() => {
+      disposed = true;
+      window.removeEventListener('resize', updateIcon);
+    });
+  });
+
   let pending: PointerEvent | null = null;
   let capture: { element: HTMLElement; id: number } | null = null;
   let frame: number | undefined;
@@ -241,7 +261,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
             data-tooltip={desktop ? 'Maximize' : 'Maximize (needs the desktop shell)'}
             disabled={!desktop}
           >
-            <Icon name="maximize" size={13} stroke={1.4} />
+            <Icon name={maximized() ? 'restore' : 'maximize'} size={13} stroke={1.4} />
           </button>
           <button
             class="winctl__btn winctl__btn--danger"

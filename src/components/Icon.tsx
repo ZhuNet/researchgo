@@ -62,7 +62,7 @@ const P: Record<string, string> = {
   layers: '<path d="m12 3 8.5 4.5L12 12 3.5 7.5z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/>',
   hash: '<path d="M5 9.5h14M4 14.5h14M10.5 4 8 20M16 4l-2.5 16"/>',
   maximize: '<path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15"/>',
-  restore: '<rect x="4.5" y="7.5" width="12" height="12" rx="1.6"/><path d="M8 7.5V6a1.5 1.5 0 0 1 1.5-1.5H18A1.5 1.5 0 0 1 19.5 6v8.5A1.5 1.5 0 0 1 18 16h-1.5"/>',
+  restore: '<g stroke-linejoin="miter" stroke-linecap="square"><rect x="4.5" y="8.5" width="11" height="11"/><path d="M8.5 8.5v-4h11v11h-4"/></g>',
   filter: '<path d="M4 5.5h16l-6 7.5v6l-4 2v-8z"/>',
   inbox: '<path d="M3.5 13.5 6 5.5h12l2.5 8v5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/><path d="M3.5 13.5h4l1 2.5h7l1-2.5h4"/>',
   diff: '<path d="M7 4v13M7 4 4 7.5M7 4l3 3.5M7 17l-3 3M7 17l3 3M17 20V7M17 20l-3-3.5M17 20l3-3.5M17 7l-3-3M17 7l3-3"/>',
