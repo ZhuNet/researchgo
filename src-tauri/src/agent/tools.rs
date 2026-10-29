@@ -78,6 +78,10 @@ const BASH_TIMEOUT_SECS: u64 = 120;
 const BASH_MAX_OUTPUT: usize = 60_000;
 const LITERATURE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const LITERATURE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many papers to fetch at once. Kept modest so we do not look like a
+/// flood to Google Scholar / publisher hosts and so the UI progress stays
+/// legible. The previous fully serial loop was the dominant latency.
+const LITERATURE_CONCURRENCY: usize = 6;
 /// Bounds that keep `grep` an answer rather than a sweep of the whole disk.
 const GREP_MAX_FILES: usize = 20_000;
 const GREP_MAX_HITS: usize = 300;
@@ -427,74 +431,29 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   progress(json!({ "stage": "retrieving", "total": results.len().min(args.max_papers) }));
   let reference_dir = root.join("reference");
   fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?;
-  let mut papers = Vec::new();
-  let mut paper_failures = 0usize;
-  for (index, result) in results.iter().take(args.max_papers).enumerate() {
-    if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
-    let detail = result.clone();
-    let title = detail["title"].as_str().unwrap_or("untitled paper");
-    progress(json!({ "stage": "paper", "index": index, "title": title }));
-    let authors = detail["publication_info"]["authors"].as_array().map(|items| items.iter().filter_map(|a| a["name"].as_str()).collect::<Vec<_>>()).unwrap_or_default();
-    let pdf_url = scholar_pdf_url(&detail);
-    let landing_url = detail["link"].as_str();
-    let slug = reference_slug(title);
-    let base = reference_dir.join(format!("{:02}-{slug}", index + 1));
-    let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": landing_url.or(pdf_url) });
-    let mut extracted = String::new();
-    let mut extraction_note = String::new();
 
-    if let Some(url) = pdf_url {
-      if let Ok(response) = fetch_url(&client, url, turn).await {
-        if response.status().is_success() {
-          if let Ok(bytes) = response.bytes().await {
-            let path = base.with_extension("pdf");
-            if fs::File::create(&path).and_then(|mut file| file.write_all(&bytes)).is_ok() {
-              source = json!({ "status": "pdf", "path": path.display().to_string(), "url": url });
-              match pdf_extract::extract_text_from_mem(&bytes) {
-                Ok(text) if !text.trim().is_empty() => extracted = text,
-                Ok(_) => extraction_note = "PDF was saved, but no text could be extracted".into(),
-                Err(err) => extraction_note = format!("PDF was saved, but text extraction failed: {err}"),
-              }
-            } else { extraction_note = "PDF was fetched, but could not be saved".into(); }
-          } else { extraction_note = "PDF response could not be read".into(); }
-        } else { extraction_note = format!("PDF returned HTTP {}", response.status()); }
-      } else { extraction_note = "PDF could not be fetched".into(); }
+  // Process papers concurrently. The previous serial loop meant waiting for
+  // each PDF download + text extraction to finish before starting the next,
+  // which dominated wall-clock time when max_papers was 10-20.
+  use futures_util::stream::{self, StreamExt};
+  let work: Vec<(usize, Value)> = results.iter().take(args.max_papers).cloned().enumerate().collect();
+  let tasks = stream::iter(work.into_iter().map(|(index, detail)| {
+    let client = &client;
+    let reference_dir = &reference_dir;
+    let turn = turn.clone();
+    async move {
+      if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
+      let paper = process_one_paper(client, reference_dir, &turn, index, &detail, progress).await?;
+      let is_failure = paper["source"]["status"] == "unavailable";
+      Ok::<(usize, Value, bool), ToolError>((index, paper, is_failure))
     }
+  })).buffer_unordered(LITERATURE_CONCURRENCY);
 
-    if source["status"] == "unavailable" {
-      if let Some(url) = landing_url {
-        if let Ok(response) = fetch_url(&client, url, turn).await {
-          if response.status().is_success() {
-            if let Ok(bytes) = response.bytes().await {
-              let html = String::from_utf8_lossy(&bytes).into_owned();
-              let path = base.with_extension("html");
-              if fs::File::create(&path).and_then(|mut file| file.write_all(html.as_bytes())).is_ok() {
-                source = json!({ "status": "html", "path": path.display().to_string(), "url": url });
-                extracted = html_to_text(&html);
-                if extracted.trim().is_empty() { extraction_note = "HTML was saved, but no readable text could be extracted".into(); }
-              } else { extraction_note = "HTML was fetched, but could not be saved".into(); }
-            } else { extraction_note = "HTML response could not be read".into(); }
-          } else { extraction_note = format!("HTML returned HTTP {}", response.status()); }
-        } else { extraction_note = "HTML could not be fetched".into(); }
-      } else { extraction_note = "No PDF or HTML URL was available".into(); }
-    }
-    if source["status"] == "unavailable" { paper_failures += 1; }
-    let chapters = extract_chapters(&extracted);
-    let evidence = extract_evidence(&extracted, &chapters);
-    papers.push(json!({
-      "title": detail["title"], "authors": authors, "year": scholar_year(&detail),
-      "publication_summary": detail["publication_info"]["summary"],
-      "abstract": detail["snippet"], "doi": Value::Null,
-      "url": detail["link"], "pdf_url": pdf_url,
-      "scholar_result_id": detail["result_id"], "cluster_id": detail["inline_links"]["versions"]["cluster_id"], "source": source, "chapters": chapters, "evidence": evidence,
-      "extraction_note": if extraction_note.is_empty() { Value::Null } else { json!(extraction_note) }
-    }));
-    let paper = papers.last().expect("paper was just appended");
-    progress(json!({ "stage": "result", "index": index, "paper": {
-      "title": paper["title"], "url": paper["url"],
-      "source": paper["source"], "extraction_note": paper["extraction_note"]
-    } }));
-  }
+  let collected: Vec<Result<(usize, Value, bool), ToolError>> = tasks.collect().await;
+  let mut done: Vec<(usize, Value, bool)> = collected.into_iter().collect::<Result<Vec<_>, _>>()?;
+  done.sort_by_key(|(i, _, _)| *i);
+  let paper_failures = done.iter().filter(|(_, _, f)| *f).count();
+  let papers: Vec<Value> = done.into_iter().map(|(_, p, _)| p).collect();
   let count = papers.len();
   Ok(ToolOutput {
     content: serde_json::to_string_pretty(&json!({ "query": query, "papers": papers })).map_err(|e| ToolError(format!("cannot encode research result: {e}")))?,
@@ -502,6 +461,130 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
     ok: count == 0 || paper_failures < count,
     patch: None,
   })
+}
+
+async fn process_one_paper(
+  client: &reqwest::Client,
+  reference_dir: &Path,
+  turn: &Arc<Turn>,
+  index: usize,
+  detail: &Value,
+  progress: &(dyn Fn(Value) + Sync),
+) -> Result<Value, ToolError> {
+  let title = detail["title"].as_str().unwrap_or("untitled paper");
+  progress(json!({ "stage": "paper", "index": index, "title": title }));
+  let authors = detail["publication_info"]["authors"].as_array()
+    .map(|items| items.iter().filter_map(|a| a["name"].as_str()).collect::<Vec<_>>())
+    .unwrap_or_default();
+  let pdf_url = scholar_pdf_url(detail);
+  let landing_url = detail["link"].as_str();
+  let slug = reference_slug(title);
+  let base = reference_dir.join(format!("{:02}-{slug}", index + 1));
+  let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": landing_url.or(pdf_url) });
+  let mut extraction_note = String::new();
+
+  // Try PDF first.
+  if let Some(url) = pdf_url {
+    match fetch_url(client, url, turn).await {
+      Ok(response) if response.status().is_success() => {
+        if let Ok(bytes) = response.bytes().await {
+          let path = base.with_extension("pdf");
+          if fs::File::create(&path).and_then(|mut f| f.write_all(&bytes)).is_ok() {
+            source = json!({ "status": "pdf", "path": path.display().to_string(), "url": url });
+            // PDF text extraction is synchronous and CPU-heavy; move it off
+            // the async runtime so concurrent fetches are not blocked.
+            let extracted = tokio::task::spawn_blocking(move || -> (String, String) {
+              match pdf_extract::extract_text_from_mem(&bytes) {
+                Ok(text) if !text.trim().is_empty() => (text, String::new()),
+                Ok(_) => (String::new(), "PDF was saved, but no text could be extracted".into()),
+                Err(err) => (String::new(), format!("PDF was saved, but text extraction failed: {err}")),
+              }
+            }).await.map_err(|e| ToolError(format!("pdf extract task panicked: {e}")))?;
+            extraction_note = extracted.1;
+            let extracted_text = extracted.0;
+            if !extracted_text.is_empty() {
+              let chapters = extract_chapters(&extracted_text);
+              let evidence = extract_evidence(&extracted_text, &chapters);
+              let paper = build_paper_json(detail, authors, source, chapters, evidence, extraction_note);
+              emit_result_progress(progress, index, &paper);
+              return Ok(paper);
+            }
+          } else { extraction_note = "PDF was fetched, but could not be saved".into(); }
+        } else { extraction_note = "PDF response could not be read".into(); }
+      }
+      Ok(response) => extraction_note = format!("PDF returned HTTP {}", response.status()),
+      Err(_) => extraction_note = "PDF could not be fetched".into(),
+    }
+  }
+
+  // Fallback: landing page HTML.
+  if source["status"] == "unavailable" {
+    if let Some(url) = landing_url {
+      match fetch_url(client, url, turn).await {
+        Ok(response) if response.status().is_success() => {
+          if let Ok(bytes) = response.bytes().await {
+            let html = String::from_utf8_lossy(&bytes).into_owned();
+            let path = base.with_extension("html");
+            if fs::File::create(&path).and_then(|mut f| f.write_all(html.as_bytes())).is_ok() {
+              source = json!({ "status": "html", "path": path.display().to_string(), "url": url });
+              let extracted = html_to_text(&html);
+              if extracted.trim().is_empty() {
+                extraction_note = "HTML was saved, but no readable text could be extracted".into();
+              }
+              let chapters = extract_chapters(&extracted);
+              let evidence = extract_evidence(&extracted, &chapters);
+              let paper = build_paper_json(detail, authors, source, chapters, evidence, extraction_note);
+              emit_result_progress(progress, index, &paper);
+              return Ok(paper);
+            } else { extraction_note = "HTML was fetched, but could not be saved".into(); }
+          } else { extraction_note = "HTML response could not be read".into(); }
+        }
+        Ok(response) => extraction_note = format!("HTML returned HTTP {}", response.status()),
+        Err(_) => extraction_note = "HTML could not be fetched".into(),
+      }
+    } else {
+      extraction_note = "No PDF or HTML URL was available".into();
+    }
+  }
+
+  let paper = build_paper_json(detail, authors, source, Vec::new(), Vec::new(), extraction_note);
+  emit_result_progress(progress, index, &paper);
+  Ok(paper)
+}
+
+fn build_paper_json(
+  detail: &Value,
+  authors: Vec<&str>,
+  source: Value,
+  chapters: Vec<Value>,
+  evidence: Vec<Value>,
+  extraction_note: String,
+) -> Value {
+  json!({
+    "title": detail["title"],
+    "authors": authors,
+    "year": scholar_year(detail),
+    "publication_summary": detail["publication_info"]["summary"],
+    "abstract": detail["snippet"],
+    "doi": Value::Null,
+    "url": detail["link"],
+    "pdf_url": scholar_pdf_url(detail),
+    "scholar_result_id": detail["result_id"],
+    "cluster_id": detail["inline_links"]["versions"]["cluster_id"],
+    "source": source,
+    "chapters": chapters,
+    "evidence": evidence,
+    "extraction_note": if extraction_note.is_empty() { Value::Null } else { json!(extraction_note) },
+  })
+}
+
+fn emit_result_progress(progress: &(dyn Fn(Value) + Sync), index: usize, paper: &Value) {
+  progress(json!({ "stage": "result", "index": index, "paper": {
+    "title": paper["title"],
+    "url": paper["url"],
+    "source": paper["source"],
+    "extraction_note": paper["extraction_note"],
+  }}));
 }
 
 async fn fetch_url(client: &reqwest::Client, url: &str, turn: &Arc<Turn>) -> Result<reqwest::Response, ToolError> {
