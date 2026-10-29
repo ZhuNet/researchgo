@@ -47,6 +47,7 @@
   --bg-2: #101114;
   --bg-3: #16171b;
   --bg-4: #1c1e22;
+  --search-clear-hover: rgba(255, 255, 255, 0.12);
   --bg-5: #232529;
 
   --bd-1: rgba(255, 255, 255, 0.055);
@@ -96,6 +97,7 @@
   --bg-2: #ffffff;
   --bg-3: #f2f3f5;
   --bg-4: #e9eaee;
+  --search-clear-hover: rgba(9, 10, 20, 0.08);
   --bg-5: #e0e2e7;
 
   --bd-1: rgba(9, 10, 20, 0.07);

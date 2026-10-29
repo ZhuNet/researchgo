@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { FileGlyph, Icon } from '../Icon';
+import { SearchClear } from '../SearchClear';
 import { fuzzyScore } from '../../lib/tree';
 import type { Workspace } from '../../store/workspace';
 
@@ -101,6 +102,7 @@ export function SearchPanel(props: { ws: Workspace }) {
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}
           />
+          <SearchClear value={query()} onClear={() => setQuery('')} />
           <button
             class="searchbox__toggle"
             classList={{ 'searchbox__toggle--on': caseSensitive() }}

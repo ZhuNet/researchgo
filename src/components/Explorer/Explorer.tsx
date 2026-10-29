@@ -61,17 +61,13 @@ export function Explorer(props: { ws: Workspace }) {
                 <Icon name="folderPlus" size={15} />
               </button>
             </Match>
-            <Match when={view() === 'search'}>
-              <button class="icon-btn" aria-label="Clear" data-tooltip="Clear" onClick={() => toast('info', 'Search cleared')}>
-                <Icon name="x" size={15} />
-              </button>
-            </Match>
             <Match when={view() === 'changes'}>
               <button class="icon-btn" aria-label="Refresh" data-tooltip="Refresh" onClick={() => toast('info', 'Index refreshed')}>
                 <Icon name="refresh" size={15} />
               </button>
             </Match>
           </Switch>
+          <Show when={view() !== 'search'}>
           <button
             class="icon-btn"
             aria-label="More"
@@ -96,6 +92,7 @@ export function Explorer(props: { ws: Workspace }) {
           >
             <Icon name="more" size={15} />
           </button>
+          </Show>
         </div>
       </div>
 

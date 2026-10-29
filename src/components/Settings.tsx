@@ -4,6 +4,7 @@ import { Icon } from './Icon';
 import { setSettingsOpen, toast } from '../store/ui';
 import { agentApi, onLlmConfigChange, type ConfigView, type LlmView } from '../lib/agent';
 import { VirtualList } from './VirtualList';
+import { SearchClear } from './SearchClear';
 
 /**
  * The stored LLM endpoints, and the only place a key is ever typed.
@@ -115,7 +116,10 @@ export function Settings() {
               }
             >
               <div class="model-list">
-                <input class="input model-list__search" placeholder="Search providers and models…" value={configQuery()} onInput={(e) => setConfigQuery(e.currentTarget.value)} />
+                <div class="clearable-search model-list__search">
+                  <input class="input" aria-label="Search providers and models" placeholder="Search providers and models…" value={configQuery()} onInput={(e) => setConfigQuery(e.currentTarget.value)} />
+                  <SearchClear value={configQuery()} onClear={() => setConfigQuery('')} />
+                </div>
                 <VirtualList items={filteredConfigs()} rowHeight={62} height={Math.min(372, Math.max(62, filteredConfigs().length * 62))} class="model-list__window" render={(c) => (
                     <ConfigRow
                       config={c}
@@ -408,7 +412,10 @@ function ConfigForm(props: {
 
       <section class="field">
         <label class="field__label">Models</label>
-        <input class="input model-list__search" placeholder="Filter model rows…" value={modelQuery()} onInput={(e) => setModelQuery(e.currentTarget.value)} />
+        <div class="clearable-search model-list__search">
+          <input class="input" aria-label="Filter model rows" placeholder="Filter model rows…" value={modelQuery()} onInput={(e) => setModelQuery(e.currentTarget.value)} />
+          <SearchClear value={modelQuery()} onClear={() => setModelQuery('')} />
+        </div>
         <VirtualList items={models().map((value, index) => ({ value, index })).filter(({ value }) => !modelQuery().trim() || value.toLowerCase().includes(modelQuery().trim().toLowerCase()))} rowHeight={42} height={Math.min(252, Math.max(42, models().length * 42))} class="models__window" render={({ index: i, value: m }) => (
           <div class="field__row hist">
               <input class="input hist__input" autocomplete="off" placeholder="gpt-4o" value={m}

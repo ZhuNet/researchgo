@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { FileGlyph, Icon } from './Icon';
+import { SearchClear } from './SearchClear';
 import { fuzzyScore } from '../lib/tree';
 import {
   agentCollapsed,
@@ -176,6 +177,7 @@ export function CommandPalette(props: { ws: Workspace; agent: Agent }) {
               value={paletteQuery()}
               onInput={(e) => setPaletteQuery(e.currentTarget.value)}
             />
+            <SearchClear value={paletteQuery()} onClear={() => setPaletteQuery('')} />
             <span class="kbd">esc</span>
           </div>
           <div class="palette__list scroll" ref={list}>

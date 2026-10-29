@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, onCleanup, Show } from 'solid-j
 import { Icon } from '../Icon';
 import type { LlmView } from '../../lib/agent';
 import { VirtualList } from '../VirtualList';
+import { SearchClear } from '../SearchClear';
 
 /**
  * The model switcher: a dropdown anchored under the panel's model button.
@@ -101,7 +102,10 @@ export function ModelMenu(props: {
 
       <Show when={open()}>
         <div class="modelmenu__pop rise-in">
-          <input class="input modelmenu__search" placeholder="Search models…" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+          <div class="clearable-search modelmenu__search">
+            <input class="input" aria-label="Search models" placeholder="Search models…" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+            <SearchClear value={query()} onClear={() => setQuery('')} />
+          </div>
           <VirtualList items={filteredRows()} rowHeight={27} height={Math.min(270, Math.max(54, filteredRows().length * 27))} class="modelmenu__list" render={(row) => (
               <button
                 class="modelmenu__item"

@@ -214,6 +214,46 @@ kbd {
   background: var(--bg-1);
 }
 
+.clearable-search {
+  position: relative;
+  width: 100%;
+}
+
+.clearable-search .input {
+  padding-right: 30px;
+}
+
+.search-clear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--r-sm);
+  color: var(--tx-4);
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.search-clear:hover {
+  color: var(--tx-1);
+  background: var(--search-clear-hover);
+  box-shadow: inset 0 0 0 1px var(--bd-2);
+}
+
+.search-clear:focus-visible {
+  outline: 1px solid var(--ac-line);
+  outline-offset: 1px;
+}
+
+.clearable-search > .search-clear,
+.searchbox > .search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .kbd {
   display: inline-flex;
   align-items: center;
