@@ -248,7 +248,7 @@
   justify-content: space-between;
   width: 42px;
   flex: none;
-  padding: calc((var(--bar-h) - 32px) / 2 + var(--sp-2)) 0 var(--sp-5);
+  padding: calc((var(--bar-h) - 32px) / 2) 0 var(--sp-5);
   background: var(--bg-1);
   border-right: 1px solid var(--bd-1);
 }
