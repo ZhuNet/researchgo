@@ -307,6 +307,7 @@ function ToolCard(props: {
     output: string;
     status: 'running' | 'ok' | 'error';
     summary: string;
+    literature?: import('../../lib/literature').LiteratureProgress;
   };
   agent: Agent;
   ws: Workspace;
@@ -325,7 +326,9 @@ function ToolCard(props: {
             ? 'pencil'
             : tool().name === 'read'
               ? 'fileText'
-              : 'cpu';
+              : tool().name === 'research_literature'
+                ? 'book'
+                : 'cpu';
 
   return (
     <div class="tool" classList={{ 'tool--open': props.open, 'tool--running': tool().status === 'running' }}>
@@ -349,13 +352,79 @@ function ToolCard(props: {
         <Icon name="chevronDown" size={12} class="tool__caret" />
       </button>
       <Show when={props.open}>
+        <Show when={tool().name === 'research_literature'}>
+          <LiteratureWorkflow status={tool().status} summary={tool().summary} input={tool().input} output={tool().output} progress={tool().literature} />
+        </Show>
         <div class="tool__out">
-          <Show when={tool().input.split('\n').length > 1}>
+          <Show when={tool().name !== 'research_literature' && tool().input.split('\n').length > 1}>
             <pre class="tool__io">{tool().input}</pre>
           </Show>
-          <pre class="tool__io tool__io--out">{tool().output || '…'}</pre>
+          <Show when={tool().name !== 'research_literature'}>
+            <pre class="tool__io tool__io--out">{tool().output || '…'}</pre>
+          </Show>
         </div>
       </Show>
+    </div>
+  );
+}
+
+function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary: string; input: string; output: string; progress?: import('../../lib/literature').LiteratureProgress }) {
+  const failed = () => props.status === 'error';
+  const finalPapers = (): import('../../lib/literature').LiteraturePaper[] | undefined => {
+    try { const result = JSON.parse(props.output); return Array.isArray(result.papers) ? result.papers : undefined; } catch { return undefined; }
+  };
+  const searched = () => !!props.progress || !!finalPapers();
+  const papers = () => finalPapers()?.map((paper) => ({ title: paper.title, result: paper })) ?? props.progress?.papers ?? [];
+  const completed = () => papers().filter((paper) => paper.result).length;
+  const retrieved = () => {
+    const match = props.summary.match(/(\d+) source files unavailable/);
+    return match ? `papers processed; ${match[1]} sources unavailable` : props.summary || 'paper retrieval complete';
+  };
+  return (
+    <div class="research-workflow">
+      <div class="research-workflow__step">
+        <span class="research-workflow__mark" classList={{ 'research-workflow__mark--err': failed() && !searched() }}>
+          <Show when={props.status === 'running' && !searched()} fallback={<Icon name={searched() ? 'check' : 'x'} size={11} stroke={2} />}>
+            <span class="spinner" />
+          </Show>
+        </span>
+        <span class="research-workflow__name">search_papers</span>
+        <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching Google Scholar' : 'search not completed'}</span>
+      </div>
+      <Show when={props.input}>
+        <pre class="research-workflow__detail">{props.input}</pre>
+      </Show>
+      <Show when={failed() && props.output && !finalPapers()}>
+        <pre class="research-workflow__detail">{props.output}</pre>
+      </Show>
+      <div class="research-workflow__step">
+        <span class="research-workflow__mark" classList={{ 'research-workflow__mark--pending': !searched(), 'research-workflow__mark--err': failed() && searched() }}>
+          <Show when={searched()} fallback={<span class="research-workflow__pending" />}>
+            <Show when={props.status === 'running'} fallback={<Icon name={failed() ? 'x' : 'check'} size={11} stroke={2} />}><span class="spinner" /></Show>
+          </Show>
+        </span>
+        <span class="research-workflow__name">get_paper</span>
+        <span class="research-workflow__summary truncate">{props.status === 'running' ? searched() ? `${completed()}/${props.progress?.total ?? 0} papers processed` : 'waiting for search results' : failed() ? 'not completed' : retrieved()}</span>
+      </div>
+      <Index each={papers()}>{(paper, index) => (
+        <div class="research-workflow__paper">
+          <div class="research-workflow__step">
+            <span class="research-workflow__mark" classList={{ 'research-workflow__mark--err': paper().result?.source.status === 'unavailable' }}>
+              <Show when={paper().result} fallback={<Show when={props.status === 'running'} fallback={<Icon name="x" size={11} />}><span class="spinner" /></Show>}>
+                <Icon name={paper().result?.source.status === 'unavailable' ? 'x' : 'check'} size={11} />
+              </Show>
+            </span>
+            <span>{index + 1}. {paper().title}</span>
+          </div>
+          <div class="research-workflow__detail">
+            <Show when={paper().result} fallback={props.status === 'running' ? 'Fetching paper…' : 'Not completed'}>
+              <div>{paper().result?.source.status === 'unavailable' ? 'Source unavailable' : `${paper().result?.source.status.toUpperCase()} saved`}</div>
+              <Show when={paper().result?.source.path}><div>{paper().result?.source.path}</div></Show>
+              <Show when={paper().result?.extraction_note}><div>{paper().result?.extraction_note}</div></Show>
+            </Show>
+          </div>
+        </div>
+      )}</Index>
     </div>
   );
 }

@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::io::Write;
 
 use globset::{GlobBuilder, GlobMatcher};
 use grep_regex::RegexMatcherBuilder;
@@ -75,6 +76,8 @@ const MAX_READ_LINES: usize = 2000;
 /// runaway process is interrupted by something the user can see.
 const BASH_TIMEOUT_SECS: u64 = 120;
 const BASH_MAX_OUTPUT: usize = 60_000;
+const LITERATURE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const LITERATURE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Bounds that keep `grep` an answer rather than a sweep of the whole disk.
 const GREP_MAX_FILES: usize = 20_000;
 const GREP_MAX_HITS: usize = 300;
@@ -163,13 +166,21 @@ fn openai_chat_tool_defs() -> &'static [Value] {
         "parameters": schema_for!(GrepArgs)
       }
     }),
+    json!({
+      "type": "function",
+      "function": {
+        "name": "research_literature",
+        "description": "Research academic literature for a topic using Google Scholar via SerpApi, then retrieve available paper sources for local reading. Use for literature surveys, representative papers, recent research progress, or evidence-backed paper discovery. Do not use for reading a local PDF.",
+        "parameters": schema_for!(ResearchLiteratureArgs)
+      }
+    }),
   ])
 }
 
 /// Converts the internal tool catalogue to the selected model protocol.
 ///
 /// The optional allow-list is the first configuration hook for tool
-/// registration. `None` preserves the existing six-tool behaviour.
+/// registration. `None` includes every registered tool.
 pub fn tool_defs_for(_protocol: ToolProtocol, enabled: Option<&[&str]>) -> Vec<Value> {
     openai_chat_tool_defs()
         .iter()
@@ -314,9 +325,9 @@ pub async fn run(
   call_id: &str,
   turn: &Arc<Turn>,
 ) -> Result<ToolOutput, ToolError> {
-    if !matches!(name, "read" | "write" | "edit" | "bash" | "glob" | "grep") {
+    if !matches!(name, "read" | "write" | "edit" | "bash" | "glob" | "grep" | "research_literature") {
         return Err(ToolError(format!(
-            "unknown tool `{name}`; available: read, write, edit, bash, glob, grep"
+            "unknown tool `{name}`; available: read, write, edit, bash, glob, grep, research_literature"
         )));
     }
     if turn.is_stopped() {
@@ -346,6 +357,7 @@ pub async fn run(
         "bash" => bash_tool_typed(root, &parse_args::<BashArgs>("bash", args)?, turn).await,
         "glob" => parse_args::<GlobArgs>("glob", args).and_then(|a| glob_tool_typed(root, &a)),
         "grep" => parse_args::<GrepArgs>("grep", args).and_then(|a| grep_tool_typed(root, &a)),
+        "research_literature" => research_literature_tool(root, &parse_args::<ResearchLiteratureArgs>("research_literature", args)?, turn, call_id).await,
         _ => unreachable!(),
   }
   .map(|mut out| {
@@ -353,6 +365,206 @@ pub async fn run(
     out.summary = out.summary.trim().to_string();
     out
   })
+}
+
+static LITERATURE_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+pub(super) fn init_literature_progress(app: &tauri::AppHandle) {
+  let _ = LITERATURE_APP.set(app.clone());
+}
+
+fn literature_progress(call_id: &str, turn: u64, progress: Value) {
+  use tauri::Emitter;
+  if let Some(app) = LITERATURE_APP.get() {
+    let _ = app.emit("literature:progress", json!({ "callId": call_id, "turn": turn, "progress": progress }));
+  }
+}
+
+async fn research_literature_tool(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, call_id: &str) -> Result<ToolOutput, ToolError> {
+  let key = super::config::serpapi_secret().map_err(ToolError)?;
+  research_literature_with_progress(root, args, turn, &key, &|progress| literature_progress(call_id, turn.serial(), progress)).await
+}
+
+#[cfg(test)]
+async fn research_literature_with_key(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, serpapi_key: &str) -> Result<ToolOutput, ToolError> {
+  research_literature_with_progress(root, args, turn, serpapi_key, &|_| {}).await
+}
+
+async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, serpapi_key: &str, progress: &(dyn Fn(Value) + Sync)) -> Result<ToolOutput, ToolError> {
+  let query = args.query.trim();
+  if query.is_empty() { return Err(ToolError("query is empty".into())); }
+  if args.max_papers == 0 || args.max_papers > 20 { return Err(ToolError("max_papers must be between 1 and 20".into())); }
+  if let (Some(from), Some(to)) = (args.year_from, args.year_to) {
+    if from > to { return Err(ToolError("year_from must not be after year_to".into())); }
+  }
+  if serpapi_key.trim().is_empty() { return Err(ToolError("SerpApi API key is not configured. Open Settings and add it before researching literature.".into())); }
+  let url = "https://serpapi.com/search?engine=google_scholar";
+  let per_page = args.max_papers.to_string();
+
+  let client = reqwest::Client::builder()
+    .connect_timeout(LITERATURE_CONNECT_TIMEOUT)
+    .read_timeout(LITERATURE_READ_TIMEOUT)
+    .build()
+    .map_err(|e| ToolError(format!("cannot build literature HTTP client: {e}")))?;
+  let response = tokio::select! {
+    biased;
+    _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
+    result = {
+      let mut params = vec![("q", query), ("api_key", serpapi_key), ("num", per_page.as_str())];
+      let from = args.year_from.map(|v| v.to_string());
+      let to = args.year_to.map(|v| v.to_string());
+      if let Some(ref value) = from { params.push(("as_ylo", value.as_str())); }
+      if let Some(ref value) = to { params.push(("as_yhi", value.as_str())); }
+      client.get(url).query(&params)
+    }
+      .header("User-Agent", "ResearchGO/0.1")
+      .send() => result.map_err(|e| literature_network_error("search_papers", &url, e))?,
+  };
+  if !response.status().is_success() { return Err(ToolError(format!("search_papers returned HTTP {}", response.status()))); }
+  let body: Value = response.json().await.map_err(|e| ToolError(format!("invalid search_papers response: {}", e.without_url())))?;
+  if let Some(error) = body["error"].as_str() { return Err(ToolError(format!("SerpApi search failed: {error}"))); }
+  let results = body["organic_results"].as_array().ok_or_else(|| ToolError("SerpApi returned no organic results".into()))?;
+  progress(json!({ "stage": "retrieving", "total": results.len().min(args.max_papers) }));
+  let reference_dir = root.join("reference");
+  fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?;
+  let mut papers = Vec::new();
+  let mut paper_failures = 0usize;
+  for (index, result) in results.iter().take(args.max_papers).enumerate() {
+    if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
+    let detail = result.clone();
+    let title = detail["title"].as_str().unwrap_or("untitled paper");
+    progress(json!({ "stage": "paper", "index": index, "title": title }));
+    let authors = detail["publication_info"]["authors"].as_array().map(|items| items.iter().filter_map(|a| a["name"].as_str()).collect::<Vec<_>>()).unwrap_or_default();
+    let pdf_url = scholar_pdf_url(&detail);
+    let landing_url = detail["link"].as_str();
+    let slug = reference_slug(title);
+    let base = reference_dir.join(format!("{:02}-{slug}", index + 1));
+    let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": landing_url.or(pdf_url) });
+    let mut extracted = String::new();
+    let mut extraction_note = String::new();
+
+    if let Some(url) = pdf_url {
+      if let Ok(response) = fetch_url(&client, url, turn).await {
+        if response.status().is_success() {
+          if let Ok(bytes) = response.bytes().await {
+            let path = base.with_extension("pdf");
+            if fs::File::create(&path).and_then(|mut file| file.write_all(&bytes)).is_ok() {
+              source = json!({ "status": "pdf", "path": path.display().to_string(), "url": url });
+              match pdf_extract::extract_text_from_mem(&bytes) {
+                Ok(text) if !text.trim().is_empty() => extracted = text,
+                Ok(_) => extraction_note = "PDF was saved, but no text could be extracted".into(),
+                Err(err) => extraction_note = format!("PDF was saved, but text extraction failed: {err}"),
+              }
+            } else { extraction_note = "PDF was fetched, but could not be saved".into(); }
+          } else { extraction_note = "PDF response could not be read".into(); }
+        } else { extraction_note = format!("PDF returned HTTP {}", response.status()); }
+      } else { extraction_note = "PDF could not be fetched".into(); }
+    }
+
+    if source["status"] == "unavailable" {
+      if let Some(url) = landing_url {
+        if let Ok(response) = fetch_url(&client, url, turn).await {
+          if response.status().is_success() {
+            if let Ok(bytes) = response.bytes().await {
+              let html = String::from_utf8_lossy(&bytes).into_owned();
+              let path = base.with_extension("html");
+              if fs::File::create(&path).and_then(|mut file| file.write_all(html.as_bytes())).is_ok() {
+                source = json!({ "status": "html", "path": path.display().to_string(), "url": url });
+                extracted = html_to_text(&html);
+                if extracted.trim().is_empty() { extraction_note = "HTML was saved, but no readable text could be extracted".into(); }
+              } else { extraction_note = "HTML was fetched, but could not be saved".into(); }
+            } else { extraction_note = "HTML response could not be read".into(); }
+          } else { extraction_note = format!("HTML returned HTTP {}", response.status()); }
+        } else { extraction_note = "HTML could not be fetched".into(); }
+      } else { extraction_note = "No PDF or HTML URL was available".into(); }
+    }
+    if source["status"] == "unavailable" { paper_failures += 1; }
+    let chapters = extract_chapters(&extracted);
+    let evidence = extract_evidence(&extracted, &chapters);
+    papers.push(json!({
+      "title": detail["title"], "authors": authors, "year": scholar_year(&detail),
+      "publication_summary": detail["publication_info"]["summary"],
+      "abstract": detail["snippet"], "doi": Value::Null,
+      "url": detail["link"], "pdf_url": pdf_url,
+      "scholar_result_id": detail["result_id"], "cluster_id": detail["inline_links"]["versions"]["cluster_id"], "source": source, "chapters": chapters, "evidence": evidence,
+      "extraction_note": if extraction_note.is_empty() { Value::Null } else { json!(extraction_note) }
+    }));
+    let paper = papers.last().expect("paper was just appended");
+    progress(json!({ "stage": "result", "index": index, "paper": {
+      "title": paper["title"], "url": paper["url"],
+      "source": paper["source"], "extraction_note": paper["extraction_note"]
+    } }));
+  }
+  let count = papers.len();
+  Ok(ToolOutput {
+    content: serde_json::to_string_pretty(&json!({ "query": query, "papers": papers })).map_err(|e| ToolError(format!("cannot encode research result: {e}")))?,
+    summary: format!("{count} papers found; {paper_failures} source files unavailable"),
+    ok: count == 0 || paper_failures < count,
+    patch: None,
+  })
+}
+
+async fn fetch_url(client: &reqwest::Client, url: &str, turn: &Arc<Turn>) -> Result<reqwest::Response, ToolError> {
+  tokio::select! {
+    biased;
+    _ = turn.stopped() => Err(ToolError(STOPPED.into())),
+    result = client.get(url).header("User-Agent", "ResearchGO/0.1").send() => result.map_err(|e| ToolError(e.to_string())),
+  }
+}
+
+fn literature_network_error(operation: &str, url: &str, error: reqwest::Error) -> ToolError {
+  let error = error.without_url();
+  ToolError(format!("{operation} failed for {url}: {error} (debug: {error:?})"))
+}
+
+fn scholar_pdf_url(result: &Value) -> Option<&str> {
+  result["resources"].as_array()?.iter()
+    .filter(|resource| resource["file_format"].as_str().is_some_and(|format| format.eq_ignore_ascii_case("PDF")))
+    .find_map(|resource| resource["link"].as_str())
+}
+
+fn scholar_year(result: &Value) -> Option<u16> {
+  result["publication_info"]["summary"].as_str()?
+    .split(|c: char| !c.is_ascii_digit())
+    .filter(|part| part.len() == 4)
+    .filter_map(|part| part.parse::<u16>().ok())
+    .find(|year| (1500..=2100).contains(year))
+}
+
+fn reference_slug(title: &str) -> String {
+  let slug: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+  let slug = slug.split('-').filter(|part| !part.is_empty()).take(8).collect::<Vec<_>>().join("-");
+  if slug.is_empty() { "paper".into() } else { slug }
+}
+
+fn html_to_text(html: &str) -> String {
+  let mut text = String::with_capacity(html.len());
+  let mut in_tag = false;
+  for c in html.chars() {
+    match c { '<' => in_tag = true, '>' => { in_tag = false; text.push('\n'); }, _ if !in_tag => text.push(c), _ => {} }
+  }
+  text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    .lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+fn extract_chapters(text: &str) -> Vec<Value> {
+  text.lines().enumerate().filter_map(|(line, value)| {
+    let value = value.trim();
+    let is_heading = value.len() <= 120 && !value.ends_with('.') && (value.chars().all(|c| !c.is_lowercase()) || value.starts_with(|c: char| c.is_ascii_digit()));
+    is_heading.then(|| json!({ "title": value, "line": line + 1 }))
+  }).take(100).collect()
+}
+
+fn extract_evidence(text: &str, chapters: &[Value]) -> Vec<Value> {
+  let mut evidence = Vec::new();
+  for (line, value) in text.lines().enumerate() {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("we find") || lower.contains("our results") || lower.contains("outperform") || lower.contains("significant") || lower.contains("conclude") {
+      let chapter = chapters.iter().rev().find(|item| item["line"].as_u64().unwrap_or(0) <= (line + 1) as u64).and_then(|item| item["title"].as_str()).unwrap_or("");
+      evidence.push(json!({ "line": line + 1, "chapter": chapter, "text": value.trim() }));
+    }
+  }
+  evidence.into_iter().take(100).collect()
 }
 
 /// Absolute paths can address any directory. Relative paths stay within `root`.
@@ -835,6 +1047,20 @@ fn sub_or_root(args: &GrepArgs) -> String {
   args.path.clone().unwrap_or_else(|| "workspace root".to_string())
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ResearchLiteratureArgs {
+  query: String,
+  #[serde(default)]
+  year_from: Option<u16>,
+  #[serde(default)]
+  year_to: Option<u16>,
+  #[serde(default = "default_paper_limit")]
+  max_papers: usize,
+}
+
+fn default_paper_limit() -> usize { 5 }
+
 struct CollectSink<'a> { path: &'a str, hits: &'a mut Vec<(String, u64, String)>, shortened: &'a mut bool }
 impl Sink for CollectSink<'_> {
   type Error = std::io::Error;
@@ -862,6 +1088,30 @@ mod tests {
 
   fn matches_glob(path: &str, pattern: &str) -> bool {
     compile_glob(pattern, true).unwrap().is_match(path)
+  }
+
+  #[test]
+  fn scholar_resources_select_pdf_and_publication_year() {
+    let result = json!({
+      "resources": [
+        { "file_format": "HTML", "link": "https://example.org/article" },
+        { "file_format": "PDF", "link": "https://example.org/paper.pdf" }
+      ],
+      "publication_info": { "summary": "A Author - Journal of Science, 2024 - example.org" }
+    });
+    assert_eq!(scholar_pdf_url(&result), Some("https://example.org/paper.pdf"));
+    assert_eq!(scholar_year(&result), Some(2024));
+    assert_eq!(scholar_pdf_url(&json!({})), None);
+    assert_eq!(scholar_year(&json!({"publication_info": {"summary": "Unknown year"}})), None);
+  }
+
+  #[tokio::test]
+  async fn literature_requires_key_before_creating_files() {
+    let fixture = Fixture::new();
+    let args = parse_args::<ResearchLiteratureArgs>("research_literature", &json!({"query": "machine learning"})).unwrap();
+    let error = research_literature_with_key(&fixture.0, &args, &Turn::detached(), "").await.err().expect("missing key must fail");
+    assert!(error.to_string().contains("SerpApi API key is not configured"));
+    assert!(!fixture.0.join("reference").exists());
   }
 
   #[test]
@@ -1168,7 +1418,7 @@ mod tests {
     #[test]
     fn generated_schemas_match_the_wire_contract() {
         let defs = tool_defs();
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 7);
         let read = defs
             .iter()
             .find(|d| d["function"]["name"] == "read")

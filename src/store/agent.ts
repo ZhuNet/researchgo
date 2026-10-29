@@ -2,6 +2,7 @@ import { createSignal } from 'solid-js';
 
 import { agentApi, onAgentEvent, type AgentStatus, type EditorContext } from '../lib/agent';
 import type { UiEvent } from '../lib/bridge';
+import { onLiteratureProgress, updateLiterature, type LiteratureProgress } from '../lib/literature';
 
 export interface AgentTool {
   kind: 'tool';
@@ -13,6 +14,7 @@ export interface AgentTool {
   status: 'running' | 'ok' | 'error';
   summary: string;
   ms: number;
+  literature?: LiteratureProgress;
 }
 
 export type Item =
@@ -461,6 +463,13 @@ export function createAgent() {
 
   // One subscription for the panel's lifetime. Frames arrive for whatever turn
   // is running, so there is nothing to wire up per prompt.
+  onLiteratureProgress((turn, callId, progress) => {
+    if (turn !== activeTurn) return;
+    const id = toolIds.get(frameKey(callId));
+    if (!id) return;
+    setItems((prev) => prev.map((it) => it.kind === 'tool' && it.id === id && it.name === 'research_literature' && it.status === 'running'
+      ? { ...it, literature: updateLiterature(it.literature, progress) } : it));
+  });
   onAgentEvent(apply, () => void adopt());
 
   return {

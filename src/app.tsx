@@ -6,6 +6,7 @@ import { ContextMenu } from './components/ContextMenu';
 import { Explorer } from './components/Explorer/Explorer';
 import { Rail } from './components/Explorer/Rail';
 import { Settings } from './components/Settings';
+import { ApiSettings } from './components/ApiSettings';
 import { Splitter } from './components/Splitter';
 import { Stage } from './components/Stage/Stage';
 import { Titlebar } from './components/Titlebar';
@@ -17,6 +18,7 @@ import { createWorkspace } from './store/workspace';
 import {
   agentCollapsed,
   agentW,
+  apiSettingsOpen,
   applyStoredTheme,
   explorerW,
   setAgentCollapsed,
@@ -110,6 +112,9 @@ export default function App() {
       <CommandPalette ws={ws} agent={agent} />
       <Show when={settingsOpen()}>
         <Settings />
+      </Show>
+      <Show when={apiSettingsOpen()}>
+        <ApiSettings />
       </Show>
       <Toaster />
       <Tooltip />

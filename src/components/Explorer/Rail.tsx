@@ -1,7 +1,7 @@
 import { For } from 'solid-js';
 
 import { Icon } from '../Icon';
-import { railView, setRailView, setAgentCollapsed, agentCollapsed } from '../../store/ui';
+import { railView, setRailView, setAgentCollapsed, agentCollapsed, setApiSettingsOpen } from '../../store/ui';
 
 const TOP = [
   { id: 'files', icon: 'listTree', label: 'Explorer', hint: '⌘1' },
@@ -42,10 +42,7 @@ export function Rail() {
           <Icon name="sparkles" size={17} />
           <span class="rail__label">Agent</span>
         </button>
-        {/* Left alone for a global settings surface later; the agent's own
-            configuration lives behind the panel's overflow menu, where it is
-            next to the thing it configures. */}
-        <button class="rail__btn" aria-label="Settings" data-tooltip="Settings">
+        <button class="rail__btn" onClick={() => setApiSettingsOpen(true)} aria-label="API settings" data-tooltip="API settings">
           <span class="rail__indicator" />
           <Icon name="sliders" size={17} />
           <span class="rail__label">Settings</span>

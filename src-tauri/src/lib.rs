@@ -31,6 +31,8 @@ pub fn run() {
       agent::config::update_llm_config,
       agent::config::delete_llm_config,
       agent::config::set_active_llm_config,
+      agent::config::get_serpapi_config,
+      agent::config::set_serpapi_key,
       agent::agent_send,
       agent::agent_abort,
       agent::agent_status,

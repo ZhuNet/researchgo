@@ -42,16 +42,20 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"
 similar = "2.7"
+pdf-extract = "0.7"
 
 # The agent calls an OpenAI-compatible endpoint from the host and reads the
 # reply as a stream, because a long answer should be readable while it is still
 # arriving. `stream` is what makes `bytes_stream` exist; without it the reply is
 # one buffer at the end and the panel has nothing to show until the model is
 # already done.
-reqwest = { version = "0.13", default-features = false, features = [
+# Match agent-os's bundled public roots. Reqwest 0.13's `rustls` uses the
+# platform verifier, which can reject public sites on Windows installations
+# whose system root store is incomplete. Certificate verification stays enabled.
+reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "stream",
-  "rustls",
+  "rustls-tls",
   "http2",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

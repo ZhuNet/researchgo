@@ -170,6 +170,61 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
   Ok(config_dir(app)?.join("llm.json"))
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SerpApiConfig {
+  #[serde(default)]
+  api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerpApiView {
+  pub key_hint: String,
+  pub ready: bool,
+}
+
+fn serpapi_path(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(config_dir(app)?.join("serpapi.json"))
+}
+
+fn read_serpapi(path: &Path) -> SerpApiConfig {
+  fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+}
+
+fn serpapi_view(config: &SerpApiConfig) -> SerpApiView {
+  SerpApiView { key_hint: key_hint(&config.api_key), ready: !config.api_key.trim().is_empty() }
+}
+
+#[tauri::command]
+pub async fn get_serpapi_config(app: AppHandle) -> Result<SerpApiView, String> {
+  Ok(serpapi_view(&read_serpapi(&serpapi_path(&app)?)))
+}
+
+#[tauri::command]
+pub async fn set_serpapi_key(app: AppHandle, api_key: String) -> Result<SerpApiView, String> {
+  let path = serpapi_path(&app)?;
+  let mut config = read_serpapi(&path);
+  if !api_key.trim().is_empty() { config.api_key = api_key.trim().to_string(); }
+  write_to_serpapi(&path, &config)?;
+  Ok(serpapi_view(&config))
+}
+
+fn write_to_serpapi(path: &Path, config: &SerpApiConfig) -> Result<(), String> {
+  let body = serde_json::to_string_pretty(config).map_err(|e| format!("cannot serialise SerpApi config: {e}"))?;
+  let temp = path.with_extension("json.tmp");
+  fs::write(&temp, body).map_err(|e| format!("cannot write {}: {e}", temp.display()))?;
+  fs::rename(&temp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+}
+
+static SERPAPI_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Read only by the literature tool; the agent execution layer never handles this key.
+pub(super) fn serpapi_secret() -> Result<String, String> {
+  let path = SERPAPI_PATH.get().ok_or("SerpApi configuration directory is unavailable")?;
+  Ok(read_serpapi(path).api_key)
+}
+
 /// The event the host emits when `llm.json` changes on disk.
 ///
 /// Settings is one writer of that file; a text editor is the other, and the
@@ -197,6 +252,10 @@ struct ConfigWatch {
 /// file it named ceases to exist. The directory sees the rename as an event
 /// naming `llm.json`, which is the thing to react to.
 pub fn init(app: &AppHandle) {
+  super::tools::init_literature_progress(app);
+  if let Ok(path) = serpapi_path(app) {
+    let _ = SERPAPI_PATH.set(path);
+  }
   let Ok(path) = config_path(app) else {
     return;
   };
