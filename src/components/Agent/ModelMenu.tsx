@@ -1,7 +1,8 @@
-import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, onCleanup, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import type { LlmView } from '../../lib/agent';
+import { VirtualList } from '../VirtualList';
 
 /**
  * The model switcher: a dropdown anchored under the panel's model button.
@@ -18,6 +19,7 @@ export function ModelMenu(props: {
   onOpenSettings: () => void;
 }) {
   const [open, setOpen] = createSignal(false);
+  const [query, setQuery] = createSignal('');
 
   const active = () => props.configs.find((c) => c.active);
 
@@ -39,6 +41,10 @@ export function ModelMenu(props: {
         selected: c.active && c.activeModel === m,
       })),
     );
+  const filteredRows = createMemo(() => {
+    const q = query().trim().toLowerCase();
+    return q ? rows().filter((r) => `${r.model} ${r.name}`.toLowerCase().includes(q)) : rows();
+  });
 
   const toggle = () => {
     if (open()) {
@@ -95,8 +101,8 @@ export function ModelMenu(props: {
 
       <Show when={open()}>
         <div class="modelmenu__pop rise-in">
-          <For each={rows()}>
-            {(row) => (
+          <input class="input modelmenu__search" placeholder="Search models…" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+          <VirtualList items={filteredRows()} rowHeight={27} height={Math.min(270, Math.max(54, filteredRows().length * 27))} class="modelmenu__list" render={(row) => (
               <button
                 class="modelmenu__item"
                 classList={{ 'modelmenu__item--on': row.selected }}
@@ -113,8 +119,7 @@ export function ModelMenu(props: {
                 <span class="modelmenu__model truncate">{row.model}</span>
                 <span class="modelmenu__name truncate">{row.name}</span>
               </button>
-            )}
-          </For>
+            )} />
         </div>
       </Show>
     </div>

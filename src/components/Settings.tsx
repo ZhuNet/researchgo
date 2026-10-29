@@ -1,8 +1,9 @@
-import { createResource, createSignal, For, Index, onCleanup, Show } from 'solid-js';
+import { createMemo, createResource, createSignal, For, onCleanup, Show } from 'solid-js';
 
 import { Icon } from './Icon';
 import { setSettingsOpen, toast } from '../store/ui';
 import { agentApi, onLlmConfigChange, type ConfigView, type LlmView } from '../lib/agent';
+import { VirtualList } from './VirtualList';
 
 /**
  * The stored LLM endpoints, and the only place a key is ever typed.
@@ -23,6 +24,12 @@ export function Settings() {
   const [editing, setEditing] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  const [configQuery, setConfigQuery] = createSignal('');
+  const filteredConfigs = createMemo(() => {
+    const q = configQuery().trim().toLowerCase();
+    const all = store()?.configs ?? [];
+    return q ? all.filter((c) => `${c.name} ${c.url} ${c.models.join(' ')}`.toLowerCase().includes(q)) : all;
+  });
 
   // `llm.json` can be edited by hand while this dialog is open; the list
   // should show that, not the snapshot from when it opened. A save from here
@@ -108,8 +115,8 @@ export function Settings() {
               }
             >
               <div class="model-list">
-                <For each={store()?.configs}>
-                  {(c) => (
+                <input class="input model-list__search" placeholder="Search providers and models…" value={configQuery()} onInput={(e) => setConfigQuery(e.currentTarget.value)} />
+                <VirtualList items={filteredConfigs()} rowHeight={62} height={Math.min(372, Math.max(62, filteredConfigs().length * 62))} class="model-list__window" render={(c) => (
                     <ConfigRow
                       config={c}
                       busy={busy()}
@@ -136,8 +143,7 @@ export function Settings() {
                         }
                       }}
                     />
-                  )}
-                </For>
+                  )} />
               </div>
             </Show>
           </div>
@@ -228,6 +234,7 @@ function ConfigForm(props: {
   const [current, setCurrent] = createSignal<LlmView | undefined>(props.existing);
   /** Which history dropdown is open: the name field's, or a model row's. */
   const [histAt, setHistAt] = createSignal<'name' | 'url' | number | null>(null);
+  const [modelQuery, setModelQuery] = createSignal('');
 
   const setModel = (at: number, value: string) => {
     setModels((prev) => prev.map((m, i) => (i === at ? value : m)));
@@ -401,48 +408,20 @@ function ConfigForm(props: {
 
       <section class="field">
         <label class="field__label">Models</label>
-        {/* `Index`, not `For`: the rows are plain strings, and `For` keys by
-            reference — every keystroke replaces the row's string, which
-            remounts the input and eats the cursor. `Index` keys by position,
-            so the input the user is typing in is the input that stays. */}
-        <Index each={models()}>
-          {(m, i) => (
-            <div class="field__row hist">
-              <input
-                class="input hist__input"
-                autocomplete="off"
-                placeholder="gpt-4o"
-                value={m()}
-                onFocus={() => setHistAt(i)}
-                onBlur={() => setHistAt((at) => at === i ? null : at)}
-                onInput={(e) => {
-                  setModel(i, e.currentTarget.value);
-                  setHistAt(i);
-                }}
-              />
-              <Show when={histAt() === i && suggestions(modelHistory(), m()).length > 0}>
-                <HistoryPop
-                  items={suggestions(modelHistory(), m())}
-                  onPick={(v) => {
-                    setModel(i, v);
-                    setHistAt(null);
-                  }}
-                  onClose={() => setHistAt(null)}
-                />
+        <input class="input model-list__search" placeholder="Filter model rows…" value={modelQuery()} onInput={(e) => setModelQuery(e.currentTarget.value)} />
+        <VirtualList items={models().map((value, index) => ({ value, index })).filter(({ value }) => !modelQuery().trim() || value.toLowerCase().includes(modelQuery().trim().toLowerCase()))} rowHeight={42} height={Math.min(252, Math.max(42, models().length * 42))} class="models__window" render={({ index: i, value: m }) => (
+          <div class="field__row hist">
+              <input class="input hist__input" autocomplete="off" placeholder="gpt-4o" value={m}
+                onFocus={() => setHistAt(i)} onBlur={() => setHistAt((at) => at === i ? null : at)}
+                onInput={(e) => { setModel(i, e.currentTarget.value); setHistAt(i); }} />
+              <Show when={histAt() === i && suggestions(modelHistory(), m).length > 0}>
+                <HistoryPop items={suggestions(modelHistory(), m).slice(0, 100)} onPick={(v) => { setModel(i, v); setHistAt(null); }} onClose={() => setHistAt(null)} />
               </Show>
-              <button
-                type="button"
-                class="icon-btn icon-btn--danger"
-                aria-label="Remove model"
-                data-tooltip={models().length === 1 ? 'At least one model is required' : 'Remove model'}
-                disabled={models().length === 1}
-                onClick={() => removeModel(i)}
-              >
+              <button type="button" class="icon-btn icon-btn--danger" aria-label="Remove model" data-tooltip={models().length === 1 ? 'At least one model is required' : 'Remove model'} disabled={models().length === 1} onClick={() => removeModel(i)}>
                 <Icon name="x" size={14} />
               </button>
-            </div>
-          )}
-        </Index>
+          </div>
+        )} />
         <button type="button" class="btn" onClick={addModel}>
           <Icon name="plus" size={13} />
           Add model

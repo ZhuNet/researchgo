@@ -123,7 +123,6 @@
   right: 0;
   z-index: var(--z-menu);
   max-height: 320px;
-  overflow-y: auto;
   padding: var(--sp-2);
   border-radius: var(--r-md);
   background: var(--bg-3);
@@ -262,6 +261,9 @@
   align-items: center;
   height: 22px;
 }
+
+.modelmenu__search { margin-bottom: var(--sp-2); }
+.modelmenu__list { max-height: 270px; }
 
 .thread__breath {
   display: inline-flex;

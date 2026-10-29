@@ -453,6 +453,11 @@
   gap: var(--sp-2);
 }
 
+.model-list__search { margin-bottom: var(--sp-1); }
+.model-list__window, .models__window { min-height: 0; }
+.model-list__window .model { height: 62px; box-sizing: border-box; }
+.models__window .field__row { height: 42px; box-sizing: border-box; }
+
 .model {
   display: flex;
   align-items: center;
