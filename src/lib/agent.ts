@@ -39,7 +39,7 @@ export interface ConfigView {
   configs: LlmView[];
 }
 
-export interface SerpApiView {
+export interface ApiKeyView {
   keyHint: string;
   ready: boolean;
 }
@@ -98,8 +98,8 @@ function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 
 export const agentApi = {
   getConfig: () => invoke<ConfigView>('get_llm_config'),
-  getSerpApiConfig: () => invoke<SerpApiView>('get_serpapi_config'),
-  setSerpApiKey: (apiKey: string) => invoke<SerpApiView>('set_serpapi_key', { apiKey }),
+  getOpenAlexConfig: () => invoke<ApiKeyView>('get_openalex_config'),
+  setOpenAlexKey: (apiKey: string) => invoke<ApiKeyView>('set_openalex_key', { apiKey }),
 
   /** Adds an entry. The host rejects a name that is already taken. */
   addConfig: (config: LlmConfig) => invoke<ConfigView>('add_llm_config', { config }),

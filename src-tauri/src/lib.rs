@@ -31,8 +31,8 @@ pub fn run() {
       agent::config::update_llm_config,
       agent::config::delete_llm_config,
       agent::config::set_active_llm_config,
-      agent::config::get_serpapi_config,
-      agent::config::set_serpapi_key,
+      agent::config::get_openalex_config,
+      agent::config::set_openalex_key,
       agent::agent_send,
       agent::agent_abort,
       agent::agent_status,
@@ -65,7 +65,8 @@ pub fn run() {
     // turn nobody is going to see the end of. No waiting: there is no panel left
     // to settle, and what is left behind — a shell command still running after
     // the window is gone — is exactly what this is here to prevent.
-    if let tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::Destroyed, .. } = event {
+    if let tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } = event
+      && label == "main" {
       agent::stop_without_waiting(&handle.state::<agent::agent_loop::AgentState>());
     }
   });

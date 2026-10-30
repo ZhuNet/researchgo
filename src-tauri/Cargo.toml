@@ -42,7 +42,6 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 grep-matcher = "0.1"
 similar = "2.7"
-pdf-extract = "0.7"
 
 # The agent calls an OpenAI-compatible endpoint from the host and reads the
 # reply as a stream, because a long answer should be readable while it is still

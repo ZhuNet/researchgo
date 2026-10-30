@@ -13,7 +13,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::io::Write;
 
 use globset::{GlobBuilder, GlobMatcher};
 use grep_regex::RegexMatcherBuilder;
@@ -50,7 +49,7 @@ pub struct ToolOutput {
   /// A command that ran and exited non-zero is the case this exists for:
   /// collapsing it into a `ToolError` would throw away the stdout and stderr
   /// the model needs in order to fix its own command, and reporting it as a
-  /// plain success is worse — the transcript claims a test suite passed that
+  /// plain success is worse --the transcript claims a test suite passed that
   /// failed, and the model has no reason to look again. So the call succeeds,
   /// the content comes back whole, and the row is drawn as a failure.
   pub ok: bool,
@@ -78,9 +77,8 @@ const BASH_TIMEOUT_SECS: u64 = 120;
 const BASH_MAX_OUTPUT: usize = 60_000;
 const LITERATURE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const LITERATURE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// How many papers to fetch at once. Kept modest so we do not look like a
-/// flood to Google Scholar / publisher hosts and so the UI progress stays
-/// legible. The previous fully serial loop was the dominant latency.
+/// Bounds paper processing; the shared browser serializes page navigation and
+/// downloads so manual interaction cannot be interrupted by another paper.
 const LITERATURE_CONCURRENCY: usize = 6;
 /// Bounds that keep `grep` an answer rather than a sweep of the whole disk.
 const GREP_MAX_FILES: usize = 20_000;
@@ -147,7 +145,7 @@ fn openai_chat_tool_defs() -> &'static [Value] {
            Prefer the read, grep and glob tools over shelling out to cat, grep \
            and find: they are not a shell, so they are unaffected by all of the \
            above. A command that exits non-zero comes back as a failed call with \
-           its output attached rather than as an error — read that output before \
+           its output attached rather than as an error --read that output before \
            retrying.",
           dialect()
         ),
@@ -174,7 +172,7 @@ fn openai_chat_tool_defs() -> &'static [Value] {
       "type": "function",
       "function": {
         "name": "research_literature",
-        "description": "Research academic literature for a topic using Google Scholar via SerpApi, then retrieve available paper sources for local reading. Use for literature surveys, representative papers, recent research progress, or evidence-backed paper discovery. Do not use for reading a local PDF.",
+        "description": "Search and download papers into reference/. After downloading, you can read reference/index.md and use it as the local literature library for a paper writing.",
         "parameters": schema_for!(ResearchLiteratureArgs)
       }
     }),
@@ -309,7 +307,7 @@ fn grep_tool(root: &Path, args: &Value) -> Result<ToolOutput, ToolError> {
 /// What a tool says when the turn stopped before it could finish.
 ///
 /// One string for both readers: the transcript the model sees next turn and the
-/// row on screen. It is a *result* rather than a silence on purpose — a tool
+/// row on screen. It is a *result* rather than a silence on purpose --a tool
 /// call the model asked for has to be answered, and an unanswered one is a
 /// request the endpoint rejects outright.
 pub const STOPPED: &str = "stopped";
@@ -385,65 +383,40 @@ fn literature_progress(call_id: &str, turn: u64, progress: Value) {
 }
 
 async fn research_literature_tool(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, call_id: &str) -> Result<ToolOutput, ToolError> {
-  let key = super::config::serpapi_secret().map_err(ToolError)?;
-  research_literature_with_progress(root, args, turn, &key, &|progress| literature_progress(call_id, turn.serial(), progress)).await
+  let openalex_key = super::config::openalex_secret().map_err(ToolError)?;
+  research_literature_with_progress(root, args, turn, &openalex_key, &|progress| literature_progress(call_id, turn.serial(), progress)).await
 }
 
-#[cfg(test)]
-async fn research_literature_with_key(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, serpapi_key: &str) -> Result<ToolOutput, ToolError> {
-  research_literature_with_progress(root, args, turn, serpapi_key, &|_| {}).await
-}
-
-async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, serpapi_key: &str, progress: &(dyn Fn(Value) + Sync)) -> Result<ToolOutput, ToolError> {
+async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratureArgs, turn: &Arc<Turn>, openalex_key: &str, progress: &(dyn Fn(Value) + Sync)) -> Result<ToolOutput, ToolError> {
   let query = args.query.trim();
   if query.is_empty() { return Err(ToolError("query is empty".into())); }
   if args.max_papers == 0 || args.max_papers > 20 { return Err(ToolError("max_papers must be between 1 and 20".into())); }
   if let (Some(from), Some(to)) = (args.year_from, args.year_to) {
     if from > to { return Err(ToolError("year_from must not be after year_to".into())); }
   }
-  if serpapi_key.trim().is_empty() { return Err(ToolError("SerpApi API key is not configured. Open Settings and add it before researching literature.".into())); }
-  let url = "https://serpapi.com/search?engine=google_scholar";
-  let per_page = args.max_papers.to_string();
-
   let client = reqwest::Client::builder()
     .connect_timeout(LITERATURE_CONNECT_TIMEOUT)
     .read_timeout(LITERATURE_READ_TIMEOUT)
+    .timeout(std::time::Duration::from_secs(90))
     .build()
     .map_err(|e| ToolError(format!("cannot build literature HTTP client: {e}")))?;
-  let response = tokio::select! {
-    biased;
-    _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
-    result = {
-      let mut params = vec![("q", query), ("api_key", serpapi_key), ("num", per_page.as_str())];
-      let from = args.year_from.map(|v| v.to_string());
-      let to = args.year_to.map(|v| v.to_string());
-      if let Some(ref value) = from { params.push(("as_ylo", value.as_str())); }
-      if let Some(ref value) = to { params.push(("as_yhi", value.as_str())); }
-      client.get(url).query(&params)
-    }
-      .header("User-Agent", "ResearchGO/0.1")
-      .send() => result.map_err(|e| literature_network_error("search_papers", &url, e))?,
-  };
-  if !response.status().is_success() { return Err(ToolError(format!("search_papers returned HTTP {}", response.status()))); }
-  let body: Value = response.json().await.map_err(|e| ToolError(format!("invalid search_papers response: {}", e.without_url())))?;
-  if let Some(error) = body["error"].as_str() { return Err(ToolError(format!("SerpApi search failed: {error}"))); }
-  let results = body["organic_results"].as_array().ok_or_else(|| ToolError("SerpApi returned no organic results".into()))?;
-  progress(json!({ "stage": "retrieving", "total": results.len().min(args.max_papers) }));
   let reference_dir = root.join("reference");
-  fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?;
+  let existing = local_literature_dois(&reference_dir)?;
+  let results = search_openalex(&client, args, openalex_key, turn).await?;
+  let results = select_new_papers(results, existing, args.max_papers);
+  progress(json!({ "stage": "retrieving", "total": results.len() }));
+  if !results.is_empty() { fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?; }
 
-  // Process papers concurrently. The previous serial loop meant waiting for
-  // each PDF download + text extraction to finish before starting the next,
-  // which dominated wall-clock time when max_papers was 10-20.
+  // Queue paper processing with a bound; the browser lock protects navigation
+  // and downloads while the surrounding result processing remains unchanged.
   use futures_util::stream::{self, StreamExt};
-  let work: Vec<(usize, Value)> = results.iter().take(args.max_papers).cloned().enumerate().collect();
+  let work: Vec<(usize, LiteratureRecord)> = results.into_iter().enumerate().collect();
   let tasks = stream::iter(work.into_iter().map(|(index, detail)| {
-    let client = &client;
     let reference_dir = &reference_dir;
     let turn = turn.clone();
     async move {
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
-      let paper = process_one_paper(client, reference_dir, &turn, index, &detail, progress).await?;
+      let paper = process_one_paper(reference_dir, &turn, index, &detail, progress).await?;
       let is_failure = paper["source"]["status"] == "unavailable";
       Ok::<(usize, Value, bool), ToolError>((index, paper, is_failure))
     }
@@ -463,191 +436,320 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   })
 }
 
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+struct LiteratureRecord {
+  doi: String,
+  bib: Value,
+  abstract_text: String,
+  cited_by_count: u64,
+  pdf_url: Option<String>,
+}
+
+fn normalize_doi(raw: &str) -> Option<String> {
+  let raw = raw.trim().to_ascii_lowercase();
+  let raw = raw.strip_prefix("https://doi.org/").or_else(|| raw.strip_prefix("http://doi.org/"))
+    .or_else(|| raw.strip_prefix("https://dx.doi.org/")).or_else(|| raw.strip_prefix("doi:")).unwrap_or(&raw).trim();
+  let decoded = reqwest::Url::parse(&format!("https://doi.org/{raw}")).ok()?;
+  if decoded.query().is_some() || decoded.fragment().is_some() { return None; }
+  let raw = raw.to_string();
+  let (prefix, suffix) = raw.split_once('/')?;
+  (prefix.starts_with("10.") && (4..=9).contains(&prefix[3..].len()) && prefix[3..].chars().all(|c| c.is_ascii_digit())
+    && !suffix.is_empty() && !raw.chars().any(char::is_whitespace)).then_some(raw)
+}
+
+fn openalex_record(work: &Value) -> Option<LiteratureRecord> {
+  let doi = normalize_doi(work["doi"].as_str()?)?;
+  let abstract_text = work["abstract_inverted_index"].as_object().map(|index| {
+    let mut words: Vec<(usize, &str)> = index.iter().flat_map(|(word, positions)| positions.as_array().into_iter().flatten()
+      .filter_map(|position| position.as_u64().map(|position| (position as usize, word.as_str())))).collect();
+    words.sort_by_key(|(position, _)| *position);
+    words.into_iter().map(|(_, word)| word).collect::<Vec<_>>().join(" ")
+  }).unwrap_or_default();
+  let pdf_url = std::iter::once(work["best_oa_location"]["pdf_url"].as_str())
+    .chain(work["locations"].as_array().into_iter().flatten().map(|location| location["pdf_url"].as_str()))
+    .flatten().find(|url| !url.trim().is_empty()).map(str::to_string);
+  Some(LiteratureRecord {
+    doi,
+    bib: work["biblio"].clone(),
+    abstract_text,
+    cited_by_count: work["cited_by_count"].as_u64().unwrap_or(0),
+    pdf_url,
+  })
+}
+
+async fn literature_json(client: &reqwest::Client, url: &str, params: &[(String, String)], turn: &Arc<Turn>) -> Result<Value, ToolError> {
+  tokio::select! {
+    biased;
+    _ = turn.stopped() => Err(ToolError(STOPPED.into())),
+    result = async {
+      let response = client.get(url).query(params).header("User-Agent", "ResearchGO/0.1").send().await
+        .map_err(|_| ToolError("Literature metadata service request failed".into()))?;
+      if !response.status().is_success() { return Err(ToolError(format!("Literature metadata service returned HTTP {}", response.status()))); }
+      response.json::<Value>().await.map_err(|_| ToolError("Invalid literature metadata response".into()))
+    } => result,
+  }
+}
+
+async fn search_openalex(client: &reqwest::Client, args: &ResearchLiteratureArgs, api_key: &str, turn: &Arc<Turn>) -> Result<Vec<LiteratureRecord>, ToolError> {
+  let mut filters = vec!["type:article|proceedings-article".to_string()];
+  if let Some(year) = args.year_from { filters.push(format!("from_publication_date:{year}-01-01")); }
+  if let Some(year) = args.year_to { filters.push(format!("to_publication_date:{year}-12-31")); }
+  let mut params = vec![("search".into(), args.query.trim().into()), ("per-page".into(), "100".into()), ("filter".into(), filters.join(","))];
+  if !api_key.is_empty() { params.push(("api_key".into(), api_key.to_string())); }
+  let body = literature_json(client, "https://api.openalex.org/works", &params, turn).await?;
+  let results = body["results"].as_array().ok_or_else(|| ToolError("Invalid OpenAlex results".into()))?;
+  Ok(results.iter().filter_map(openalex_record).collect())
+}
+
+fn local_literature_dois(reference_dir: &Path) -> Result<std::collections::HashSet<String>, ToolError> {
+  let mut found = std::collections::HashSet::new();
+  if !reference_dir.exists() { return Ok(found); }
+    for entry in WalkBuilder::new(reference_dir).hidden(false).ignore(false).git_ignore(false).build() {
+      let entry = entry.map_err(|_| ToolError("Cannot inspect local literature library".into()))?;
+      if entry.path().file_name().is_some_and(|name| name == "index.md") {
+        let text = fs::read_to_string(entry.path()).map_err(|_| ToolError("Cannot read local literature index".into()))?;
+        for line in text.lines() {
+          if let Some(doi) = line.strip_prefix("- DOI:") {
+            let doi = doi.trim().trim_matches('`').trim();
+            if let Some(doi) = normalize_doi(doi) { found.insert(doi); }
+          }
+        }
+      }
+  }
+  Ok(found)
+}
+
+fn select_new_papers(records: Vec<LiteratureRecord>, mut existing: std::collections::HashSet<String>, max_papers: usize) -> Vec<LiteratureRecord> {
+  records.into_iter().filter(|paper| existing.insert(paper.doi.clone())).take(max_papers).collect()
+}
+
 async fn process_one_paper(
-  client: &reqwest::Client,
   reference_dir: &Path,
   turn: &Arc<Turn>,
   index: usize,
-  detail: &Value,
+  detail: &LiteratureRecord,
   progress: &(dyn Fn(Value) + Sync),
 ) -> Result<Value, ToolError> {
-  let title = detail["title"].as_str().unwrap_or("untitled paper");
-  progress(json!({ "stage": "paper", "index": index, "title": title }));
-  let authors = detail["publication_info"]["authors"].as_array()
-    .map(|items| items.iter().filter_map(|a| a["name"].as_str()).collect::<Vec<_>>())
-    .unwrap_or_default();
-  let pdf_url = scholar_pdf_url(detail);
-  let landing_url = detail["link"].as_str();
-  let slug = reference_slug(title);
-  let base = reference_dir.join(format!("{:02}-{slug}", index + 1));
-  let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": landing_url.or(pdf_url) });
-  let mut extraction_note = String::new();
-
-  // Try PDF first.
-  if let Some(url) = pdf_url {
-    match fetch_url(client, url, turn).await {
-      Ok(response) if response.status().is_success() => {
-        if let Ok(bytes) = response.bytes().await {
-          let path = base.with_extension("pdf");
-          if fs::File::create(&path).and_then(|mut f| f.write_all(&bytes)).is_ok() {
-            source = json!({ "status": "pdf", "path": path.display().to_string(), "url": url });
-            // PDF text extraction is synchronous and CPU-heavy; move it off
-            // the async runtime so concurrent fetches are not blocked.
-            let extracted = tokio::task::spawn_blocking(move || -> (String, String) {
-              match pdf_extract::extract_text_from_mem(&bytes) {
-                Ok(text) if !text.trim().is_empty() => (text, String::new()),
-                Ok(_) => (String::new(), "PDF was saved, but no text could be extracted".into()),
-                Err(err) => (String::new(), format!("PDF was saved, but text extraction failed: {err}")),
-              }
-            }).await.map_err(|e| ToolError(format!("pdf extract task panicked: {e}")))?;
-            extraction_note = extracted.1;
-            let extracted_text = extracted.0;
-            if !extracted_text.is_empty() {
-              let chapters = extract_chapters(&extracted_text);
-              let evidence = extract_evidence(&extracted_text, &chapters);
-              let paper = build_paper_json(detail, authors, source, chapters, evidence, extraction_note);
-              emit_result_progress(progress, index, &paper);
-              return Ok(paper);
-            }
-          } else { extraction_note = "PDF was fetched, but could not be saved".into(); }
-        } else { extraction_note = "PDF response could not be read".into(); }
-      }
-      Ok(response) => extraction_note = format!("PDF returned HTTP {}", response.status()),
-      Err(_) => extraction_note = "PDF could not be fetched".into(),
-    }
+  progress(json!({ "stage": "paper", "index": index, "doi": detail.doi }));
+  // A DOI-derived name is stable across queries and cannot overwrite a different
+  // paper merely because its title/index happens to match.
+  use std::hash::{Hash, Hasher};
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  detail.doi.hash(&mut hasher);
+  let identity = format!("{:016x}", hasher.finish());
+  let base = reference_dir.join(identity);
+  let doi_url = format!("https://doi.org/{}", detail.doi);
+  let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": doi_url });
+  let mut note = "Official PDF could not be downloaded".to_string();
+  let downloaded = match official_pdf(detail, turn).await {
+    Ok((bytes, page_url, metadata)) => Some((bytes, page_url, metadata)),
+    Err(_) if turn.is_stopped() => return Err(ToolError(STOPPED.into())),
+    Err(error) => { note = error.0; None },
+  };
+   if let Some((bytes, page_url, _metadata)) = downloaded {
+    let path = base.with_extension("pdf");
+    let temp = base.with_extension("pdf.part");
+    fs::write(&temp, &bytes).and_then(|_| fs::rename(&temp, &path)).map_err(|_| ToolError("Cannot save official PDF".into()))?;
+    source = json!({ "status": "pdf", "path": path, "url": page_url });
+    note.clear();
+     let markdown_path = update_reference_index(reference_dir, detail, &page_url, &path)?;
+     let result = json!({ "doi": detail.doi, "url": page_url, "pdf_path": path, "markdown_path": markdown_path, "source": source, "extraction_note": Value::Null });
+    emit_result_progress(progress, index, &result);
+    return Ok(result);
   }
-
-  // Fallback: landing page HTML.
-  if source["status"] == "unavailable" {
-    if let Some(url) = landing_url {
-      match fetch_url(client, url, turn).await {
-        Ok(response) if response.status().is_success() => {
-          if let Ok(bytes) = response.bytes().await {
-            let html = String::from_utf8_lossy(&bytes).into_owned();
-            let path = base.with_extension("html");
-            if fs::File::create(&path).and_then(|mut f| f.write_all(html.as_bytes())).is_ok() {
-              source = json!({ "status": "html", "path": path.display().to_string(), "url": url });
-              let extracted = html_to_text(&html);
-              if extracted.trim().is_empty() {
-                extraction_note = "HTML was saved, but no readable text could be extracted".into();
-              }
-              let chapters = extract_chapters(&extracted);
-              let evidence = extract_evidence(&extracted, &chapters);
-              let paper = build_paper_json(detail, authors, source, chapters, evidence, extraction_note);
-              emit_result_progress(progress, index, &paper);
-              return Ok(paper);
-            } else { extraction_note = "HTML was fetched, but could not be saved".into(); }
-          } else { extraction_note = "HTML response could not be read".into(); }
-        }
-        Ok(response) => extraction_note = format!("HTML returned HTTP {}", response.status()),
-        Err(_) => extraction_note = "HTML could not be fetched".into(),
-      }
-    } else {
-      extraction_note = "No PDF or HTML URL was available".into();
-    }
-  }
-
-  let paper = build_paper_json(detail, authors, source, Vec::new(), Vec::new(), extraction_note);
-  emit_result_progress(progress, index, &paper);
-  Ok(paper)
+  if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
+   let result = json!({ "doi": detail.doi, "url": doi_url, "source": source, "markdown_path": Value::Null, "extraction_note": note });
+  emit_result_progress(progress, index, &result);
+  Ok(result)
 }
 
-fn build_paper_json(
-  detail: &Value,
-  authors: Vec<&str>,
-  source: Value,
-  chapters: Vec<Value>,
-  evidence: Vec<Value>,
-  extraction_note: String,
-) -> Value {
-  json!({
-    "title": detail["title"],
-    "authors": authors,
-    "year": scholar_year(detail),
-    "publication_summary": detail["publication_info"]["summary"],
-    "abstract": detail["snippet"],
-    "doi": Value::Null,
-    "url": detail["link"],
-    "pdf_url": scholar_pdf_url(detail),
-    "scholar_result_id": detail["result_id"],
-    "cluster_id": detail["inline_links"]["versions"]["cluster_id"],
-    "source": source,
-    "chapters": chapters,
-    "evidence": evidence,
-    "extraction_note": if extraction_note.is_empty() { Value::Null } else { json!(extraction_note) },
-  })
+static LOGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static LOGIN_CLOSED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static BROWSER_DOWNLOAD: std::sync::Mutex<Option<BrowserDownload>> = std::sync::Mutex::new(None);
+static PAPER_PAGE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct BrowserDownload {
+  path: PathBuf,
+  result: Option<Result<Vec<u8>, String>>,
+  in_progress: bool,
+}
+
+async fn paper_browser() -> Result<tauri::WebviewWindow, ToolError> {
+  use tauri::Manager;
+  let app = LITERATURE_APP.get().ok_or_else(|| ToolError("Paper browser is unavailable".into()))?;
+  if let Some(window) = app.get_webview_window("literature-login") {
+    return Ok(window);
+  }
+  let profile = app.path().app_local_data_dir().map_err(|e| ToolError(e.to_string()))?.join("paper-browser");
+  fs::create_dir_all(&profile).map_err(|e| ToolError(e.to_string()))?;
+  let window = tauri::WebviewWindowBuilder::new(app, "literature-login", tauri::WebviewUrl::External(reqwest::Url::parse("about:blank").unwrap()))
+    .title("文献下载 --完成登录、验证或下载后关闭窗口以继续")
+    .inner_size(1100.0, 800.0).visible(false).data_directory(profile)
+    .on_page_load(|_, payload| {
+      PAPER_PAGE_READY.store(matches!(payload.event(), tauri::webview::PageLoadEvent::Finished), std::sync::atomic::Ordering::SeqCst);
+    })
+    .on_new_window(|url, _| {
+      // Publisher PDF buttons often target a new tab. Keep their navigation
+      // inside the same controlled browser session and download handler.
+      if let Some(window) = LITERATURE_APP.get().and_then(|app| app.get_webview_window("literature-login")) {
+        let _ = window.navigate(url);
+      }
+      tauri::webview::NewWindowResponse::Deny
+    })
+    .on_download(|_, event| {
+      let Ok(mut active) = BROWSER_DOWNLOAD.lock() else { return false; };
+      let Some(active) = active.as_mut() else { return false; };
+      match event {
+        tauri::webview::DownloadEvent::Requested { destination, .. } => {
+          *destination = active.path.clone();
+          active.in_progress = true;
+          true
+        }
+        tauri::webview::DownloadEvent::Finished { success, path, .. } => {
+          if path.as_ref().is_some_and(|path| path != &active.path) { return true; }
+          active.in_progress = false;
+          active.result = Some(if success {
+            fs::read(&active.path).map_err(|e| e.to_string()).and_then(|bytes| {
+              if bytes.len() <= 50 * 1024 * 1024 && bytes.starts_with(b"%PDF-") { Ok(bytes) }
+              else { Err("Browser download is not a valid PDF or exceeds 50 MiB".into()) }
+            })
+          } else { Err("Browser download failed".into()) });
+          let _ = fs::remove_file(&active.path);
+          true
+        }
+        _ => true,
+      }
+    }).build().map_err(|e| ToolError(e.to_string()))?;
+  let handle = window.clone();
+  window.on_window_event(move |event| {
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+      api.prevent_close();
+      let _ = handle.hide();
+      LOGIN_CLOSED.notify_one();
+    }
+  });
+  Ok(window)
+}
+
+/// Shows the paper page so the user can log in. Closing the window hides it
+/// and lets the caller retry the download with the browser's new session.
+async fn institution_login(turn: &Arc<Turn>) -> Result<(), ToolError> {
+  let window = paper_browser().await?;
+  // Discard a close permit left over from a previously interrupted task.
+  use futures_util::FutureExt;
+  while LOGIN_CLOSED.notified().now_or_never().is_some() {}
+  let notified = LOGIN_CLOSED.notified();
+  tokio::pin!(notified);
+  notified.as_mut().enable();
+  window.show().map_err(|e| ToolError(e.to_string()))?;
+  let _ = window.set_focus();
+  let hidden = window.clone();
+  tokio::select! {
+    biased;
+    _ = turn.stopped() => { let _ = hidden.hide(); Err(ToolError(STOPPED.into())) },
+    _ = notified => Ok(()),
+  }
+}
+
+async fn official_pdf(detail: &LiteratureRecord, turn: &Arc<Turn>) -> Result<(Vec<u8>, String, Value), ToolError> {
+  if let Some(pdf_url) = &detail.pdf_url {
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(90)).build()
+      .map_err(|e| ToolError(e.to_string()))?;
+    let response = tokio::select! {
+      biased;
+      _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
+      response = client.get(pdf_url).header("User-Agent", "ResearchGO/0.1").send() =>
+        response.map_err(|e| ToolError(format!("PDF request failed: {e}")))?,
+    };
+    if response.status().is_success() {
+      let bytes = response.bytes().await.map_err(|e| ToolError(format!("PDF response failed: {e}")))?.to_vec();
+      if bytes.len() <= 50 * 1024 * 1024 && bytes.starts_with(b"%PDF-") {
+        return Ok((bytes, pdf_url.clone(), json!({"doi": detail.doi})));
+      }
+    }
+    return Err(ToolError("OpenAlex PDF URL did not return a valid PDF".into()));
+  }
+
+  let _guard = tokio::select! {
+    biased;
+    _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
+    guard = LOGIN_LOCK.lock() => guard,
+  };
+  let window = paper_browser().await?;
+  use tauri::Manager;
+  let path = window.app_handle().path().app_cache_dir().map_err(|e| ToolError(e.to_string()))?
+    .join(format!("paper-{}.part", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+  fs::create_dir_all(path.parent().unwrap()).map_err(|e| ToolError(e.to_string()))?;
+  *BROWSER_DOWNLOAD.lock().unwrap() = Some(BrowserDownload { path: path.clone(), result: None, in_progress: false });
+  window.navigate(reqwest::Url::parse(&format!("https://doi.org/{}", detail.doi)).map_err(|e| ToolError(e.to_string()))?)
+    .map_err(|e| ToolError(e.to_string()))?;
+  institution_login(turn).await?;
+
+  // Closing the dialog is the user's final signal. A completed download is
+  // consumed immediately; an active one is allowed to finish. If neither
+  // exists, there is nothing left to wait for and this paper fails now.
+  let has_download = BROWSER_DOWNLOAD.lock().unwrap().as_ref()
+    .is_some_and(|state| state.in_progress || state.result.is_some());
+  if !has_download {
+    let _ = window.hide();
+    let _ = window.eval("window.stop()");
+    *BROWSER_DOWNLOAD.lock().unwrap() = None;
+    let _ = fs::remove_file(path);
+    return Err(ToolError("No browser download was started".into()));
+  }
+
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+  let result = loop {
+    if let Some(result) = BROWSER_DOWNLOAD.lock().unwrap().as_mut().and_then(|state| state.result.take()) {
+      break result.map(|bytes| (bytes, format!("https://doi.org/{}", detail.doi), json!({"doi": detail.doi})));
+    }
+    if tokio::time::Instant::now() >= deadline { break Err("Browser download did not finish".into()); }
+    tokio::select! {
+      biased;
+      _ = turn.stopped() => break Err(STOPPED.into()),
+      _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+    }
+  };
+  let _ = window.hide();
+  let _ = window.eval("window.stop()");
+  *BROWSER_DOWNLOAD.lock().unwrap() = None;
+  let _ = fs::remove_file(path);
+  result.map_err(ToolError)
+}
+/// The reference library is one Markdown index and the PDFs themselves.
+static REFERENCE_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn update_reference_index(reference_dir: &Path, detail: &LiteratureRecord, page_url: &str, pdf_path: &Path) -> Result<PathBuf, ToolError> {
+  let _guard = REFERENCE_INDEX_LOCK.lock().unwrap();
+  let markdown_path = reference_dir.join("index.md");
+  let mut markdown = if markdown_path.exists() { fs::read_to_string(&markdown_path).map_err(|_| ToolError("Cannot read reference index".into()))? } else { "# References\n\n".into() };
+  let marker = format!("<!-- DOI:{} -->", detail.doi);
+  let entry = reference_entry(detail, page_url, pdf_path);
+  if let Some(start) = markdown.find(&marker) {
+    let end = markdown[start..].find("\n<!-- DOI:").map(|offset| start + offset).unwrap_or(markdown.len());
+    markdown.replace_range(start..end, &entry);
+  } else { markdown.push_str(&entry); }
+  let temp = markdown_path.with_extension("md.part");
+  fs::write(&temp, markdown)
+    .and_then(|_| fs::rename(&temp, &markdown_path)).map_err(|_| ToolError("Cannot save reference Markdown index".into()))?;
+  Ok(markdown_path)
+}
+
+fn reference_entry(detail: &LiteratureRecord, _page_url: &str, pdf_path: &Path) -> String {
+  format!("<!-- DOI:{} -->\n## {}\n\n- DOI: `{}`\n- Bib: `{}`\n- 摘要: {}\n- 引用数: {}\n- PDF: `{}`\n\n",
+    detail.doi, detail.doi, detail.doi, detail.bib, detail.abstract_text,
+    detail.cited_by_count, pdf_path.display())
 }
 
 fn emit_result_progress(progress: &(dyn Fn(Value) + Sync), index: usize, paper: &Value) {
   progress(json!({ "stage": "result", "index": index, "paper": {
     "title": paper["title"],
     "url": paper["url"],
+      "pdf_path": paper["pdf_path"],
+      "markdown_path": paper["markdown_path"],
     "source": paper["source"],
     "extraction_note": paper["extraction_note"],
   }}));
-}
-
-async fn fetch_url(client: &reqwest::Client, url: &str, turn: &Arc<Turn>) -> Result<reqwest::Response, ToolError> {
-  tokio::select! {
-    biased;
-    _ = turn.stopped() => Err(ToolError(STOPPED.into())),
-    result = client.get(url).header("User-Agent", "ResearchGO/0.1").send() => result.map_err(|e| ToolError(e.to_string())),
-  }
-}
-
-fn literature_network_error(operation: &str, url: &str, error: reqwest::Error) -> ToolError {
-  let error = error.without_url();
-  ToolError(format!("{operation} failed for {url}: {error} (debug: {error:?})"))
-}
-
-fn scholar_pdf_url(result: &Value) -> Option<&str> {
-  result["resources"].as_array()?.iter()
-    .filter(|resource| resource["file_format"].as_str().is_some_and(|format| format.eq_ignore_ascii_case("PDF")))
-    .find_map(|resource| resource["link"].as_str())
-}
-
-fn scholar_year(result: &Value) -> Option<u16> {
-  result["publication_info"]["summary"].as_str()?
-    .split(|c: char| !c.is_ascii_digit())
-    .filter(|part| part.len() == 4)
-    .filter_map(|part| part.parse::<u16>().ok())
-    .find(|year| (1500..=2100).contains(year))
-}
-
-fn reference_slug(title: &str) -> String {
-  let slug: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-  let slug = slug.split('-').filter(|part| !part.is_empty()).take(8).collect::<Vec<_>>().join("-");
-  if slug.is_empty() { "paper".into() } else { slug }
-}
-
-fn html_to_text(html: &str) -> String {
-  let mut text = String::with_capacity(html.len());
-  let mut in_tag = false;
-  for c in html.chars() {
-    match c { '<' => in_tag = true, '>' => { in_tag = false; text.push('\n'); }, _ if !in_tag => text.push(c), _ => {} }
-  }
-  text.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-    .lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join("\n")
-}
-
-fn extract_chapters(text: &str) -> Vec<Value> {
-  text.lines().enumerate().filter_map(|(line, value)| {
-    let value = value.trim();
-    let is_heading = value.len() <= 120 && !value.ends_with('.') && (value.chars().all(|c| !c.is_lowercase()) || value.starts_with(|c: char| c.is_ascii_digit()));
-    is_heading.then(|| json!({ "title": value, "line": line + 1 }))
-  }).take(100).collect()
-}
-
-fn extract_evidence(text: &str, chapters: &[Value]) -> Vec<Value> {
-  let mut evidence = Vec::new();
-  for (line, value) in text.lines().enumerate() {
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("we find") || lower.contains("our results") || lower.contains("outperform") || lower.contains("significant") || lower.contains("conclude") {
-      let chapter = chapters.iter().rev().find(|item| item["line"].as_u64().unwrap_or(0) <= (line + 1) as u64).and_then(|item| item["title"].as_str()).unwrap_or("");
-      evidence.push(json!({ "line": line + 1, "chapter": chapter, "text": value.trim() }));
-    }
-  }
-  evidence.into_iter().take(100).collect()
 }
 
 /// Absolute paths can address any directory. Relative paths stay within `root`.
@@ -733,7 +835,7 @@ fn read_tool_typed(root: &Path, args: &ReadArgs) -> Result<ToolOutput, ToolError
   }
   if truncated {
     out.push_str(&format!(
-      "\n[truncated at {MAX_READ_LINES} lines — use grep to find later parts]\n"
+      "\n[truncated at {MAX_READ_LINES} lines --use grep to find later parts]\n"
     ));
   }
 
@@ -849,14 +951,14 @@ fn shell() -> &'static str {
 /// thing missing. A model asked to run a command has exactly one strong prior:
 /// `bash` on Linux, learned from a training set that is overwhelmingly
 /// POSIX. Nothing in the prompt contradicts it, so `ls -la`, `cat`, `rm -rf`,
-/// `$HOME` and `&&` go out unchanged — and on `cmd.exe` every one of them fails,
+/// `$HOME` and `&&` go out unchanged --and on `cmd.exe` every one of them fails,
 /// with an error that names the command rather than the shell, so the model has
 /// no way to work out that the whole batch was written for the wrong machine and
 /// retries the same syntax until the turn is over.
 ///
 /// So the dialect is stated where the model is already looking when it decides
 /// what to type, in the one tool it is about to call. The substitutions are
-/// named as pairs (`ls` → `dir`) rather than described, because a model copying
+/// named as pairs (`ls` �?`dir`) rather than described, because a model copying
 /// a table acts on it and a model reading prose has to infer it.
 fn dialect() -> &'static str {
   if cfg!(windows) {
@@ -867,13 +969,13 @@ fn dialect() -> &'static str {
      $VAR. Quote paths containing spaces with double quotes. Chain with && or \
      &, redirect stdout and stderr with > and 2>, and branch on failure with \
      `if errorlevel 1`. There is no touch, no which, no heredoc, and no shell \
-     glob — dir /s and dir /b are the closest. Commands that ship their own \
+     glob --dir /s and dir /b are the closest. Commands that ship their own \
      executable (npm, cargo, git, python, node) are called by name and behave \
      as they do elsewhere."
   } else {
     "The command runs in sh on a POSIX system. Use POSIX syntax only: && and | \
      and > and 2> all work, but [[ ]], arrays, local, source, process \
-     substitution <(...) and $(< file) do not — use [ ], plain variables, \
+     substitution <(...) and $(< file) do not --use [ ], plain variables, \
      `. file` and $(cat file). Commands that ship their own executable (npm, \
      cargo, git, python) are called by name and behave as they do elsewhere."
   }
@@ -890,8 +992,8 @@ async fn bash_tool_typed(
   }
 
   // On Windows the shell is spawned with `/C`, and on Unix with `-c`; the same
-  // string means the same thing to either. Anything more elaborate — a pipeline
-  // built in Rust — would be a second shell nobody debugged.
+  // string means the same thing to either. Anything more elaborate --a pipeline
+  // built in Rust --would be a second shell nobody debugged.
   let mut child = Command::new(shell());
   if cfg!(windows) {
     child.arg("/C").arg(&command);
@@ -901,7 +1003,7 @@ async fn bash_tool_typed(
 
   // `tokio::process`, not `std::process`: the turn holds the transcript lock
   // across this await, and a blocking `output()` there would pin a blocking
-  // thread for as long as the command runs — and forever, if the command does.
+  // thread for as long as the command runs --and forever, if the command does.
   //
   // `kill_on_drop` so a stop takes the process with it: a build left running
   // after the turn was stopped keeps a file handle, burns a core, and can
@@ -952,8 +1054,8 @@ async fn bash_tool_typed(
 
   // A non-zero exit is reported to the model as output, because that is the
   // only channel it reads. Without the line a command that printed a
-  // reassuring log and then died — `npm test` with two failing cases, a
-  // `git diff --quiet` finding changes — looks byte-identical to one that
+  // reassuring log and then died --`npm test` with two failing cases, a
+  // `git diff --quiet` finding changes --looks byte-identical to one that
   // worked, and the model moves on believing a failing build passed.
   if !ok {
     text = if text.is_empty() {
@@ -1151,7 +1253,7 @@ impl Sink for CollectSink<'_> {
     let text = String::from_utf8_lossy(mat.bytes());
     let text = text.trim_end_matches(['\r', '\n']);
     let mut line: String = text.chars().take(200).collect();
-    if text.chars().count() > 200 { *self.shortened = true; line.push('…'); }
+    if text.chars().count() > 200 { *self.shortened = true; line.push_str("--"); }
     self.hits.push((self.path.to_string(), mat.line_number().unwrap_or(0), line));
     Ok(self.hits.len() < GREP_MAX_HITS)
   }
@@ -1174,27 +1276,45 @@ mod tests {
   }
 
   #[test]
-  fn scholar_resources_select_pdf_and_publication_year() {
-    let result = json!({
-      "resources": [
-        { "file_format": "HTML", "link": "https://example.org/article" },
-        { "file_format": "PDF", "link": "https://example.org/paper.pdf" }
-      ],
-      "publication_info": { "summary": "A Author - Journal of Science, 2024 - example.org" }
+  fn openalex_work_uses_doi_for_dedup_and_keeps_download_metadata() {
+    let work = json!({
+      "type": "article", "doi": "https://doi.org/10.1234/TEST", "title": "Paper", "publication_year": 2024,
+      "abstract_inverted_index": {"result": [1], "Our": [0]},
+      "primary_location": {"source": {"display_name": "Journal"}, "landing_page_url": "https://publisher.example/paper", "pdf_url": "https://files.example/paper.pdf"}
     });
-    assert_eq!(scholar_pdf_url(&result), Some("https://example.org/paper.pdf"));
-    assert_eq!(scholar_year(&result), Some(2024));
-    assert_eq!(scholar_pdf_url(&json!({})), None);
-    assert_eq!(scholar_year(&json!({"publication_info": {"summary": "Unknown year"}})), None);
+    let paper = openalex_record(&work).unwrap();
+    assert_eq!(paper.doi, "10.1234/test");
+    assert!(openalex_record(&json!({"doi": null})).is_none());
+    // Local conversion does not reject a record based on version, venue, or host.
+    assert!(openalex_record(&json!({"doi": "10.1234/test", "type": "preprint"})).is_some());
   }
 
-  #[tokio::test]
-  async fn literature_requires_key_before_creating_files() {
+  #[test]
+  fn reference_library_is_one_markdown_plus_pdfs() {
     let fixture = Fixture::new();
-    let args = parse_args::<ResearchLiteratureArgs>("research_literature", &json!({"query": "machine learning"})).unwrap();
-    let error = research_literature_with_key(&fixture.0, &args, &Turn::detached(), "").await.err().expect("missing key must fail");
-    assert!(error.to_string().contains("SerpApi API key is not configured"));
-    assert!(!fixture.0.join("reference").exists());
+    let reference = fixture.0.join("reference");
+    fs::create_dir_all(&reference).unwrap();
+    let detail = LiteratureRecord { doi: "10.1234/example".into(), bib: json!({"title":"Test title","author":"Ada Example"}), abstract_text: "Detailed abstract".into(), cited_by_count: 3, pdf_url: None };
+    let pdf_path = reference.join("0000000000000001.pdf");
+    fs::write(&pdf_path, b"%PDF-test").unwrap();
+    let markdown_path = update_reference_index(&reference, &detail, "https://publisher.example/article", &pdf_path).unwrap();
+    assert_eq!(markdown_path, reference.join("index.md"));
+    let markdown = fs::read_to_string(&markdown_path).unwrap();
+    assert!(markdown.contains("Test title") && markdown.contains("Detailed abstract") && markdown.contains("0000000000000001.pdf"));
+    assert!(!reference.join("papers.json").exists());
+  }
+
+  #[test]
+  fn literature_deduplicates_local_and_batch_dois_before_limiting() {
+    let fixture = Fixture::new();
+    fixture.write("reference/index.md", "# References\n\n- DOI: `10.1234/EXISTING`\n");
+    let existing = local_literature_dois(&fixture.0.join("reference")).unwrap();
+  let record = |doi: &str| LiteratureRecord { doi: doi.into(), bib: Value::Null, abstract_text: String::new(), cited_by_count: 0, pdf_url: None };
+    let selected = select_new_papers(vec![record("10.1234/existing"), record("10.1234/new"), record("10.1234/new"), record("10.1234/other")], existing, 2);
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[1].doi, "10.1234/other");
+    assert!(normalize_doi("10.1234/a b").is_none());
+    assert!(normalize_doi("not a doi").is_none());
   }
 
   #[test]
@@ -1329,7 +1449,7 @@ mod tests {
     let out = grep_tool(&fixture.0, &json!({"pattern":"needle","path":"many.txt"})).unwrap();
     assert_eq!(out.content.lines().filter(|l| l.starts_with("many.txt:")).count(), GREP_MAX_HITS);
     assert!(out.content.contains("truncated"));
-    fixture.write("long.txt", format!("needle{}", "文".repeat(250)));
+    fixture.write("long.txt", format!("needle{}", "x".repeat(250)));
     let out = grep_tool(&fixture.0, &json!({"pattern":"needle","path":"long.txt"})).unwrap();
     assert!(out.content.contains("shortened to 200 characters"));
   }

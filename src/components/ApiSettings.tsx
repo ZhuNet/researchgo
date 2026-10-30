@@ -8,32 +8,34 @@ import { setApiSettingsOpen, toast } from '../store/ui';
 
 /** Fixed, non-LLM service credentials. Kept separate from model endpoints. */
 export function ApiSettings() {
-  const [serpApi, { mutate }] = createResource(agentApi.getSerpApiConfig);
-  const [key, setKey] = createSignal('');
-  const [reveal, setReveal] = createSignal(false);
-  const [busy, setBusy] = createSignal(false);
+  const [openAlex, { mutate: mutateOpenAlex }] = createResource(agentApi.getOpenAlexConfig);
+  const [keys, setKeys] = createSignal<Record<string, string>>({});
+  const [revealed, setRevealed] = createSignal<Record<string, boolean>>({});
+  const [saving, setSaving] = createSignal<Record<string, boolean>>({});
   const [query, setQuery] = createSignal('');
-  const apiEntries = [{ id: 'serpapi', label: 'SerpApi key' }];
+  const apiEntries = [
+    { id: 'openalex', label: 'OpenAlex key', resource: openAlex, mutate: mutateOpenAlex, save: agentApi.setOpenAlexKey },
+  ];
   const filteredEntries = createMemo(() => {
     const q = query().trim().toLowerCase();
     return q ? apiEntries.filter((entry) => entry.label.toLowerCase().includes(q)) : apiEntries;
   });
   const close = () => {
     setApiSettingsOpen(false);
-    setKey('');
-    setReveal(false);
+    setKeys({});
+    setRevealed({});
   };
-  const save = async () => {
-    setBusy(true);
+  const save = async (entry: typeof apiEntries[number]) => {
+    setSaving((previous) => ({ ...previous, [entry.id]: true }));
     try {
-      mutate(await agentApi.setSerpApiKey(key()));
-      setKey('');
-      setReveal(false);
-      toast('ok', 'SerpApi key saved');
+      entry.mutate(await entry.save(keys()[entry.id] ?? ''));
+      setKeys((previous) => ({ ...previous, [entry.id]: '' }));
+      setRevealed((previous) => ({ ...previous, [entry.id]: false }));
+      toast('ok', `${entry.label} saved`);
     } catch (err) {
-      toast('error', 'SerpApi key not saved', String(err));
+      toast('error', `${entry.label} not saved`, String(err));
     } finally {
-      setBusy(false);
+      setSaving((previous) => ({ ...previous, [entry.id]: false }));
     }
   };
   const onKey = (event: KeyboardEvent) => {
@@ -63,14 +65,14 @@ export function ApiSettings() {
             <section class="field">
               <label class="field__label" for={`${entry.id}-key`}>{entry.label}</label>
               <div class="field__row">
-                <input id={`${entry.id}-key`} class="input" type={reveal() ? 'text' : 'password'} placeholder={serpApi()?.keyHint ? `stored · ${serpApi()?.keyHint}` : 'Enter SerpApi key'} value={key()} autocomplete="off" spellcheck={false} onInput={(event) => setKey(event.currentTarget.value)} />
-                <button type="button" class="icon-btn" aria-label={reveal() ? 'Hide' : 'Show'} data-tooltip={reveal() ? 'Hide' : 'Show'} onClick={() => setReveal(!reveal())}><Icon name={reveal() ? 'eyeOff' : 'eye'} size={14} /></button>
-                <button type="button" class="btn btn--solid" disabled={busy() || serpApi.loading || !key().trim()} onClick={save}>{busy() ? 'Saving…' : 'Save'}</button>
+                <input id={`${entry.id}-key`} class="input" type={revealed()[entry.id] ? 'text' : 'password'} placeholder={entry.resource()?.keyHint ? `stored · ${entry.resource()?.keyHint}` : `Enter ${entry.label}`} value={keys()[entry.id] ?? ''} autocomplete="off" spellcheck={false} onInput={(event) => setKeys((previous) => ({ ...previous, [entry.id]: event.currentTarget.value }))} />
+                <button type="button" class="icon-btn" aria-label={revealed()[entry.id] ? 'Hide' : 'Show'} data-tooltip={revealed()[entry.id] ? 'Hide' : 'Show'} onClick={() => setRevealed((previous) => ({ ...previous, [entry.id]: !previous[entry.id] }))}><Icon name={revealed()[entry.id] ? 'eyeOff' : 'eye'} size={14} /></button>
+                <button type="button" class="btn btn--solid" disabled={saving()[entry.id] || entry.resource.loading || !(keys()[entry.id] ?? '').trim()} onClick={() => save(entry)}>{saving()[entry.id] ? 'Saving…' : 'Save'}</button>
               </div>
             </section>
             )} />
           </div>
-          <Show when={serpApi.error}><p class="field__hint" role="alert">Could not load SerpApi settings: {String(serpApi.error)}</p></Show>
+          <Show when={openAlex.error}><p class="field__hint" role="alert">Could not load OpenAlex settings: {String(openAlex.error)}</p></Show>
         </div>
       </div>
     </div>
