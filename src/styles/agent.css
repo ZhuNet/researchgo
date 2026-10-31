@@ -840,6 +840,13 @@
   overflow-wrap: anywhere;
 }
 
+.research-workflow__parameters {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
 .patch__head {
   display: flex;
   align-items: center;

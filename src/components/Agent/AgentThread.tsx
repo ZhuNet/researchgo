@@ -370,6 +370,7 @@ function ToolCard(props: {
 
 function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary: string; input: string; output: string; progress?: import('../../lib/literature').LiteratureProgress }) {
   const failed = () => props.status === 'error';
+  const stopped = () => props.summary === 'stopped' || /^(?:Error:\s*)?stopped$/i.test(props.output.trim());
   const finalPapers = (): import('../../lib/literature').LiteraturePaper[] | undefined => {
     try { const result = JSON.parse(props.output); return Array.isArray(result.papers) ? result.papers : undefined; } catch { return undefined; }
   };
@@ -397,9 +398,9 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
         <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching OpenAlex' : 'search not completed'}</span>
       </div>
       <Show when={props.input}>
-        <pre class="research-workflow__detail">{props.input}</pre>
+        <pre class="research-workflow__detail research-workflow__parameters">{props.input}</pre>
       </Show>
-      <Show when={failed() && props.output && !finalPapers()}>
+      <Show when={failed() && !stopped() && !searched() && props.output && !finalPapers()}>
         <pre class="research-workflow__detail">{props.output}</pre>
       </Show>
       <div class="research-workflow__step">
@@ -411,6 +412,9 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
         <span class="research-workflow__name">download_papers</span>
         <span class="research-workflow__summary truncate">{step2()}</span>
       </div>
+      <Show when={failed() && !stopped() && searched() && props.output && !finalPapers()}>
+        <pre class="research-workflow__detail">{props.output}</pre>
+      </Show>
       <Index each={papers()}>{(paper, index) => (
         <div class="research-workflow__paper">
           <div class="research-workflow__step">
