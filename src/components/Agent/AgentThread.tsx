@@ -375,10 +375,15 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
   };
   const searched = () => !!props.progress || !!finalPapers();
   const papers = () => finalPapers()?.map((paper) => ({ title: paper.title, result: paper })) ?? props.progress?.papers ?? [];
+  const total = () => props.progress?.total ?? papers().length;
   const completed = () => papers().filter((paper) => paper.result).length;
-  const retrieved = () => {
-    const match = props.summary.match(/(\d+) source files unavailable/);
-    return match ? `papers processed; ${match[1]} sources unavailable` : props.summary || 'paper retrieval complete';
+  const downloaded = () => papers().filter((paper) => paper.result && paper.result.source.status !== 'unavailable').length;
+  const failedPapers = () => papers().filter((paper) => paper.result && paper.result.source.status === 'unavailable').length;
+  const step2 = () => {
+    if (props.status === 'running') return searched() ? `${completed()}/${total()} papers processed` : 'waiting for search results';
+    if (failed()) return 'not completed';
+    const failedN = failedPapers();
+    return failedN > 0 ? `${downloaded()} of ${total()} papers downloaded; ${failedN} failed` : `${downloaded()} of ${total()} papers downloaded`;
   };
   return (
     <div class="research-workflow">
@@ -389,7 +394,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
           </Show>
         </span>
         <span class="research-workflow__name">search_papers</span>
-        <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching Google Scholar' : 'search not completed'}</span>
+        <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching OpenAlex' : 'search not completed'}</span>
       </div>
       <Show when={props.input}>
         <pre class="research-workflow__detail">{props.input}</pre>
@@ -403,8 +408,8 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
             <Show when={props.status === 'running'} fallback={<Icon name={failed() ? 'x' : 'check'} size={11} stroke={2} />}><span class="spinner" /></Show>
           </Show>
         </span>
-        <span class="research-workflow__name">get_paper</span>
-        <span class="research-workflow__summary truncate">{props.status === 'running' ? searched() ? `${completed()}/${props.progress?.total ?? 0} papers processed` : 'waiting for search results' : failed() ? 'not completed' : retrieved()}</span>
+        <span class="research-workflow__name">download_papers</span>
+        <span class="research-workflow__summary truncate">{step2()}</span>
       </div>
       <Index each={papers()}>{(paper, index) => (
         <div class="research-workflow__paper">
@@ -417,10 +422,14 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
             <span>{index + 1}. {paper().title}</span>
           </div>
           <div class="research-workflow__detail">
-            <Show when={paper().result} fallback={props.status === 'running' ? 'Fetching paper…' : 'Not completed'}>
-              <div>{paper().result?.source.status === 'unavailable' ? 'Source unavailable' : `${paper().result?.source.status.toUpperCase()} saved`}</div>
+            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading from Sci-Hub…' : 'Not downloaded'}>
+              <Show when={paper().result?.source.status === 'unavailable'}>
+                <div class="research-workflow__error">Download failed: {paper().result?.extraction_note ?? 'unknown reason'}</div>
+              </Show>
+              <Show when={paper().result?.source.status !== 'unavailable'}>
+                <div>{paper().result?.source.status.toUpperCase()} saved</div>
+              </Show>
               <Show when={paper().result?.source.path}><div>{paper().result?.source.path}</div></Show>
-              <Show when={paper().result?.extraction_note}><div>{paper().result?.extraction_note}</div></Show>
             </Show>
           </div>
         </div>

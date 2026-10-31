@@ -825,6 +825,7 @@
 
 .research-workflow__name { color: var(--tx-1); font-family: var(--font-mono); }
 .research-workflow__summary { min-width: 0; color: var(--tx-4); }
+.research-workflow__error { color: var(--err); }
 .research-workflow__detail {
   max-height: 240px;
   overflow: auto;

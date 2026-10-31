@@ -75,11 +75,27 @@ const MAX_READ_LINES: usize = 2000;
 /// runaway process is interrupted by something the user can see.
 const BASH_TIMEOUT_SECS: u64 = 120;
 const BASH_MAX_OUTPUT: usize = 60_000;
-const LITERATURE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-const LITERATURE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// Bounds paper processing; the shared browser serializes page navigation and
-/// downloads so manual interaction cannot be interrupted by another paper.
-const LITERATURE_CONCURRENCY: usize = 6;
+/// The single longest wait for any network step (an OpenAlex search, a Sci-Hub
+/// page, the PDF itself). It is a safety net against a very slow network, not a
+/// substitute for handling errors: HTTP 4xx/5xx, parse failures and invalid
+/// PDFs are real errors and are reported as such, never swallowed by a timeout.
+const LITERATURE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Bounds paper downloads across the batch. One paper's pipeline (download,
+/// metadata, write PDF, write index) stays serial and atomic, while different
+/// papers run in parallel so a slow Sci-Hub response never stalls the batch.
+const LITERATURE_CONCURRENCY: usize = 4;
+/// Top-level publishers that qualify a journal article as high quality. The
+/// filter uses `host_organization_lineage` so every imprint and sub-brand under
+/// a publisher is matched. Conference papers are deliberately NOT restricted by
+/// publisher: the leading CS/ML venues are run by societies, universities and
+/// independent bodies (NeurIPS, ICML, ICLR, AAAI, ACL/EMNLP...) rather than by
+/// commercial publishers, so restricting them would drop the papers the user
+/// actually wants.
+const LITERATURE_PUBLISHERS: &str = "P4310319965|P4310320990|P4310320595|P4310320449|P4310320017|P4310319808|P4310319798|P4310311648|P4310311721|P4310313990|P4310319811|P4310320083|P4310320061|P4310320261|P4310320006|P4310320556|P4310318547|P4310319945";
+/// Only the fields the reference library needs, to keep the search payload and
+/// the transfer small. `relevance_score` is fetched so the two search queries
+/// (journal articles and conference papers) can be merged by relevance.
+const OPENALEX_SELECT: &str = "id,doi,display_name,publication_year,type,authorships,primary_location,locations,biblio,cited_by_count,abstract_inverted_index,relevance_score";
 /// Bounds that keep `grep` an answer rather than a sweep of the whole disk.
 const GREP_MAX_FILES: usize = 20_000;
 const GREP_MAX_HITS: usize = 300;
@@ -394,29 +410,33 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   if let (Some(from), Some(to)) = (args.year_from, args.year_to) {
     if from > to { return Err(ToolError("year_from must not be after year_to".into())); }
   }
+  // One client, one timeout. The single longest wait is a safety net against a
+  // very slow network; errors (HTTP status, parse failure, bad PDF) are errors.
   let client = reqwest::Client::builder()
-    .connect_timeout(LITERATURE_CONNECT_TIMEOUT)
-    .read_timeout(LITERATURE_READ_TIMEOUT)
-    .timeout(std::time::Duration::from_secs(90))
+    .timeout(LITERATURE_MAX_WAIT)
     .build()
     .map_err(|e| ToolError(format!("cannot build literature HTTP client: {e}")))?;
   let reference_dir = root.join("reference");
   let existing = local_literature_dois(&reference_dir)?;
+  // A search failure or a stop surfaces here as an error: the search step shows
+  // a red cross and the reason, and nothing is downloaded.
   let results = search_openalex(&client, args, openalex_key, turn).await?;
   let results = select_new_papers(results, existing, args.max_papers);
   progress(json!({ "stage": "retrieving", "total": results.len() }));
   if !results.is_empty() { fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?; }
 
-  // Queue paper processing with a bound; the browser lock protects navigation
-  // and downloads while the surrounding result processing remains unchanged.
+  // Papers download in parallel (bounded); each paper's own pipeline stays
+  // serial and atomic. A stop aborts the batch; a per-paper failure only marks
+  // that paper and the others continue.
   use futures_util::stream::{self, StreamExt};
   let work: Vec<(usize, LiteratureRecord)> = results.into_iter().enumerate().collect();
   let tasks = stream::iter(work.into_iter().map(|(index, detail)| {
     let reference_dir = &reference_dir;
+    let client = client.clone();
     let turn = turn.clone();
     async move {
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
-      let paper = process_one_paper(reference_dir, &turn, index, &detail, progress).await?;
+      let paper = process_one_paper(reference_dir, &client, &turn, index, &detail, progress).await?;
       let is_failure = paper["source"]["status"] == "unavailable";
       Ok::<(usize, Value, bool), ToolError>((index, paper, is_failure))
     }
@@ -428,9 +448,10 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   let paper_failures = done.iter().filter(|(_, _, f)| *f).count();
   let papers: Vec<Value> = done.into_iter().map(|(_, p, _)| p).collect();
   let count = papers.len();
+  let downloaded = count - paper_failures;
   Ok(ToolOutput {
     content: serde_json::to_string_pretty(&json!({ "query": query, "papers": papers })).map_err(|e| ToolError(format!("cannot encode research result: {e}")))?,
-    summary: format!("{count} papers found; {paper_failures} source files unavailable"),
+    summary: format!("{downloaded} of {count} papers downloaded"),
     ok: count == 0 || paper_failures < count,
     patch: None,
   })
@@ -439,10 +460,11 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
 #[derive(Clone, Debug, serde::Serialize, Deserialize)]
 struct LiteratureRecord {
   doi: String,
-  bib: Value,
+  title: String,
+  /// BibTeX citation text, built from the work's structured metadata.
+  bib: String,
   abstract_text: String,
   cited_by_count: u64,
-  pdf_url: Option<String>,
 }
 
 fn normalize_doi(raw: &str) -> Option<String> {
@@ -458,23 +480,133 @@ fn normalize_doi(raw: &str) -> Option<String> {
 }
 
 fn openalex_record(work: &Value) -> Option<LiteratureRecord> {
+  // Published journal articles and conference papers enter the library. The
+  // search queries ask OpenAlex for the same set, so the conversion and the
+  // search cannot disagree about what a literature record is -- and a unit
+  // test of this function asserts the same boundary the search enforces. (The
+  // search additionally restricts journal articles to the publisher allowlist;
+  // the conversion itself only needs to agree on the work type.)
+  if !matches!(work["type"].as_str(), Some("article" | "proceedings-article" | "conference-paper")) {
+    return None;
+  }
   let doi = normalize_doi(work["doi"].as_str()?)?;
+  let title = work["display_name"]
+    .as_str()
+    .or_else(|| work["title"].as_str())
+    .unwrap_or("untitled paper")
+    .to_string();
   let abstract_text = work["abstract_inverted_index"].as_object().map(|index| {
     let mut words: Vec<(usize, &str)> = index.iter().flat_map(|(word, positions)| positions.as_array().into_iter().flatten()
       .filter_map(|position| position.as_u64().map(|position| (position as usize, word.as_str())))).collect();
     words.sort_by_key(|(position, _)| *position);
     words.into_iter().map(|(_, word)| word).collect::<Vec<_>>().join(" ")
   }).unwrap_or_default();
-  let pdf_url = std::iter::once(work["best_oa_location"]["pdf_url"].as_str())
-    .chain(work["locations"].as_array().into_iter().flatten().map(|location| location["pdf_url"].as_str()))
-    .flatten().find(|url| !url.trim().is_empty()).map(str::to_string);
+  let bib = bibtex_entry(work, &doi, &title);
   Some(LiteratureRecord {
     doi,
-    bib: work["biblio"].clone(),
+    title,
+    bib,
     abstract_text,
     cited_by_count: work["cited_by_count"].as_u64().unwrap_or(0),
-    pdf_url,
   })
+}
+
+/// A BibTeX citation built from the work's structured metadata.
+///
+/// OpenAlex returns no ready-made citation string, so the reference library
+/// builds one from the fields it does return: title, authors, year, venue,
+/// volume and pages. That is the citation text the model can paste straight
+/// into a `.bib` file when it writes a paper from the library.
+fn bibtex_entry(work: &Value, doi: &str, title: &str) -> String {
+  let authors: Vec<String> = work["authorships"]
+    .as_array()
+    .into_iter()
+    .flatten()
+    .filter_map(|author| {
+      author["author"]["display_name"]
+        .as_str()
+        .or_else(|| author["raw_author_name"].as_str())
+        .map(str::to_string)
+    })
+    .collect();
+  let year = work["publication_year"].as_u64().unwrap_or(0);
+  // The venue lives on the primary location, or on whichever location has one;
+  // many works expose the source only on a non-primary location.
+  let venue = std::iter::once(work["primary_location"]["source"]["display_name"].as_str())
+    .chain(
+      work["locations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|location| location["source"]["display_name"].as_str()),
+    )
+    .flatten()
+    .find(|name| !name.trim().is_empty())
+    .unwrap_or("")
+    .to_string();
+  let volume = work["biblio"]["volume"].as_str().unwrap_or("");
+  let pages = {
+    let first = work["biblio"]["first_page"].as_str().unwrap_or("");
+    let last = work["biblio"]["last_page"].as_str().unwrap_or("");
+    if !first.is_empty() && !last.is_empty() && first != last {
+      format!("{first}--{last}")
+    } else {
+      first.to_string()
+    }
+  };
+  // A stable, human-typed key: first author's surname + year + first title word.
+  let surname = authors
+    .first()
+    .and_then(|author| author.split_whitespace().last())
+    .unwrap_or("")
+    .to_lowercase();
+  let headword = title.split_whitespace().next().unwrap_or("").to_lowercase();
+  let key: String = format!("{surname}{year}{headword}")
+    .chars()
+    .filter(|c| c.is_ascii_alphanumeric())
+    .collect();
+  let key = if key.is_empty() { format!("ref{year}") } else { key };
+  let conference = matches!(work["type"].as_str(), Some("proceedings-article" | "conference-paper"));
+  let entry_type = if conference { "inproceedings" } else { "article" };
+
+  let mut out = String::new();
+  out.push_str(&format!("@{entry_type}{{{key},\n"));
+  out.push_str(&format!("  title = {{{}}},\n", bibtex_escape(title)));
+  out.push_str(&format!(
+    "  author = {{{}}},\n",
+    authors.iter().map(|a| bibtex_escape(a)).collect::<Vec<_>>().join(" and ")
+  ));
+  let venue_field = if conference { "booktitle" } else { "journal" };
+  if !venue.is_empty() {
+    out.push_str(&format!("  {venue_field} = {{{}}},\n", bibtex_escape(&venue)));
+  }
+  if year > 0 {
+    out.push_str(&format!("  year = {{{year}}},\n"));
+  }
+  if !volume.is_empty() {
+    out.push_str(&format!("  volume = {{{}}},\n", bibtex_escape(volume)));
+  }
+  if !pages.is_empty() {
+    out.push_str(&format!("  pages = {{{}}},\n", bibtex_escape(&pages)));
+  }
+  out.push_str(&format!("  doi = {{{}}},\n", bibtex_escape(doi)));
+  out.push_str("}\n");
+  out
+}
+
+/// Escapes the characters BibTeX / LaTeX treat specially inside a braced value.
+fn bibtex_escape(value: &str) -> String {
+  let mut out = String::with_capacity(value.len());
+  for ch in value.chars() {
+    match ch {
+      '\\' | '{' | '}' | '%' | '#' | '&' | '_' | '$' => {
+        out.push('\\');
+        out.push(ch);
+      }
+      _ => out.push(ch),
+    }
+  }
+  out
 }
 
 async fn literature_json(client: &reqwest::Client, url: &str, params: &[(String, String)], turn: &Arc<Turn>) -> Result<Value, ToolError> {
@@ -483,22 +615,68 @@ async fn literature_json(client: &reqwest::Client, url: &str, params: &[(String,
     _ = turn.stopped() => Err(ToolError(STOPPED.into())),
     result = async {
       let response = client.get(url).query(params).header("User-Agent", "ResearchGO/0.1").send().await
-        .map_err(|_| ToolError("Literature metadata service request failed".into()))?;
-      if !response.status().is_success() { return Err(ToolError(format!("Literature metadata service returned HTTP {}", response.status()))); }
-      response.json::<Value>().await.map_err(|_| ToolError("Invalid literature metadata response".into()))
+        .map_err(|_| ToolError("OpenAlex search request failed".into()))?;
+      if !response.status().is_success() { return Err(ToolError(format!("OpenAlex returned HTTP {}", response.status()))); }
+      response.json::<Value>().await.map_err(|_| ToolError("Invalid OpenAlex response".into()))
     } => result,
   }
 }
 
 async fn search_openalex(client: &reqwest::Client, args: &ResearchLiteratureArgs, api_key: &str, turn: &Arc<Turn>) -> Result<Vec<LiteratureRecord>, ToolError> {
-  let mut filters = vec!["type:article|proceedings-article".to_string()];
+  // Two queries, merged by relevance. Journal articles must come from the
+  // publisher allowlist (the quality gate); conference papers are unrestricted
+  // because the leading CS/ML venues are not commercial publishers.
+  let journal_filters = journal_filters(args);
+  let conference_filters = conference_filters(args);
+  let (journal, conference) = tokio::try_join!(
+    openalex_query(client, &journal_filters, args, api_key, turn),
+    openalex_query(client, &conference_filters, args, api_key, turn),
+  )?;
+  let mut all: Vec<(LiteratureRecord, f64)> = journal;
+  all.extend(conference);
+  // Relevance-sorted merge: both queries are relevance-ordered, so sorting the
+  // combined list by descending relevance_score keeps the best matches on top.
+  all.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+  Ok(all.into_iter().map(|(record, _)| record).collect())
+}
+
+/// Filter for journal articles: published `article` works from one of the
+/// common publishers. `host_organization_lineage` matches every imprint and
+/// sub-brand under a top-level publisher.
+fn journal_filters(args: &ResearchLiteratureArgs) -> Vec<String> {
+  let mut filters = vec![
+    "type:article".to_string(),
+    format!("primary_location.source.host_organization_lineage:{LITERATURE_PUBLISHERS}"),
+  ];
   if let Some(year) = args.year_from { filters.push(format!("from_publication_date:{year}-01-01")); }
   if let Some(year) = args.year_to { filters.push(format!("to_publication_date:{year}-12-31")); }
-  let mut params = vec![("search".into(), args.query.trim().into()), ("per-page".into(), "100".into()), ("filter".into(), filters.join(","))];
+  filters
+}
+
+/// Filter for conference papers: any published conference proceedings article or
+/// conference paper, regardless of the body that published it. Restricting
+/// conferences by publisher would drop NeurIPS, ICML, ICLR, AAAI, ACL/EMNLP and
+/// the other venues the user actually wants.
+fn conference_filters(args: &ResearchLiteratureArgs) -> Vec<String> {
+  let mut filters = vec!["type:proceedings-article|conference-paper".to_string()];
+  if let Some(year) = args.year_from { filters.push(format!("from_publication_date:{year}-01-01")); }
+  if let Some(year) = args.year_to { filters.push(format!("to_publication_date:{year}-12-31")); }
+  filters
+}
+
+async fn openalex_query(client: &reqwest::Client, filters: &[String], args: &ResearchLiteratureArgs, api_key: &str, turn: &Arc<Turn>) -> Result<Vec<(LiteratureRecord, f64)>, ToolError> {
+  let mut params = vec![
+    ("search".into(), args.query.trim().into()),
+    ("per-page".into(), "100".into()),
+    ("filter".into(), filters.join(",")),
+    ("select".into(), OPENALEX_SELECT.into()),
+  ];
   if !api_key.is_empty() { params.push(("api_key".into(), api_key.to_string())); }
   let body = literature_json(client, "https://api.openalex.org/works", &params, turn).await?;
   let results = body["results"].as_array().ok_or_else(|| ToolError("Invalid OpenAlex results".into()))?;
-  Ok(results.iter().filter_map(openalex_record).collect())
+  Ok(results.iter().filter_map(|work| {
+    openalex_record(work).map(|record| (record, work["relevance_score"].as_f64().unwrap_or(0.0)))
+  }).collect())
 }
 
 fn local_literature_dois(reference_dir: &Path) -> Result<std::collections::HashSet<String>, ToolError> {
@@ -525,219 +703,221 @@ fn select_new_papers(records: Vec<LiteratureRecord>, mut existing: std::collecti
 
 async fn process_one_paper(
   reference_dir: &Path,
+  client: &reqwest::Client,
   turn: &Arc<Turn>,
   index: usize,
   detail: &LiteratureRecord,
   progress: &(dyn Fn(Value) + Sync),
 ) -> Result<Value, ToolError> {
-  progress(json!({ "stage": "paper", "index": index, "doi": detail.doi }));
+  progress(json!({ "stage": "paper", "index": index, "title": detail.title, "doi": detail.doi }));
   // A DOI-derived name is stable across queries and cannot overwrite a different
   // paper merely because its title/index happens to match.
   use std::hash::{Hash, Hasher};
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
   detail.doi.hash(&mut hasher);
   let identity = format!("{:016x}", hasher.finish());
-  let base = reference_dir.join(identity);
+  let pdf_path = reference_dir.join(format!("{identity}.pdf"));
   let doi_url = format!("https://doi.org/{}", detail.doi);
-  let mut source = json!({ "status": "unavailable", "path": Value::Null, "url": doi_url });
-  let mut note = "Official PDF could not be downloaded".to_string();
-  let downloaded = match official_pdf(detail, turn).await {
-    Ok((bytes, page_url, metadata)) => Some((bytes, page_url, metadata)),
-    Err(_) if turn.is_stopped() => return Err(ToolError(STOPPED.into())),
-    Err(error) => { note = error.0; None },
-  };
-   if let Some((bytes, page_url, _metadata)) = downloaded {
-    let path = base.with_extension("pdf");
-    let temp = base.with_extension("pdf.part");
-    fs::write(&temp, &bytes).and_then(|_| fs::rename(&temp, &path)).map_err(|_| ToolError("Cannot save official PDF".into()))?;
-    source = json!({ "status": "pdf", "path": path, "url": page_url });
-    note.clear();
-     let markdown_path = update_reference_index(reference_dir, detail, &page_url, &path)?;
-     let result = json!({ "doi": detail.doi, "url": page_url, "pdf_path": path, "markdown_path": markdown_path, "source": source, "extraction_note": Value::Null });
-    emit_result_progress(progress, index, &result);
-    return Ok(result);
-  }
-  if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
-   let result = json!({ "doi": detail.doi, "url": doi_url, "source": source, "markdown_path": Value::Null, "extraction_note": note });
-  emit_result_progress(progress, index, &result);
-  Ok(result)
-}
-
-static LOGIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static LOGIN_CLOSED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-static BROWSER_DOWNLOAD: std::sync::Mutex<Option<BrowserDownload>> = std::sync::Mutex::new(None);
-static PAPER_PAGE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-struct BrowserDownload {
-  path: PathBuf,
-  result: Option<Result<Vec<u8>, String>>,
-  in_progress: bool,
-}
-
-async fn paper_browser() -> Result<tauri::WebviewWindow, ToolError> {
-  use tauri::Manager;
-  let app = LITERATURE_APP.get().ok_or_else(|| ToolError("Paper browser is unavailable".into()))?;
-  if let Some(window) = app.get_webview_window("literature-login") {
-    return Ok(window);
-  }
-  let profile = app.path().app_local_data_dir().map_err(|e| ToolError(e.to_string()))?.join("paper-browser");
-  fs::create_dir_all(&profile).map_err(|e| ToolError(e.to_string()))?;
-  let window = tauri::WebviewWindowBuilder::new(app, "literature-login", tauri::WebviewUrl::External(reqwest::Url::parse("about:blank").unwrap()))
-    .title("文献下载 --完成登录、验证或下载后关闭窗口以继续")
-    .inner_size(1100.0, 800.0).visible(false).data_directory(profile)
-    .on_page_load(|_, payload| {
-      PAPER_PAGE_READY.store(matches!(payload.event(), tauri::webview::PageLoadEvent::Finished), std::sync::atomic::Ordering::SeqCst);
-    })
-    .on_new_window(|url, _| {
-      // Publisher PDF buttons often target a new tab. Keep their navigation
-      // inside the same controlled browser session and download handler.
-      if let Some(window) = LITERATURE_APP.get().and_then(|app| app.get_webview_window("literature-login")) {
-        let _ = window.navigate(url);
-      }
-      tauri::webview::NewWindowResponse::Deny
-    })
-    .on_download(|_, event| {
-      let Ok(mut active) = BROWSER_DOWNLOAD.lock() else { return false; };
-      let Some(active) = active.as_mut() else { return false; };
-      match event {
-        tauri::webview::DownloadEvent::Requested { destination, .. } => {
-          *destination = active.path.clone();
-          active.in_progress = true;
-          true
-        }
-        tauri::webview::DownloadEvent::Finished { success, path, .. } => {
-          if path.as_ref().is_some_and(|path| path != &active.path) { return true; }
-          active.in_progress = false;
-          active.result = Some(if success {
-            fs::read(&active.path).map_err(|e| e.to_string()).and_then(|bytes| {
-              if bytes.len() <= 50 * 1024 * 1024 && bytes.starts_with(b"%PDF-") { Ok(bytes) }
-              else { Err("Browser download is not a valid PDF or exceeds 50 MiB".into()) }
-            })
-          } else { Err("Browser download failed".into()) });
-          let _ = fs::remove_file(&active.path);
-          true
-        }
-        _ => true,
-      }
-    }).build().map_err(|e| ToolError(e.to_string()))?;
-  let handle = window.clone();
-  window.on_window_event(move |event| {
-    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-      api.prevent_close();
-      let _ = handle.hide();
-      LOGIN_CLOSED.notify_one();
+  // Step 1: download the PDF through Sci-Hub, held in memory. Nothing is on
+  // disk yet, so a failure here cannot leave a partial file behind.
+  let bytes = match sci_hub_pdf(client, &detail.doi, turn).await {
+    Ok(bytes) => bytes,
+    Err(error) => {
+      if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
+      let result = json!({ "doi": detail.doi, "title": detail.title, "url": doi_url, "pdf_path": Value::Null, "markdown_path": Value::Null, "source": { "status": "unavailable", "url": doi_url, "path": Value::Null }, "extraction_note": error.0 });
+      emit_result_progress(progress, index, &result);
+      return Ok(result);
     }
-  });
-  Ok(window)
+  };
+  // Step 2: build the metadata markdown entry in memory.
+  let entry = reference_entry(detail, &doi_url, &pdf_path);
+  // Steps 3+4: write the PDF and the reference index atomically (all or
+  // nothing) under one lock, so a failed index write rolls the PDF back.
+  match persist_paper(reference_dir, detail, &pdf_path, &bytes, &entry) {
+    Ok(markdown_path) => {
+      let result = json!({ "doi": detail.doi, "title": detail.title, "url": doi_url, "pdf_path": pdf_path, "markdown_path": markdown_path, "source": { "status": "pdf", "url": doi_url, "path": pdf_path }, "extraction_note": Value::Null });
+      emit_result_progress(progress, index, &result);
+      Ok(result)
+    }
+    Err(error) => {
+      let result = json!({ "doi": detail.doi, "title": detail.title, "url": doi_url, "pdf_path": Value::Null, "markdown_path": Value::Null, "source": { "status": "unavailable", "url": doi_url, "path": Value::Null }, "extraction_note": error.0 });
+      emit_result_progress(progress, index, &result);
+      Ok(result)
+    }
+  }
 }
 
-/// Shows the paper page so the user can log in. Closing the window hides it
-/// and lets the caller retry the download with the browser's new session.
-async fn institution_login(turn: &Arc<Turn>) -> Result<(), ToolError> {
-  let window = paper_browser().await?;
-  // Discard a close permit left over from a previously interrupted task.
-  use futures_util::FutureExt;
-  while LOGIN_CLOSED.notified().now_or_never().is_some() {}
-  let notified = LOGIN_CLOSED.notified();
-  tokio::pin!(notified);
-  notified.as_mut().enable();
-  window.show().map_err(|e| ToolError(e.to_string()))?;
-  let _ = window.set_focus();
-  let hidden = window.clone();
+/// Sci-Hub mirrors tried in order. A real error (HTTP status, no parseable PDF
+/// URL, invalid PDF) falls through to the next mirror; a stop aborts at once.
+/// sci-hub.ru serves the current `/storage/...` layout and is reachable; the
+/// classic-layout mirrors (sci-hub.ee/.ren) proxy the PDF from a third-party
+/// host and are kept as fallbacks. `sci-hub.se` no longer resolves and
+/// `sci-hub.st` answers with a DDoS-Guard challenge, so they are not tried.
+const SCI_HUB_MIRRORS: [&str; 3] = ["https://sci-hub.ru", "https://sci-hub.ee", "https://sci-hub.ren"];
+/// Sci-Hub serves a captcha/challenge to non-browser agents, so download
+/// requests use a realistic desktop Chrome User-Agent.
+const SCI_HUB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+/// PDFs larger than this are rejected: Sci-Hub PDFs are small and a bigger body
+/// is almost certainly an HTML error page or a redirected landing page.
+const SCI_HUB_MAX_PDF: usize = 50 * 1024 * 1024;
+
+/// GETs `url` and returns the body bytes, aborting the moment the turn stops.
+/// The client's single timeout is the whole "longest wait" safety net; a
+/// non-success HTTP status is a real error and is reported, never timed out.
+async fn http_bytes(client: &reqwest::Client, url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, ToolError> {
   tokio::select! {
     biased;
-    _ = turn.stopped() => { let _ = hidden.hide(); Err(ToolError(STOPPED.into())) },
-    _ = notified => Ok(()),
+    _ = turn.stopped() => Err(ToolError(STOPPED.into())),
+    result = async {
+      let response = client.get(url)
+        .header("User-Agent", SCI_HUB_UA)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        // This client is built without a decompression feature, and Sci-Hub's
+        // CDN gzip-encodes the PDF when a client advertises gzip. Force identity
+        // so we receive the raw `%PDF-` bytes instead of a gzip wrapper we could
+        // not read (curl confirms identity is honoured and returns the PDF).
+        .header("Accept-Encoding", "identity")
+        .send().await
+        .map_err(|e| ToolError(format!("request failed: {e}")))?;
+      if !response.status().is_success() { return Err(ToolError(format!("HTTP {}", response.status()))); }
+      response.bytes().await.map(|b| b.to_vec()).map_err(|_| ToolError("response read failed".into()))
+    } => result,
   }
 }
 
-async fn official_pdf(detail: &LiteratureRecord, turn: &Arc<Turn>) -> Result<(Vec<u8>, String, Value), ToolError> {
-  if let Some(pdf_url) = &detail.pdf_url {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(90)).build()
-      .map_err(|e| ToolError(e.to_string()))?;
-    let response = tokio::select! {
-      biased;
-      _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
-      response = client.get(pdf_url).header("User-Agent", "ResearchGO/0.1").send() =>
-        response.map_err(|e| ToolError(format!("PDF request failed: {e}")))?,
-    };
-    if response.status().is_success() {
-      let bytes = response.bytes().await.map_err(|e| ToolError(format!("PDF response failed: {e}")))?.to_vec();
-      if bytes.len() <= 50 * 1024 * 1024 && bytes.starts_with(b"%PDF-") {
-        return Ok((bytes, pdf_url.clone(), json!({"doi": detail.doi})));
+/// Downloads a paper's PDF from Sci-Hub by DOI, trying each mirror in order.
+///
+/// This is the download step of one paper's pipeline. The bytes stay in memory
+/// and are only written to disk by the caller after the metadata entry is
+/// built, so a failure here cannot leave a partial file on disk.
+async fn sci_hub_pdf(client: &reqwest::Client, doi: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, ToolError> {
+  let mut last_reason = "no Sci-Hub mirror returned a PDF".to_string();
+  for mirror in SCI_HUB_MIRRORS {
+    match sci_hub_try(client, mirror, doi, turn).await {
+      Ok(bytes) => return Ok(bytes),
+      Err(error) => {
+        if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
+        last_reason = error.0;
       }
     }
-    return Err(ToolError("OpenAlex PDF URL did not return a valid PDF".into()));
   }
-
-  let _guard = tokio::select! {
-    biased;
-    _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
-    guard = LOGIN_LOCK.lock() => guard,
-  };
-  let window = paper_browser().await?;
-  use tauri::Manager;
-  let path = window.app_handle().path().app_cache_dir().map_err(|e| ToolError(e.to_string()))?
-    .join(format!("paper-{}.part", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
-  fs::create_dir_all(path.parent().unwrap()).map_err(|e| ToolError(e.to_string()))?;
-  *BROWSER_DOWNLOAD.lock().unwrap() = Some(BrowserDownload { path: path.clone(), result: None, in_progress: false });
-  window.navigate(reqwest::Url::parse(&format!("https://doi.org/{}", detail.doi)).map_err(|e| ToolError(e.to_string()))?)
-    .map_err(|e| ToolError(e.to_string()))?;
-  institution_login(turn).await?;
-
-  // Closing the dialog is the user's final signal. A completed download is
-  // consumed immediately; an active one is allowed to finish. If neither
-  // exists, there is nothing left to wait for and this paper fails now.
-  let has_download = BROWSER_DOWNLOAD.lock().unwrap().as_ref()
-    .is_some_and(|state| state.in_progress || state.result.is_some());
-  if !has_download {
-    let _ = window.hide();
-    let _ = window.eval("window.stop()");
-    *BROWSER_DOWNLOAD.lock().unwrap() = None;
-    let _ = fs::remove_file(path);
-    return Err(ToolError("No browser download was started".into()));
-  }
-
-  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
-  let result = loop {
-    if let Some(result) = BROWSER_DOWNLOAD.lock().unwrap().as_mut().and_then(|state| state.result.take()) {
-      break result.map(|bytes| (bytes, format!("https://doi.org/{}", detail.doi), json!({"doi": detail.doi})));
-    }
-    if tokio::time::Instant::now() >= deadline { break Err("Browser download did not finish".into()); }
-    tokio::select! {
-      biased;
-      _ = turn.stopped() => break Err(STOPPED.into()),
-      _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
-    }
-  };
-  let _ = window.hide();
-  let _ = window.eval("window.stop()");
-  *BROWSER_DOWNLOAD.lock().unwrap() = None;
-  let _ = fs::remove_file(path);
-  result.map_err(ToolError)
+  Err(ToolError(format!("Sci-Hub: {last_reason}")))
 }
+
+async fn sci_hub_try(client: &reqwest::Client, mirror: &str, doi: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, ToolError> {
+  let bytes = http_bytes(client, &format!("{mirror}/{doi}"), turn).await?;
+  let html = String::from_utf8_lossy(&bytes);
+  let raw = sci_hub_pdf_url(&html)
+    .ok_or_else(|| ToolError(format!("article not found or blocked on {mirror}")))?;
+  let pdf_url = normalize_pdf_url(&raw, mirror)?;
+  let bytes = http_bytes(client, &pdf_url, turn).await?;
+  if !bytes.starts_with(b"%PDF-") || bytes.len() > SCI_HUB_MAX_PDF {
+    return Err(ToolError(format!("{mirror} did not return a valid PDF")));
+  }
+  Ok(bytes)
+}
+
+/// Extracts the PDF URL from a Sci-Hub article page.
+///
+/// Two layouts are in the wild. The current one (sci-hub.ru) carries the PDF in
+/// `meta name="citation_pdf_url"`, an `<object data>` or the `.download` anchor,
+/// as a path like `/storage/<year>/<id>/<hash>/file.pdf`. The classic layout
+/// (sci-hub.ee/.ren) embeds the PDF in an `<iframe src>` on a third-party host
+/// (`https://<host>/pdf/<doi>.pdf`). Both are found by scanning attributes for
+/// a `.pdf` value; the first match wins, so an inline viewer is preferred.
+fn sci_hub_pdf_url(html: &str) -> Option<String> {
+  for attr in ["src=\"", "href=\"", "data=\"", "content=\""] {
+    let mut rest = html;
+    while let Some(start) = rest.find(attr) {
+      let value_start = start + attr.len();
+      let tail = &rest[value_start..];
+      let end = tail.find(['"', '\'']).unwrap_or(tail.len());
+      let value = &tail[..end];
+      if value.contains(".pdf") {
+        return Some(value.to_string());
+      }
+      rest = &tail[end..];
+    }
+  }
+  // The classic "save" link sets `location.href` inside an onclick attribute
+  // with escaped slashes (`https:\/\/host\/pdf\/doi.pdf?download=true`).
+  if let Some(start) = html.find("location.href='") {
+    let tail = &html[start + "location.href='".len()..];
+    let end = tail.find('\'').unwrap_or(tail.len());
+    let value = tail[..end].replace("\\/", "/");
+    if value.contains(".pdf") { return Some(value); }
+  }
+  None
+}
+
+/// Turns the raw link from the page into an absolute URL. sci-hub.ru serves a
+/// relative `/storage/...` path; the classic layout gives an absolute or
+/// protocol-relative URL on a third-party host.
+fn normalize_pdf_url(raw: &str, mirror: &str) -> Result<String, ToolError> {
+  let raw = raw.trim().replace("\\/", "/");
+  let url = if let Some(rest) = raw.strip_prefix("//") {
+    format!("https://{rest}")
+  } else if raw.starts_with('/') {
+    format!("{mirror}{raw}")
+  } else {
+    raw
+  };
+  // A fragment (`#view=FitH`) is never sent over HTTP; drop it for cleanliness.
+  let url = url.split('#').next().unwrap_or(&url).to_string();
+  if !url.contains(".pdf") { return Err(ToolError("Sci-Hub page did not expose a PDF link".into())); }
+  Ok(url)
+}
+
 /// The reference library is one Markdown index and the PDFs themselves.
 static REFERENCE_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn update_reference_index(reference_dir: &Path, detail: &LiteratureRecord, page_url: &str, pdf_path: &Path) -> Result<PathBuf, ToolError> {
+/// Commits one paper's PDF and its metadata entry atomically.
+///
+/// Both the PDF and the whole reference index are first staged to `.part` files
+/// and only then renamed into place, under one lock. If the index cannot be
+/// saved, the freshly written PDF is rolled back, so a paper either lands on
+/// disk whole or not at all.
+fn persist_paper(reference_dir: &Path, detail: &LiteratureRecord, pdf_path: &Path, bytes: &[u8], entry: &str) -> Result<PathBuf, ToolError> {
   let _guard = REFERENCE_INDEX_LOCK.lock().unwrap();
   let markdown_path = reference_dir.join("index.md");
-  let mut markdown = if markdown_path.exists() { fs::read_to_string(&markdown_path).map_err(|_| ToolError("Cannot read reference index".into()))? } else { "# References\n\n".into() };
-  let marker = format!("<!-- DOI:{} -->", detail.doi);
-  let entry = reference_entry(detail, page_url, pdf_path);
-  if let Some(start) = markdown.find(&marker) {
-    let end = markdown[start..].find("\n<!-- DOI:").map(|offset| start + offset).unwrap_or(markdown.len());
-    markdown.replace_range(start..end, &entry);
-  } else { markdown.push_str(&entry); }
-  let temp = markdown_path.with_extension("md.part");
-  fs::write(&temp, markdown)
-    .and_then(|_| fs::rename(&temp, &markdown_path)).map_err(|_| ToolError("Cannot save reference Markdown index".into()))?;
+  let markdown = if markdown_path.exists() {
+    fs::read_to_string(&markdown_path).map_err(|_| ToolError("Cannot read reference index".into()))?
+  } else {
+    "# References\n\n".into()
+  };
+  let markdown = upsert_reference_entry(&markdown, detail, entry);
+  let pdf_temp = pdf_path.with_extension("pdf.part");
+  let md_temp = markdown_path.with_extension("md.part");
+  if let Err(error) = fs::write(&pdf_temp, bytes)
+    .and_then(|_| fs::write(&md_temp, markdown))
+    .and_then(|_| fs::rename(&pdf_temp, pdf_path))
+    .and_then(|_| fs::rename(&md_temp, &markdown_path))
+  {
+    let _ = fs::remove_file(&pdf_temp);
+    let _ = fs::remove_file(&md_temp);
+    let _ = fs::remove_file(pdf_path);
+    return Err(ToolError(format!("Cannot save reference paper: {error}")));
+  }
   Ok(markdown_path)
 }
 
+/// Returns `markdown` with this paper's entry added, or replaced when the paper
+/// (by DOI) is already present. Pure, so it is testable without touching disk.
+fn upsert_reference_entry(markdown: &str, detail: &LiteratureRecord, entry: &str) -> String {
+  let marker = format!("<!-- DOI:{} -->", detail.doi);
+  if let Some(start) = markdown.find(&marker) {
+    let end = markdown[start..].find("\n<!-- DOI:").map(|offset| start + offset).unwrap_or(markdown.len());
+    let mut out = markdown.to_string();
+    out.replace_range(start..end, entry);
+    out
+  } else {
+    format!("{markdown}{entry}")
+  }
+}
+
 fn reference_entry(detail: &LiteratureRecord, _page_url: &str, pdf_path: &Path) -> String {
-  format!("<!-- DOI:{} -->\n## {}\n\n- DOI: `{}`\n- Bib: `{}`\n- 摘要: {}\n- 引用数: {}\n- PDF: `{}`\n\n",
-    detail.doi, detail.doi, detail.doi, detail.bib, detail.abstract_text,
+  format!("<!-- DOI:{} -->\n## {}\n\n- DOI: `{}`\n- BibTeX: ```\n{}```\n- 摘要: {}\n- 引用数: {}\n- PDF: `{}`\n\n",
+    detail.doi, detail.title, detail.doi, detail.bib, detail.abstract_text,
     detail.cited_by_count, pdf_path.display())
 }
 
@@ -1276,17 +1456,66 @@ mod tests {
   }
 
   #[test]
-  fn openalex_work_uses_doi_for_dedup_and_keeps_download_metadata() {
+  fn openalex_work_builds_record_and_enforces_type_boundary() {
     let work = json!({
-      "type": "article", "doi": "https://doi.org/10.1234/TEST", "title": "Paper", "publication_year": 2024,
+      "type": "article", "doi": "https://doi.org/10.1234/TEST", "title": "Paper", "display_name": "Paper",
+      "publication_year": 2024,
       "abstract_inverted_index": {"result": [1], "Our": [0]},
-      "primary_location": {"source": {"display_name": "Journal"}, "landing_page_url": "https://publisher.example/paper", "pdf_url": "https://files.example/paper.pdf"}
+      "authorships": [{"author": {"display_name": "Ada Lovelace"}}],
+      "primary_location": {"source": {"display_name": "Journal of Tests"}},
+      "biblio": {"volume": "2", "issue": "1", "first_page": "10", "last_page": "20"}
     });
     let paper = openalex_record(&work).unwrap();
     assert_eq!(paper.doi, "10.1234/test");
+    assert_eq!(paper.title, "Paper");
+    // The citation is built from the structured metadata, not a page-number blob.
+    assert!(paper.bib.contains("@article{lovelace2024paper"));
+    assert!(paper.bib.contains("author = {Ada Lovelace}"));
+    assert!(paper.bib.contains("journal = {Journal of Tests}"));
+    assert!(paper.bib.contains("pages = {10--20}"));
+    // Conference papers of either OpenAlex type enter the library too.
+    assert!(openalex_record(&json!({"type": "proceedings-article", "doi": "10.1234/conf"})).is_some());
+    let conference = openalex_record(&json!({
+      "type": "conference-paper", "doi": "10.1234/conf2", "title": "A Conf Paper", "display_name": "A Conf Paper",
+      "authorships": [{"author": {"display_name": "Grace Hopper"}}],
+      "primary_location": {"source": {"display_name": "FCRC"}}
+    })).unwrap();
+    assert!(conference.bib.contains("@inproceedings"));
+    assert!(conference.bib.contains("booktitle = {FCRC}"));
     assert!(openalex_record(&json!({"doi": null})).is_none());
-    // Local conversion does not reject a record based on version, venue, or host.
-    assert!(openalex_record(&json!({"doi": "10.1234/test", "type": "preprint"})).is_some());
+    // Only published articles and conference papers enter the library; the
+    // search queries ask OpenAlex for the same set, so a preprint is rejected
+    // here as well rather than admitted by one layer and hidden by the other.
+    assert!(openalex_record(&json!({"doi": "10.1234/test", "type": "preprint"})).is_none());
+    // The search splits the set: journal articles are restricted to the
+    // publisher allowlist, conference papers are not. The record conversion and
+    // the search agree on the type set, so the filters stay coherent.
+    let args = ResearchLiteratureArgs { query: "q".into(), year_from: None, year_to: None, max_papers: 5 };
+    assert!(journal_filters(&args).iter().any(|f| f.starts_with("primary_location.source.host_organization_lineage:")));
+    assert!(conference_filters(&args).iter().any(|f| f == "type:proceedings-article|conference-paper"));
+  }
+
+  #[test]
+  fn sci_hub_pdf_url_extracts_download_link() {
+    // The current sci-hub.ru layout: a relative /storage/ path in a meta tag or
+    // a download anchor.
+    let ru = r#"<meta name="citation_pdf_url" content="/storage/2024/7251/ee253ec27e28ed6b0df7da99c853917f/laemmli1970.pdf"><div class="download"><a href="/storage/2024/7251/ee253ec27e28ed6b0df7da99c853917f/laemmli1970.pdf"></a></div>"#;
+    assert_eq!(sci_hub_pdf_url(ru).as_deref(), Some("/storage/2024/7251/ee253ec27e28ed6b0df7da99c853917f/laemmli1970.pdf"));
+    // The classic layout: an absolute iframe src on a third-party host.
+    let classic = r#"<div id="article"><iframe src="https://sci.bban.top/pdf/10.1038/227680a0.pdf#view=FitH" id="pdf"></iframe></div>"#;
+    assert_eq!(sci_hub_pdf_url(classic).as_deref(), Some("https://sci.bban.top/pdf/10.1038/227680a0.pdf#view=FitH"));
+    // The "save" link sets location.href with escaped slashes.
+    let save = r##"<a href="#" onclick="location.href='https:\/\/sci.bban.top\/pdf\/10.1038\/227680a0.pdf?download=true'">save</a>"##;
+    assert_eq!(sci_hub_pdf_url(save).as_deref(), Some("https://sci.bban.top/pdf/10.1038/227680a0.pdf?download=true"));
+    // A page with no PDF link (article not found, captcha) yields nothing.
+    assert!(sci_hub_pdf_url("<html><body>Article not found</body></html>").is_none());
+    // Normalisation: relative -> mirror origin, protocol-relative -> https,
+    // fragment stripped, escaped slashes unescaped.
+    assert_eq!(normalize_pdf_url("/storage/2024/7251/ee253ec27e28ed6b0df7da99c853917f/laemmli1970.pdf", "https://sci-hub.ru").unwrap(), "https://sci-hub.ru/storage/2024/7251/ee253ec27e28ed6b0df7da99c853917f/laemmli1970.pdf");
+    assert_eq!(normalize_pdf_url("//sci.bban.top/pdf/10.1038/227680a0.pdf", "https://sci-hub.ee").unwrap(), "https://sci.bban.top/pdf/10.1038/227680a0.pdf");
+    assert_eq!(normalize_pdf_url("https://sci.bban.top/pdf/10.1038/227680a0.pdf#view=FitH", "https://sci-hub.ee").unwrap(), "https://sci.bban.top/pdf/10.1038/227680a0.pdf");
+    assert_eq!(normalize_pdf_url(r#"https:\/\/sci.bban.top\/pdf\/10.1038\/227680a0.pdf?download=true"#, "https://sci-hub.ee").unwrap(), "https://sci.bban.top/pdf/10.1038/227680a0.pdf?download=true");
+    assert!(normalize_pdf_url("https://sci-hub.ru/not-a-pdf", "https://sci-hub.ru").is_err());
   }
 
   #[test]
@@ -1294,14 +1523,26 @@ mod tests {
     let fixture = Fixture::new();
     let reference = fixture.0.join("reference");
     fs::create_dir_all(&reference).unwrap();
-    let detail = LiteratureRecord { doi: "10.1234/example".into(), bib: json!({"title":"Test title","author":"Ada Example"}), abstract_text: "Detailed abstract".into(), cited_by_count: 3, pdf_url: None };
+    let detail = LiteratureRecord { doi: "10.1234/example".into(), title: "Test title".into(), bib: "@article{example,\n  title = {Test title},\n}\n".into(), abstract_text: "Detailed abstract".into(), cited_by_count: 3 };
     let pdf_path = reference.join("0000000000000001.pdf");
-    fs::write(&pdf_path, b"%PDF-test").unwrap();
-    let markdown_path = update_reference_index(&reference, &detail, "https://publisher.example/article", &pdf_path).unwrap();
+    let entry = reference_entry(&detail, "https://doi.org/10.1234/example", &pdf_path);
+    let markdown_path = persist_paper(&reference, &detail, &pdf_path, b"%PDF-test", &entry).unwrap();
     assert_eq!(markdown_path, reference.join("index.md"));
+    assert_eq!(fs::read(&pdf_path).unwrap(), b"%PDF-test");
     let markdown = fs::read_to_string(&markdown_path).unwrap();
-    assert!(markdown.contains("Test title") && markdown.contains("Detailed abstract") && markdown.contains("0000000000000001.pdf"));
+    // The heading is the paper title, not the DOI, and the BibTeX is embedded
+    // as citation text the model can copy straight into a .bib file.
+    assert!(markdown.contains("## Test title"));
+    assert!(markdown.contains("@article{example,"));
+    assert!(markdown.contains("Detailed abstract") && markdown.contains("0000000000000001.pdf"));
     assert!(!reference.join("papers.json").exists());
+    // Saving the same DOI again replaces its entry instead of duplicating it.
+    let detail2 = LiteratureRecord { doi: "10.1234/example".into(), title: "Replaced title".into(), bib: String::new(), abstract_text: String::new(), cited_by_count: 0 };
+    let entry2 = reference_entry(&detail2, "https://doi.org/10.1234/example", &pdf_path);
+    persist_paper(&reference, &detail2, &pdf_path, b"%PDF-2", &entry2).unwrap();
+    let markdown = fs::read_to_string(&markdown_path).unwrap();
+    assert_eq!(markdown.matches("<!-- DOI:10.1234/example -->").count(), 1);
+    assert!(markdown.contains("## Replaced title"));
   }
 
   #[test]
@@ -1309,7 +1550,7 @@ mod tests {
     let fixture = Fixture::new();
     fixture.write("reference/index.md", "# References\n\n- DOI: `10.1234/EXISTING`\n");
     let existing = local_literature_dois(&fixture.0.join("reference")).unwrap();
-  let record = |doi: &str| LiteratureRecord { doi: doi.into(), bib: Value::Null, abstract_text: String::new(), cited_by_count: 0, pdf_url: None };
+    let record = |doi: &str| LiteratureRecord { doi: doi.into(), title: String::new(), bib: String::new(), abstract_text: String::new(), cited_by_count: 0 };
     let selected = select_new_papers(vec![record("10.1234/existing"), record("10.1234/new"), record("10.1234/new"), record("10.1234/other")], existing, 2);
     assert_eq!(selected.len(), 2);
     assert_eq!(selected[1].doi, "10.1234/other");
