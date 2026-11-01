@@ -8,13 +8,13 @@ import { setApiSettingsOpen, toast } from '../store/ui';
 
 /** Fixed, non-LLM service credentials. Kept separate from model endpoints. */
 export function ApiSettings() {
-  const [openAlex, { mutate: mutateOpenAlex }] = createResource(agentApi.getOpenAlexConfig);
+  const [serpapi, { mutate: mutateSerpapi }] = createResource(agentApi.getSerpapiConfig);
   const [keys, setKeys] = createSignal<Record<string, string>>({});
   const [revealed, setRevealed] = createSignal<Record<string, boolean>>({});
   const [saving, setSaving] = createSignal<Record<string, boolean>>({});
   const [query, setQuery] = createSignal('');
   const apiEntries = [
-    { id: 'openalex', label: 'OpenAlex key', resource: openAlex, mutate: mutateOpenAlex, save: agentApi.setOpenAlexKey },
+    { id: 'serpapi', label: 'SerpAPI key', resource: serpapi, mutate: mutateSerpapi, save: agentApi.setSerpapiKey },
   ];
   const filteredEntries = createMemo(() => {
     const q = query().trim().toLowerCase();
@@ -72,7 +72,7 @@ export function ApiSettings() {
             </section>
             )} />
           </div>
-          <Show when={openAlex.error}><p class="field__hint" role="alert">Could not load OpenAlex settings: {String(openAlex.error)}</p></Show>
+          <Show when={serpapi.error}><p class="field__hint" role="alert">Could not load SerpAPI settings: {String(serpapi.error)}</p></Show>
         </div>
       </div>
     </div>

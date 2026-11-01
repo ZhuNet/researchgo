@@ -395,7 +395,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
           </Show>
         </span>
         <span class="research-workflow__name">search_papers</span>
-        <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching OpenAlex' : 'search not completed'}</span>
+        <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching Google Scholar' : 'search not completed'}</span>
       </div>
       <Show when={props.input}>
         <pre class="research-workflow__detail research-workflow__parameters">{props.input}</pre>
@@ -426,7 +426,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
             <span>{index + 1}. {paper().title}</span>
           </div>
           <div class="research-workflow__detail">
-            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading from Sci-Hub…' : 'Not downloaded'}>
+            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading PDF…' : 'Not downloaded'}>
               <Show when={paper().result?.source.status === 'unavailable'}>
                 <div class="research-workflow__error">Download failed: {paper().result?.extraction_note ?? 'unknown reason'}</div>
               </Show>

@@ -201,26 +201,26 @@ fn write_api_key(path: &Path, config: &ApiKeyConfig) -> Result<(), String> {
 
 static APP_CONFIG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-fn openalex_path(app: &AppHandle) -> Result<PathBuf, String> {
-  Ok(config_dir(app)?.join("openalex.json"))
+fn serpapi_path(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(config_dir(app)?.join("serpapi.json"))
 }
 
 #[tauri::command]
-pub async fn get_openalex_config(app: AppHandle) -> Result<ApiKeyView, String> {
-  Ok(api_key_view(&read_api_key(&openalex_path(&app)?)))
+pub async fn get_serpapi_config(app: AppHandle) -> Result<ApiKeyView, String> {
+  Ok(api_key_view(&read_api_key(&serpapi_path(&app)?)))
 }
 
 #[tauri::command]
-pub async fn set_openalex_key(app: AppHandle, api_key: String) -> Result<ApiKeyView, String> {
-  let path = openalex_path(&app)?;
+pub async fn set_serpapi_key(app: AppHandle, api_key: String) -> Result<ApiKeyView, String> {
+  let path = serpapi_path(&app)?;
   let mut config = read_api_key(&path);
   if !api_key.trim().is_empty() { config.api_key = api_key.trim().to_string(); }
   write_api_key(&path, &config)?;
   Ok(api_key_view(&config))
 }
 
-pub(super) fn openalex_secret() -> Result<String, String> {
-  let path = APP_CONFIG_DIR.get().ok_or("OpenAlex configuration directory is unavailable")?.join("openalex.json");
+pub(super) fn serpapi_secret() -> Result<String, String> {
+  let path = APP_CONFIG_DIR.get().ok_or("SerpAPI configuration directory is unavailable")?.join("serpapi.json");
   Ok(read_api_key(&path).api_key)
 }
 
