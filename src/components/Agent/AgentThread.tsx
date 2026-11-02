@@ -417,18 +417,16 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
       </Show>
       <Index each={papers()}>{(paper, index) => (
         <div class="research-workflow__paper">
-          <div class="research-workflow__step">
-            <span class="research-workflow__mark" classList={{ 'research-workflow__mark--err': paper().result?.source.status === 'unavailable' }}>
-              <Show when={paper().result} fallback={<Show when={props.status === 'running'} fallback={<Icon name="x" size={11} />}><span class="spinner" /></Show>}>
-                <Icon name={paper().result?.source.status === 'unavailable' ? 'x' : 'check'} size={11} />
-              </Show>
-            </span>
+          <div class="research-workflow__step" classList={{
+            'research-workflow__paper--ok': !!paper().result && paper().result?.source.status !== 'unavailable',
+            'research-workflow__paper--err': paper().result?.source.status === 'unavailable',
+          }}>
             <span>{index + 1}. {paper().title}</span>
           </div>
           <div class="research-workflow__detail">
-            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading PDF…' : 'Not downloaded'}>
+            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading PDF…' : 'Download interrupted'}>
               <Show when={paper().result?.source.status === 'unavailable'}>
-                <div class="research-workflow__error">Download failed: {paper().result?.extraction_note ?? 'unknown reason'}</div>
+                <div>Download failed: {paper().result?.extraction_note}</div>
               </Show>
               <Show when={paper().result?.source.status !== 'unavailable'}>
                 <div>{paper().result?.source.status.toUpperCase()} saved</div>
