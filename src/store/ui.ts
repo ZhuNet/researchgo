@@ -1,6 +1,7 @@
 import { createSignal } from 'solid-js';
 
 export type Theme = 'dark' | 'light';
+export type TexEngine = 'xelatex' | 'pdflatex' | 'lualatex' | 'latex';
 
 export interface Toast {
   id: number;
@@ -74,6 +75,8 @@ export const [treeCmd, setTreeCmd] = createSignal<{ kind: 'expand-all' | 'collap
   null,
 );
 export const [wrap, setWrapRaw] = createSignal(read('rg.wrap', false, bool));
+export const [texEngine, setTexEngineRaw] = createSignal<TexEngine>('xelatex');
+export const [texEngineRevision, setTexEngineRevision] = createSignal(0);
 
 export function setExplorerW(next: number) {
   const value = clamp(next, 200, 560);
@@ -100,6 +103,11 @@ export function setRailView(next: 'files' | 'search' | 'changes') {
 export function setWrap(next: boolean) {
   setWrapRaw(next);
   write('rg.wrap', next);
+}
+
+export function setTexEngine(next: TexEngine) {
+  setTexEngineRaw(next);
+  setTexEngineRevision((revision) => revision + 1);
 }
 
 let seq = 0;

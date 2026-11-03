@@ -156,7 +156,7 @@ export interface Backend {
   onToolchainChange(handler: () => void): () => void;
 }
 
-function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauri = (globalThis as Record<string, unknown>).__TAURI__ as
     | { core: { invoke: (c: string, a?: Record<string, unknown>) => Promise<unknown> } }
     | undefined;

@@ -16,6 +16,7 @@ pub fn run() {
     .plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())
     .plugin(tauri_plugin_dialog::init())
     .setup(|app| {
+      content::init(&app.handle());
       dirindex::init(app);
       watcher::init(app);
       toolchain::init(app);
@@ -40,6 +41,8 @@ pub fn run() {
       content::file_info,
       content::build_project,
       content::build_plan,
+      content::get_tex_engine,
+      content::set_tex_engine,
       content::read_artifact,
       fsops::list_dir_page,
       fsops::invalidate_dir,

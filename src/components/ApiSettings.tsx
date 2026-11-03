@@ -1,13 +1,20 @@
-import { createMemo, createResource, createSignal, Show } from 'solid-js';
+import { createMemo, createResource, createSignal, Show, createEffect } from 'solid-js';
 
 import { Icon } from './Icon';
 import { SearchClear } from './SearchClear';
 import { VirtualList } from './VirtualList';
 import { agentApi } from '../lib/agent';
-import { setApiSettingsOpen, toast } from '../store/ui';
+import { setApiSettingsOpen, toast, texEngine, setTexEngine, type TexEngine } from '../store/ui';
+import { invoke } from '../lib/backend';
 
 /** Fixed, non-LLM service credentials. Kept separate from model endpoints. */
 export function ApiSettings() {
+  const [engineBusy, setEngineBusy] = createSignal(false);
+  const [engines, { mutate: setEngineResource }] = createResource(() => invoke<TexEngine>('get_tex_engine'));
+  createEffect(() => {
+    const engine = engines();
+    if (engine) setTexEngine(engine);
+  });
   const [serpapi, { mutate: mutateSerpapi }] = createResource(agentApi.getSerpapiConfig);
   const [keys, setKeys] = createSignal<Record<string, string>>({});
   const [revealed, setRevealed] = createSignal<Record<string, boolean>>({});
@@ -38,6 +45,20 @@ export function ApiSettings() {
       setSaving((previous) => ({ ...previous, [entry.id]: false }));
     }
   };
+  const changeEngine = async (engine: TexEngine) => {
+    if (engineBusy()) return;
+    setEngineBusy(true);
+    try {
+      const saved = await invoke<TexEngine>('set_tex_engine', { engine });
+      setEngineResource(saved);
+      setTexEngine(saved);
+      toast('ok', 'Compiler saved', saved);
+    } catch (err) {
+      toast('error', 'Compiler not saved', String(err));
+    } finally {
+      setEngineBusy(false);
+    }
+  };
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -56,6 +77,16 @@ export function ApiSettings() {
           <button class="icon-btn" onClick={close} aria-label="Close" data-tooltip="Close"><Icon name="x" size={15} /></button>
         </header>
         <div class="modal__body">
+          <section class="field">
+            <label class="field__label" for="tex-engine">LaTeX compiler</label>
+            <select id="tex-engine" class="input" disabled={engineBusy() || engines.loading} value={engines() ?? texEngine()} onChange={(event) => changeEngine(event.currentTarget.value as TexEngine)}>
+              <option value="xelatex">XeLaTeX (xelatex)</option>
+              <option value="pdflatex">pdfLaTeX (pdflatex)</option>
+              <option value="lualatex">LuaLaTeX (lualatex)</option>
+              <option value="latex">LaTeX (latex)</option>
+            </select>
+            <p class="field__hint">This setting is stored by the backend and used for automatic builds.</p>
+          </section>
           <div class="model-list">
             <div class="clearable-search model-list__search">
               <input class="input" aria-label="Search APIs" placeholder="Search APIs…" value={query()} onInput={(event) => setQuery(event.currentTarget.value)} />

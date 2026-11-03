@@ -141,6 +141,49 @@ fn one() -> u32 {
   1
 }
 
+fn normalize_engine(engine: Option<&str>) -> &'static str {
+  match engine {
+    Some("xelatex") => "xelatex",
+    Some("pdflatex") => "pdflatex",
+    Some("lualatex") => "lualatex",
+    Some("latex") => "latex",
+    _ => "xelatex",
+  }
+}
+
+static TEX_ENGINE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn init(app: &tauri::AppHandle) {
+  use tauri::Manager;
+  if let Ok(dir) = app.path().app_config_dir() {
+    let _ = TEX_ENGINE_PATH.set(dir.join("tex-engine.json"));
+  }
+}
+
+fn engine_path() -> Result<&'static Path, String> {
+  TEX_ENGINE_PATH.get().map(PathBuf::as_path).ok_or_else(|| "TeX engine settings are unavailable".to_string())
+}
+
+#[tauri::command]
+pub fn get_tex_engine() -> Result<String, String> {
+  let Ok(path) = engine_path() else { return Ok("xelatex".into()); };
+  let configured = std::fs::read_to_string(path).ok()
+    .and_then(|raw| serde_json::from_str::<String>(&raw).ok());
+  Ok(normalize_engine(configured.as_deref()).to_string())
+}
+
+#[tauri::command]
+pub fn set_tex_engine(engine: String) -> Result<String, String> {
+  let normalized = normalize_engine(Some(&engine));
+  if engine != normalized {
+    return Err(format!("Unsupported TeX engine: {engine}"));
+  }
+  let path = engine_path()?;
+  if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+  std::fs::write(path, serde_json::to_vec(normalized).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+  Ok(normalized.to_string())
+}
+
 /// What to run in this directory: an override or its unique TeX document.
 ///
 /// The preview exists to show what the sources compile to, so the build is the
@@ -195,15 +238,21 @@ fn selection_dir(selection: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 fn tex_plan(root: &Path) -> Option<BuildPlan> {
   let main = unique_tex(root).ok()?;
-  tex_plan_for(root, &main)
+  tex_plan_for(root, &main, "xelatex")
 }
 
-fn tex_plan_for(root: &Path, main: &Path) -> Option<BuildPlan> {
+fn tex_plan_for(root: &Path, main: &Path, engine: &str) -> Option<BuildPlan> {
   let out = tex_out_dir(root);
   let stem = main.file_stem()?.to_string_lossy().into_owned();
   let rel = main.strip_prefix(root).unwrap_or(main);
+  let reason = match engine {
+    "pdflatex" => "pdfLaTeX",
+    "lualatex" => "LuaLaTeX",
+    "latex" => "LaTeX",
+    _ => "XeLaTeX",
+  };
   Some(BuildPlan {
-    command: "xelatex".into(),
+    command: engine.into(),
     args: vec![
       "-interaction=nonstopmode".into(),
       "-halt-on-error".into(),
@@ -211,18 +260,18 @@ fn tex_plan_for(root: &Path, main: &Path) -> Option<BuildPlan> {
       format!("-output-directory={}", out.display()),
       rel.to_string_lossy().replace('\\', "/"),
     ],
-    reason: "XeLaTeX",
+    reason,
     passes: 2,
     artifact: Some(out.join(format!("{stem}.pdf"))),
   })
 }
 
 /// Precheck and execution share validation, without scanning the directory twice.
-fn preview_plan(selection: &str) -> Result<(PathBuf, BuildPlan), String> {
+fn preview_plan(selection: &str, engine: &str) -> Result<(PathBuf, BuildPlan), String> {
   let dir = selection_dir(selection)?;
   let main = unique_tex(&dir)?;
   let plan = override_from_file(&dir)
-    .or_else(|| tex_plan_for(&dir, &main))
+    .or_else(|| tex_plan_for(&dir, &main, engine))
     .ok_or_else(missing_build_message)?;
   Ok((dir, plan))
 }
@@ -520,11 +569,13 @@ fn relative(root: &Path, path: &Path) -> String {
   }
 }
 
-/// Builds the open project with XeLaTeX and reports the PDF it produced.
+/// Builds the open project with the configured TeX engine and reports the PDF
+/// it produced.
 #[tauri::command]
 pub async fn build_project(root: String) -> Result<BuildOutcome, String> {
+  let engine = get_tex_engine()?;
   tauri::async_runtime::spawn_blocking(move || {
-    let (dir, plan) = preview_plan(&root)?;
+    let (dir, plan) = preview_plan(&root, &engine)?;
     run_build_plan(&dir, &plan)
   })
     .await
@@ -577,8 +628,9 @@ pub struct BuildPlanInfo {
 
 #[tauri::command]
 pub async fn build_plan(root: String) -> Result<BuildPlanInfo, String> {
+  let engine = get_tex_engine()?;
   tauri::async_runtime::spawn_blocking(move || {
-    let (dir, plan) = preview_plan(&root)?;
+    let (dir, plan) = preview_plan(&root, &engine)?;
     // Checked before the reader presses Build, because a desktop launcher hands a
     // desktop app a much smaller PATH than a shell does — `xelatex` is usually
     // somewhere the shell has and the launcher does not, and finding that out by
@@ -694,6 +746,17 @@ mod tests {
   }
 
   #[test]
+  fn selected_engine_changes_the_automatic_tex_command() {
+    let s = Scratch::new("selected-engine");
+    s.write("main.tex", b"\\documentclass{article}");
+    for (engine, reason) in [("xelatex", "XeLaTeX"), ("pdflatex", "pdfLaTeX"), ("lualatex", "LuaLaTeX"), ("latex", "LaTeX")] {
+      let (_, plan) = preview_plan(s.path().to_str().unwrap(), engine).unwrap();
+      assert_eq!(plan.command, engine);
+      assert_eq!(plan.reason, reason);
+    }
+  }
+
+  #[test]
   fn multiple_documents_are_ambiguous_even_with_main_tex() {
     let s = Scratch::new("tex-main");
     s.write("appendix.tex", b"appendix");
@@ -714,10 +777,10 @@ mod tests {
     let plan = detect_build(folder).unwrap();
     assert_eq!(plan.args.last().unwrap(), "document.TEX");
     assert_eq!(plan.artifact.as_ref().unwrap(), &folder.join(".rg/build/document.pdf"));
-    let (selected_dir, selected_plan) = preview_plan(file.to_str().unwrap()).unwrap();
+    let (selected_dir, selected_plan) = preview_plan(file.to_str().unwrap(), "xelatex").unwrap();
     assert_eq!(selected_dir, folder);
     assert_eq!(selected_plan, plan);
-    assert_eq!(preview_plan(folder.to_str().unwrap()).unwrap().1, plan);
+    assert_eq!(preview_plan(folder.to_str().unwrap(), "xelatex").unwrap().1, plan);
     // A folder named like a source is not a source file.
     std::fs::create_dir(folder.join("other.tex")).unwrap();
     assert!(unique_tex(folder).is_ok());

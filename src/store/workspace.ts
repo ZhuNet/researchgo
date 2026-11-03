@@ -15,7 +15,7 @@ import {
 } from '../lib/dircache';
 import { monacoDocuments } from '../lib/monacoDocuments';
 import { createEditor, type EditorLimits } from './editor';
-import { toast } from './ui';
+import { toast, texEngineRevision } from './ui';
 import {
   ancestorsOf,
   basenameOf,
@@ -121,6 +121,7 @@ export function createWorkspace(
   // tab must never move the build target behind the tree's back.
   createEffect(() => {
     const scope = buildScope();
+    texEngineRevision();
     untrack(() => { void editor.loadPlan(scope); });
   });
   const [renaming, setRenaming] = createSignal<string | null>(null);
