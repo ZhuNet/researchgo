@@ -458,6 +458,15 @@
 .model-list__window .model { height: 62px; box-sizing: border-box; }
 .models__window .field__row { height: 42px; box-sizing: border-box; }
 
+/* The LaTeX engine picker is the LLM model menu, widened to the form column.
+   `.modelmenu` carries `flex: 1` for the agent panel's header; in a column
+   field that would stretch vertically, so it is pinned to the form width. */
+.field .modelmenu { flex: none; width: 100%; }
+.modelmenu .modelbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .model {
   display: flex;
   align-items: center;

@@ -314,13 +314,14 @@ function ConfigForm(props: {
   return (
     <form class="modal__body" autocomplete="off" onSubmit={submit}>
       <section class="field">
-        <label class="field__label" for="set-name">
+        <label class="field__label">
           Name
         </label>
         <div class="hist">
           <input
             id="set-name"
             class="input hist__input"
+            aria-label="Name"
             placeholder="OpenAI"
             autocomplete="off"
             value={name()}
@@ -348,7 +349,7 @@ function ConfigForm(props: {
       </section>
 
       <section class="field">
-        <label class="field__label" for="set-url">
+        <label class="field__label">
           Base URL
         </label>
         <div class="hist">
@@ -356,6 +357,7 @@ function ConfigForm(props: {
           id="set-url"
           class="input hist__input"
           type="url"
+          aria-label="Base URL"
           autocomplete="off"
           placeholder="https://api.openai.com/v1"
           value={url()}
@@ -381,13 +383,14 @@ function ConfigForm(props: {
       </section>
 
       <section class="field">
-        <label class="field__label" for="set-key">
+        <label class="field__label">
           API key
         </label>
         <div class="field__row">
           <input
             id="set-key"
             class="input"
+            aria-label="API key"
             type={reveal() ? 'text' : 'password'}
             placeholder={current()?.keyHint ? `stored · ${current()?.keyHint}` : 'sk-…'}
             value={key()}
