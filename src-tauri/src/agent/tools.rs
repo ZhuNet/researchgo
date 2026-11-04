@@ -71,9 +71,9 @@ pub struct FilePatch {
 const MAX_READ_BYTES: u64 = 256 * 1024;
 /// Ceiling on lines from one `read`, independent of byte size.
 const MAX_READ_LINES: usize = 2000;
-/// Default and ceiling for `bash`. Long enough for a build, short enough that a
-/// runaway process is interrupted by something the user can see.
+/// Default for `bash` when the call does not specify its own deadline.
 const BASH_TIMEOUT_SECS: u64 = 120;
+const BASH_MAX_TIMEOUT_SECS: u64 = 3600;
 const BASH_MAX_OUTPUT: usize = 60_000;
 /// The single longest wait for any network step (a Google Scholar search, the
 /// PDF itself). It is a safety net against a very slow network, not a
@@ -153,15 +153,7 @@ fn openai_chat_tool_defs() -> &'static [Value] {
       "type": "function",
       "function": {
         "name": "bash",
-        "description": format!(
-          "Run a shell command in the workspace root. {} \
-           Prefer the read, grep and glob tools over shelling out to cat, grep \
-           and find: they are not a shell, so they are unaffected by all of the \
-           above. A command that exits non-zero comes back as a failed call with \
-           its output attached rather than as an error --read that output before \
-           retrying.",
-          dialect()
-        ),
+        "description": "Run a shell command in the workspace root.",
         "parameters": schema_for!(BashArgs)
       }
     }),
@@ -197,9 +189,19 @@ fn openai_chat_tool_defs() -> &'static [Value] {
 /// The optional allow-list is the first configuration hook for tool
 /// registration. `None` includes every registered tool.
 pub fn tool_defs_for(_protocol: ToolProtocol, enabled: Option<&[&str]>) -> Vec<Value> {
+    let shell = refresh_shell();
     openai_chat_tool_defs()
         .iter()
         .cloned()
+        .map(|mut definition| {
+            if definition["function"]["name"] == "bash" {
+                definition["function"]["description"] = json!(format!(
+                    "Run a shell command in the workspace root. Current executor: {}. Pass command text directly. Optional timeout in seconds: default 120, 0 disables the deadline, maximum 3600. Prefer read, grep and glob for file inspection. Non-zero exits return failure with output.",
+                    shell.as_ref().map(|s| s.label.as_str()).unwrap_or("unavailable (PowerShell 7+ or 5.1 required on Windows)")
+                ));
+            }
+            definition
+        })
         .filter(|definition| {
             enabled.is_none_or(|names| {
                 names
@@ -248,6 +250,9 @@ struct EditArgs {
 #[serde(deny_unknown_fields)]
 struct BashArgs {
     command: String,
+    /// Timeout in seconds. Defaults to 120; 0 disables the deadline.
+    #[serde(default)]
+    timeout: Option<u64>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -981,44 +986,65 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
     .to_string()
 }
 
-fn shell() -> &'static str {
-    if cfg!(windows) { "cmd" } else { "sh" }
+#[derive(Clone)]
+struct ToolShell {
+  path: PathBuf,
+  label: String,
 }
 
-/// The command dialect the model must write for the machine it is running on.
-///
-/// This is the single most valuable fact in the tool list and it was the one
-/// thing missing. A model asked to run a command has exactly one strong prior:
-/// `bash` on Linux, learned from a training set that is overwhelmingly
-/// POSIX. Nothing in the prompt contradicts it, so `ls -la`, `cat`, `rm -rf`,
-/// `$HOME` and `&&` go out unchanged --and on `cmd.exe` every one of them fails,
-/// with an error that names the command rather than the shell, so the model has
-/// no way to work out that the whole batch was written for the wrong machine and
-/// retries the same syntax until the turn is over.
-///
-/// So the dialect is stated where the model is already looking when it decides
-/// what to type, in the one tool it is about to call. The substitutions are
-/// named as pairs (`ls` �?`dir`) rather than described, because a model copying
-/// a table acts on it and a model reading prose has to infer it.
-fn dialect() -> &'static str {
-  if cfg!(windows) {
-    "The command runs in cmd.exe on Windows, not PowerShell and not bash. \
-     Use dir instead of ls, type instead of cat, del and rmdir instead of rm, \
-     copy and move instead of cp and mv, findstr instead of grep, and \
-     xcopy or robocopy for a recursive copy. Variables expand as %VAR%, not \
-     $VAR. Quote paths containing spaces with double quotes. Chain with && or \
-     &, redirect stdout and stderr with > and 2>, and branch on failure with \
-     `if errorlevel 1`. There is no touch, no which, no heredoc, and no shell \
-     glob --dir /s and dir /b are the closest. Commands that ship their own \
-     executable (npm, cargo, git, python, node) are called by name and behave \
-     as they do elsewhere."
-  } else {
-    "The command runs in sh on a POSIX system. Use POSIX syntax only: && and | \
-     and > and 2> all work, but [[ ]], arrays, local, source, process \
-     substitution <(...) and $(< file) do not --use [ ], plain variables, \
-     `. file` and $(cat file). Commands that ship their own executable (npm, \
-     cargo, git, python) are called by name and behave as they do elsewhere."
+// Refreshed when definitions are sent to the model; execution uses that same
+// selection, rather than silently changing dialect after the model has replied.
+static TOOL_SHELL: OnceLock<std::sync::Mutex<Option<ToolShell>>> = OnceLock::new();
+
+fn refresh_shell() -> Option<ToolShell> {
+  let mut selected = TOOL_SHELL.get_or_init(Default::default).lock().unwrap();
+  *selected = detect_shell();
+  selected.clone()
+}
+
+fn selected_shell() -> Option<ToolShell> {
+  let mut selected = TOOL_SHELL.get_or_init(Default::default).lock().unwrap();
+  if selected.is_none() {
+    *selected = detect_shell();
   }
+  selected.clone()
+}
+
+#[cfg(not(windows))]
+fn detect_shell() -> Option<ToolShell> {
+  Some(ToolShell { path: PathBuf::from("sh"), label: "sh (POSIX)".into() })
+}
+
+#[cfg(windows)]
+fn detect_shell() -> Option<ToolShell> {
+  let mut paths = crate::toolchain::search_path();
+  if let Some(path) = std::env::var_os("PATH") {
+    paths.extend(std::env::split_paths(&path));
+  }
+  if let Some(dir) = std::env::var_os("ProgramFiles") {
+    paths.push(PathBuf::from(dir).join("PowerShell/7"));
+  }
+  if let Some(dir) = std::env::var_os("SystemRoot") {
+    paths.push(PathBuf::from(dir).join("System32/WindowsPowerShell/v1.0"));
+  }
+  for (name, minimum) in [("pwsh.exe", 7), ("powershell.exe", 5)] {
+    for dir in &paths {
+      let path = dir.join(name);
+      if !path.is_file() { continue; }
+      let output = std::process::Command::new(&path)
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"])
+        .output();
+      let Ok(output) = output else { continue; };
+      if !output.status.success() { continue; }
+      let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+      let mut parts = version.split('.');
+      let major = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+      let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+      if major < minimum || (major == 5 && minor < 1) { continue; }
+      return Some(ToolShell { path, label: format!("PowerShell {version}") });
+    }
+  }
+  None
 }
 
 async fn bash_tool_typed(
@@ -1030,16 +1056,22 @@ async fn bash_tool_typed(
   if command.trim().is_empty() {
     return Err(ToolError("command is empty".into()));
   }
-
-  // On Windows the shell is spawned with `/C`, and on Unix with `-c`; the same
-  // string means the same thing to either. Anything more elaborate --a pipeline
-  // built in Rust --would be a second shell nobody debugged.
-  let mut child = Command::new(shell());
-  if cfg!(windows) {
-    child.arg("/C").arg(&command);
-  } else {
-    child.arg("-c").arg(&command);
+  let timeout_secs = args.timeout.unwrap_or(BASH_TIMEOUT_SECS);
+  if timeout_secs > BASH_MAX_TIMEOUT_SECS {
+    return Err(ToolError(format!("timeout must be between 0 and {BASH_MAX_TIMEOUT_SECS} seconds")));
   }
+
+  let shell = selected_shell().ok_or_else(|| ToolError("No supported PowerShell installation found (requires 7+ or 5.1)".into()))?;
+  let mut child = Command::new(&shell.path);
+  #[cfg(windows)]
+  {
+    // Pass the script as one argument. The process library encodes Windows
+    // argv; manually appending raw text loses embedded quotes in PowerShell.
+    child.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+    child.arg(command);
+  }
+  #[cfg(not(windows))]
+  child.arg("-c").arg(command);
 
   // `tokio::process`, not `std::process`: the turn holds the transcript lock
   // across this await, and a blocking `output()` there would pin a blocking
@@ -1052,10 +1084,14 @@ async fn bash_tool_typed(
   let output = tokio::select! {
     biased;
     _ = turn.stopped() => return Err(ToolError(STOPPED.into())),
-    result = tokio::time::timeout(
-      std::time::Duration::from_secs(BASH_TIMEOUT_SECS),
-      child.kill_on_drop(true).current_dir(root).output(),
-    ) => result,
+    result = async {
+      let running = child.kill_on_drop(true).current_dir(root).output();
+      if timeout_secs == 0 {
+        Ok(running.await)
+      } else {
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), running).await
+      }
+    } => result,
   };
   let output = match output {
     Ok(result) => result.map_err(|e| ToolError(format!("cannot run `{command}`: {e}")))?,
@@ -1063,7 +1099,7 @@ async fn bash_tool_typed(
       // `kill_on_drop` took the process with the future, so nothing survives to
       // hold a file handle or keep burning CPU after the turn moves on.
       return Err(ToolError(format!(
-        "`{command}` did not finish within {BASH_TIMEOUT_SECS}s and was stopped"
+        "`{command}` did not finish within {timeout_secs}s and was stopped"
       )));
     }
   };
@@ -1929,11 +1965,33 @@ mod tests {
     assert_eq!(out.summary, "");
   }
 
+  #[tokio::test]
+  async fn bash_accepts_a_disabled_deadline_and_rejects_out_of_range_timeouts() {
+    let fixture = Fixture::new();
+    let out = bash_tool(&fixture.0, &json!({ "command": succeeding_command(), "timeout": 0 }), &Turn::detached())
+      .await.unwrap();
+    assert!(out.ok);
+    assert_eq!(out.content.trim(), "ok");
+
+    let err = bash_tool(&fixture.0, &json!({ "command": succeeding_command(), "timeout": 3601 }), &Turn::detached())
+      .await.err().expect("timeout above the cap must be refused");
+    assert!(err.0.contains("0 and 3600"));
+    assert!(validate_args("bash", &json!({ "command": "echo ok", "timeout": -1 })).is_err());
+    assert!(validate_args("bash", &json!({ "command": "echo ok", "timeout": 1.5 })).is_err());
+  }
+
+  #[tokio::test]
+  async fn bash_honors_a_per_call_timeout() {
+    let fixture = Fixture::new();
+    let slow = if cfg!(windows) { "Start-Sleep -Seconds 5" } else { "sleep 5" };
+    let err = bash_tool(&fixture.0, &json!({ "command": slow, "timeout": 1 }), &Turn::detached())
+      .await.err().expect("command should time out");
+    assert!(err.0.contains("within 1s"), "{}", err.0);
+  }
+
   #[test]
   fn the_bash_description_states_the_dialect_of_the_host() {
-    // A model with no idea it is on cmd.exe writes `ls -la` and fails. The
-    // description is the only place it looks before typing, so the host's own
-    // dialect has to be in it.
+    // The advertised executor must be the one the next call will use.
     let defs = tool_defs();
     let bash = defs
       .iter()
@@ -1941,15 +1999,30 @@ mod tests {
       .expect("the bash tool is in the list the model sees");
     let description = bash["function"]["description"].as_str().unwrap_or_default();
 
-    let expected = if cfg!(windows) { "cmd.exe" } else { "POSIX" };
+    let expected = if cfg!(windows) { "PowerShell" } else { "POSIX" };
         assert!(
             description.contains(expected),
             "description omits the host dialect: {description}"
         );
         assert!(
-            description.contains(shell()),
+            description.contains(&selected_shell().unwrap().label),
             "the description names a different shell than the one spawned"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bash_powershell_preserves_quotes_paths_and_multiline_scripts() {
+        let fixture = Fixture::new();
+        let command = "$x = 'C:\\some folder\\file.txt'\nWrite-Output $x\nWrite-Output 'a \"quoted\" value'\nWrite-Output 'literal $HOME & | %'";
+        let out = bash_tool(&fixture.0, &json!({"command": command}), &Turn::detached()).await.unwrap();
+        assert!(out.ok, "{}", out.content);
+        assert_eq!(out.content.replace("\r\n", "\n"), "C:\\some folder\\file.txt\na \"quoted\" value\nliteral $HOME & | %");
+        let out = bash_tool(&fixture.0, &json!({"command": "\"echo not-executed\""}), &Turn::detached()).await.unwrap();
+        assert!(out.ok);
+        assert_eq!(out.content.trim(), "echo not-executed");
+        let out = bash_tool(&fixture.0, &json!({"command": "Write-Output 'unterminated"}), &Turn::detached()).await.unwrap();
+        assert!(!out.ok);
     }
 
     #[test]
