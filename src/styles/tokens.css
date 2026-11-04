@@ -49,6 +49,8 @@
   --bg-4: #1c1e22;
   --search-clear-hover: rgba(255, 255, 255, 0.12);
   --bg-5: #232529;
+  --agent-render-bg: #17191e;
+  --agent-render-head-bg: #202228;
 
   --bd-1: rgba(255, 255, 255, 0.055);
   --bd-2: rgba(255, 255, 255, 0.09);
@@ -99,6 +101,8 @@
   --bg-4: #e9eaee;
   --search-clear-hover: rgba(9, 10, 20, 0.08);
   --bg-5: #e0e2e7;
+  --agent-render-bg: #e6e8ed;
+  --agent-render-head-bg: #dfe2e8;
 
   --bd-1: rgba(9, 10, 20, 0.07);
   --bd-2: rgba(9, 10, 20, 0.11);
