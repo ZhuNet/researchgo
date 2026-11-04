@@ -658,8 +658,19 @@
 }
 
 .tool {
-  background: transparent;
+  border-radius: var(--r-md);
+  background: var(--agent-card-bg);
+  border: 1px solid var(--agent-card-border);
   overflow: hidden;
+  transition: border-color var(--t-fast) var(--ease);
+}
+
+.tool:hover {
+  border-color: var(--agent-card-border-hover);
+}
+
+.tool--running {
+  border-color: var(--ac-line);
 }
 
 .tool__head {
@@ -738,8 +749,8 @@
   font-size: 11px;
   line-height: 1.6;
   color: var(--tx-3);
-  background: var(--agent-render-bg);
-  border: 1px solid var(--bd-1);
+  background: var(--agent-result-bg);
+  border: 1px solid var(--agent-result-border);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 260px;
@@ -811,14 +822,14 @@
 .patch {
   overflow: hidden;
   border-radius: var(--r-md);
-  background: rgba(76, 183, 130, 0.07);
-  border: 1px solid rgba(76, 183, 130, 0.22);
+  background: var(--agent-patch-bg);
+  border: 1px solid var(--agent-patch-border);
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
 }
 
 .patch:hover {
-  background: rgba(76, 183, 130, 0.13);
-  border-color: rgba(76, 183, 130, 0.34);
+  background: var(--agent-patch-bg-hover);
+  border-color: var(--agent-patch-border-hover);
 }
 
 .research-workflow {
@@ -874,10 +885,10 @@
   overflow: auto;
   margin: 0 0 var(--sp-2) calc(15px + var(--sp-3));
   padding: var(--sp-3);
-  border: 1px solid var(--bd-2);
+  border: 1px solid var(--agent-result-border);
   border-radius: var(--r-sm);
   color: var(--tx-3);
-  background: var(--bg-2);
+  background: var(--agent-result-bg);
   font: 10px/1.5 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -934,9 +945,9 @@
   margin: 0 var(--sp-3) var(--sp-3);
   overflow-x: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--bd-1);
+  border: 1px solid var(--agent-result-border);
   border-radius: var(--r-sm);
-  background: var(--agent-render-bg);
+  background: var(--agent-result-bg);
   animation: fadeIn var(--t-fast) var(--ease-out) both;
   scrollbar-width: thin;
   scrollbar-color: var(--bd-3) transparent;
@@ -949,17 +960,17 @@
   font-family: var(--font-mono);
   font-size: 10.5px;
   line-height: 19px;
-  color: var(--tx-3);
+  color: var(--tx-2);
   white-space: pre;
 }
 
 .patch__line--add {
-  color: var(--tx-2);
+  color: var(--tx-1);
   background: rgba(76, 183, 130, 0.13);
 }
 
 .patch__line--del {
-  color: var(--tx-2);
+  color: var(--tx-1);
   background: rgba(242, 88, 91, 0.13);
 }
 
@@ -969,7 +980,7 @@
 }
 
 .patch__line--meta {
-  color: var(--tx-4);
+  color: var(--tx-3);
 }
 
 .patch__line-no {
@@ -978,7 +989,7 @@
   width: 34px;
   flex: none;
   padding-right: var(--sp-3);
-  color: var(--tx-4);
+  color: var(--tx-3);
   background: inherit;
   border-right: 1px solid var(--bd-1);
   text-align: right;

@@ -51,6 +51,15 @@
   --bg-5: #232529;
   --agent-render-bg: #17191e;
   --agent-render-head-bg: #202228;
+  --agent-card-bg: #14161a;
+  --agent-card-border: rgba(255, 255, 255, 0.14);
+  --agent-card-border-hover: rgba(255, 255, 255, 0.22);
+  --agent-result-bg: #252830;
+  --agent-result-border: rgba(255, 255, 255, 0.22);
+  --agent-patch-bg: rgba(76, 183, 130, 0.12);
+  --agent-patch-border: rgba(76, 183, 130, 0.4);
+  --agent-patch-bg-hover: rgba(76, 183, 130, 0.17);
+  --agent-patch-border-hover: rgba(76, 183, 130, 0.55);
 
   --bd-1: rgba(255, 255, 255, 0.055);
   --bd-2: rgba(255, 255, 255, 0.09);
@@ -103,6 +112,15 @@
   --bg-5: #e0e2e7;
   --agent-render-bg: #e6e8ed;
   --agent-render-head-bg: #dfe2e8;
+  --agent-card-bg: var(--bg-2);
+  --agent-card-border: rgba(9, 10, 20, 0.16);
+  --agent-card-border-hover: rgba(9, 10, 20, 0.24);
+  --agent-result-bg: #f2f3f6;
+  --agent-result-border: rgba(9, 10, 20, 0.13);
+  --agent-patch-bg: rgba(47, 158, 104, 0.1);
+  --agent-patch-border: rgba(47, 158, 104, 0.4);
+  --agent-patch-bg-hover: rgba(47, 158, 104, 0.15);
+  --agent-patch-border-hover: rgba(47, 158, 104, 0.55);
 
   --bd-1: rgba(9, 10, 20, 0.07);
   --bd-2: rgba(9, 10, 20, 0.11);
