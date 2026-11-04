@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Index, on, Show } from 'solid-js';
+import { createEffect, createSignal, Index, on, onCleanup, onMount, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
 import { updateMarkdown } from '../../lib/markdown';
@@ -356,13 +356,49 @@ function ToolCard(props: {
           <LiteratureWorkflow status={tool().status} summary={tool().summary} input={tool().input} output={tool().output} progress={tool().literature} />
         </Show>
         <div class="tool__out">
-          <Show when={tool().name !== 'research_literature' && tool().input.split('\n').length > 1}>
-            <pre class="tool__io">{tool().input}</pre>
+          <Show when={tool().name !== 'research_literature' && tool().input}>
+            <ToolParameters text={tool().input} />
           </Show>
           <Show when={tool().name !== 'research_literature'}>
             <pre class="tool__io tool__io--out">{tool().output || '…'}</pre>
           </Show>
         </div>
+      </Show>
+    </div>
+  );
+}
+
+function ToolParameters(props: { text: string; literature?: boolean }) {
+  const [expanded, setExpanded] = createSignal(false);
+  const [long, setLong] = createSignal(false);
+  let text!: HTMLPreElement;
+
+  onMount(() => {
+    // Measure wrapped visual lines, including when the panel is resized.
+    const observer = new ResizeObserver(() => {
+      const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+      setLong(text.getBoundingClientRect().height > lineHeight * 6 + 1);
+    });
+    observer.observe(text);
+    onCleanup(() => observer.disconnect());
+  });
+
+  return (
+    <div class="tool-parameters" classList={{ 'tool-parameters--literature': props.literature }}>
+      <div class="tool-parameters__clip" classList={{ 'tool-parameters__clip--expanded': expanded(), 'tool-parameters__clip--faded': long() && !expanded() }}>
+        <pre ref={text} class="tool-parameters__text">{props.text}</pre>
+      </div>
+      <Show when={long()}>
+        <button
+          class="tool-parameters__toggle"
+          classList={{ 'tool-parameters__toggle--expanded': expanded() }}
+          aria-expanded={expanded()}
+          aria-label={expanded() ? '收起参数' : '展开参数'}
+          data-tooltip={expanded() ? '收起参数' : '展开参数'}
+          onClick={() => setExpanded(!expanded())}
+        >
+          <Icon name="chevronDown" size={14} />
+        </button>
       </Show>
     </div>
   );
@@ -398,7 +434,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
         <span class="research-workflow__summary truncate">{searched() ? `${props.progress?.total ?? finalPapers()?.length ?? 0} papers found` : props.status === 'running' ? 'searching Google Scholar' : 'search not completed'}</span>
       </div>
       <Show when={props.input}>
-        <pre class="research-workflow__detail research-workflow__parameters">{props.input}</pre>
+        <ToolParameters text={props.input} literature />
       </Show>
       <Show when={failed() && !stopped() && !searched() && props.output && !finalPapers()}>
         <pre class="research-workflow__detail">{props.output}</pre>

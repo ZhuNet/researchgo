@@ -658,19 +658,8 @@
 }
 
 .tool {
-  border-radius: var(--r-md);
-  background: var(--bg-2);
-  border: 1px solid var(--bd-1);
+  background: transparent;
   overflow: hidden;
-  transition: border-color var(--t-fast) var(--ease);
-}
-
-.tool:hover {
-  border-color: var(--bd-2);
-}
-
-.tool--running {
-  border-color: var(--ac-line);
 }
 
 .tool__head {
@@ -738,7 +727,8 @@
 }
 
 .tool__out {
-  padding: 0 var(--sp-4) var(--sp-4);
+  /* Align expanded parameters and results with the tool name after its icon. */
+  padding: 0 var(--sp-4) var(--sp-4) calc(var(--sp-4) + 13px + var(--sp-3));
   animation: fadeIn var(--t-fast) var(--ease-out) both;
 }
 
@@ -759,8 +749,59 @@
   scrollbar-color: var(--bd-3) transparent;
 }
 
-.tool__io + .tool__io {
+.tool-parameters + .tool__io {
   margin-top: var(--sp-3);
+}
+
+.tool-parameters {
+  min-width: 0;
+  color: var(--tx-3);
+  font: 11px/1.6 var(--font-mono);
+}
+
+.tool-parameters__clip {
+  max-height: 9.6em;
+  overflow: hidden;
+}
+
+.tool-parameters__clip--expanded {
+  max-height: none;
+}
+
+.tool-parameters__clip--faded {
+  mask-image: linear-gradient(to bottom, #000 0%, #000 75%, transparent 100%);
+}
+
+.tool-parameters__text {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-parameters__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 22px;
+  margin: var(--sp-1) auto 0;
+  border-radius: var(--r-sm);
+  color: var(--tx-3);
+  transition: color var(--t-fast) var(--ease);
+}
+
+.tool-parameters__toggle:hover,
+.tool-parameters__toggle:focus-visible {
+  color: var(--tx-1);
+}
+
+.tool-parameters__toggle svg {
+  transition: transform var(--t-fast) var(--ease);
+}
+
+.tool-parameters__toggle--expanded svg {
+  transform: rotate(180deg);
 }
 
 .tool__io--out {
@@ -783,7 +824,7 @@
 .research-workflow {
   display: grid;
   gap: var(--sp-2);
-  padding: 0 var(--sp-4) var(--sp-3);
+  padding: 0 var(--sp-4) var(--sp-3) calc(var(--sp-4) + 13px + var(--sp-3));
 }
 
 .research-workflow__step {
@@ -842,11 +883,8 @@
   overflow-wrap: anywhere;
 }
 
-.research-workflow__parameters {
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
+.tool-parameters--literature {
+  margin: 0 0 var(--sp-2) calc(15px + var(--sp-3));
 }
 
 .patch__head {
