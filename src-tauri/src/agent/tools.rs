@@ -430,7 +430,9 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
     async move {
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
       progress(json!({ "stage": "paper", "index": index, "title": detail.title }));
-      let pdf = super::browser_download::download(&detail.pdf_link, &turn).await;
+      let pdf = super::browser_download::download(&detail.pdf_link, &turn, &|label, downloading| {
+        progress(json!({ "stage": "browser", "index": index, "label": label, "downloading": downloading }));
+      }).await;
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
       let _save = tokio::select! {
         biased;

@@ -875,6 +875,52 @@
 .research-workflow__paper > .research-workflow__step { margin-left: calc(15px + var(--sp-3)); }
 .research-workflow__paper--ok { color: var(--ok); }
 .research-workflow__paper--err { color: var(--err); }
+.literature-browser {
+  position: relative;
+  margin: var(--sp-2) 0 var(--sp-2) calc(15px + var(--sp-3));
+  overflow: hidden;
+  background: var(--agent-result-bg);
+  border: 1px solid var(--agent-result-border);
+  border-radius: var(--r-sm);
+}
+.literature-browser__head { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); color: var(--tx-3); font-size: 11px; }
+.literature-browser__close { display: grid; place-items: center; margin-left: auto; width: 24px; height: 24px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); cursor: pointer; }
+.literature-browser__close:hover { background: var(--agent-result-border); color: var(--tx-1); }
+.literature-browser__close:disabled { opacity: 0.5; cursor: default; }
+.literature-browser__body { aspect-ratio: 1000 / 760; overflow: hidden; }
+.literature-browser__placeholder {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--tx-4);
+  font-size: 11px;
+}
+.literature-browser__body--downloading { aspect-ratio: auto; padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+.literature-browser__hint { display: block; margin-top: var(--sp-2); color: var(--tx-4); font-size: 10px; }
+.literature-browser__progress {
+  position: relative;
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tx-2) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tx-2) 6%, transparent);
+}
+.literature-browser__progress-beam {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 45%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ok) 55%, var(--tx-2)) 35%, var(--ok) 70%, transparent);
+  animation: literature-download-flow 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes literature-download-flow {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(225%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .literature-browser__progress-beam { animation: none; left: 25%; width: 50%; }
+}
 .research-workflow__detail {
   margin: 0 0 var(--sp-2) calc(15px + var(--sp-3));
   padding: var(--sp-3);

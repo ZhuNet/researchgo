@@ -38,6 +38,8 @@ pub fn run() {
       agent::agent_abort,
       agent::agent_status,
       agent::agent_clear,
+      agent::browser_download::position_browser,
+      agent::browser_download::close_browser,
       content::file_info,
       content::build_project,
       content::build_plan,

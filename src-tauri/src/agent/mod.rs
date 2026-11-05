@@ -16,7 +16,7 @@ pub mod config;
 pub mod frame;
 pub mod log;
 pub mod tools;
-mod browser_download;
+pub(crate) mod browser_download;
 
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};

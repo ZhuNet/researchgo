@@ -7,17 +7,23 @@ export interface LiteraturePaper {
 
 export interface LiteratureProgress {
   total: number;
-  papers: { title: string; result?: LiteraturePaper }[];
+  papers: { title: string; result?: LiteraturePaper; browser?: { label: string; downloading: boolean } }[];
 }
 
 export type LiteratureEvent =
   | { stage: 'retrieving'; total: number }
   | { stage: 'paper'; index: number; title: string }
+  | { stage: 'browser'; index: number; label: string; downloading: boolean }
   | { stage: 'result'; index: number; paper: LiteraturePaper };
 
 export function updateLiterature(previous: LiteratureProgress | undefined, event: LiteratureEvent): LiteratureProgress {
   if (event.stage === 'retrieving') return { total: event.total, papers: [] };
   const next = { total: previous?.total ?? 0, papers: [...(previous?.papers ?? [])] };
+  if (event.stage === 'browser') {
+    const paper = next.papers[event.index];
+    if (paper && !paper.result) next.papers[event.index] = { ...paper, browser: { label: event.label, downloading: event.downloading } };
+    return next;
+  }
   next.papers[event.index] = event.stage === 'paper'
     ? { title: event.title }
     : { title: event.paper.title, result: event.paper };

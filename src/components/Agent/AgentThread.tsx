@@ -1,6 +1,7 @@
 import { createEffect, createSignal, Index, on, onCleanup, onMount, Show } from 'solid-js';
 
 import { Icon } from '../Icon';
+import { LiteratureBrowser } from './LiteratureBrowser';
 import { updateMarkdown } from '../../lib/markdown';
 import type { Agent, Item } from '../../store/agent';
 import { copyText } from '../../store/ui';
@@ -438,7 +439,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
     try { const result = JSON.parse(props.output); return Array.isArray(result.papers) ? result.papers : undefined; } catch { return undefined; }
   };
   const searched = () => !!props.progress || !!finalPapers();
-  const papers = () => finalPapers()?.map((paper) => ({ title: paper.title, result: paper })) ?? props.progress?.papers ?? [];
+  const papers = (): import('../../lib/literature').LiteratureProgress['papers'] => finalPapers()?.map((paper) => ({ title: paper.title, result: paper })) ?? props.progress?.papers ?? [];
   const total = () => props.progress?.total ?? papers().length;
   const completed = () => papers().filter((paper) => paper.result).length;
   const downloaded = () => papers().filter((paper) => paper.result && paper.result.source.status !== 'unavailable').length;
@@ -486,12 +487,17 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
           }}>
             <span>{index + 1}. {paper().title}</span>
           </div>
+          <Show when={props.status === 'running' && !paper().result && paper().browser}>
+            {(browser) => <LiteratureBrowser browser={browser()} />}
+          </Show>
+          <Show when={paper().result || props.status !== 'running'}>
           <ToolParameters literature output text={paper().result
             ? [paper().result?.source.status === 'unavailable'
                 ? `Download failed: ${paper().result?.extraction_note ?? ''}`
                 : `${paper().result?.source.status.toUpperCase()} saved`,
               paper().result?.source.path].filter(Boolean).join('\n')
-            : props.status === 'running' ? 'Downloading PDF…' : 'Download interrupted'} />
+            : 'Download interrupted'} />
+          </Show>
         </div>
       )}</Index>
     </div>
