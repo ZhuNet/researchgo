@@ -42,7 +42,8 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, Too
     let mut child = Command::new(browser_path()?)
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            "--no-first-run", "--no-default-browser-check", "--disable-background-mode", "about:blank"])
+            "--no-first-run", "--no-default-browser-check", "--disable-background-mode",
+            "--no-startup-window"])
         .kill_on_drop(true).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
         .spawn().map_err(|e| ToolError(format!("cannot launch browser: {e}")))?;
     let operation = async {
@@ -68,19 +69,14 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, Too
             let event: Value = serde_json::from_str(&text).map_err(|e| ToolError(e.to_string()))?;
             if let Some(error) = event.get("error") { return Err(ToolError(format!("browser download: {error}"))); }
             let next = match event["id"].as_u64() {
-                Some(1) => Some(json!({"id":2,"method":"Target.createTarget","params":{"url":"about:blank"}})),
+                // Do not create an empty tab and navigate it afterwards. The
+                // requested URL is the only target this browser session owns.
+                Some(1) => Some(json!({"id":2,"method":"Target.createTarget","params":{"url":url}})),
                 Some(2) => Some(json!({"id":3,"method":"Target.attachToTarget","params":{"targetId":event["result"]["targetId"],"flatten":true}})),
-                Some(3) => Some(json!({"id":4,"sessionId":event["result"]["sessionId"],"method":"Page.navigate","params":{"url":url}})),
                 _ => None,
             };
             if let Some(next) = next {
                 socket.send(Message::Text(next.to_string().into())).await.map_err(|e| ToolError(e.to_string()))?;
-            }
-            // ERR_ABORTED is expected when navigation becomes a download.
-            if event["id"] == 4 {
-                if let Some(error) = event["result"]["errorText"].as_str() {
-                    if error != "net::ERR_ABORTED" { return Err(ToolError(format!("browser navigation: {error}"))); }
-                }
             }
             if event["method"] == "Browser.downloadProgress" {
                 match event["params"]["state"].as_str() {
