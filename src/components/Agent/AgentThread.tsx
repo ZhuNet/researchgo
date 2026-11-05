@@ -259,9 +259,19 @@ function PatchCard(props: {
   const [expanded, setExpanded] = createSignal(false);
   const [long, setLong] = createSignal(false);
   const observeLines = (element: HTMLDivElement) => {
-    const observer = new ResizeObserver(() => setLong(element.getBoundingClientRect().height > 19 * 6 + 1));
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        setLong(element.getBoundingClientRect().height > 19 * 6 + 1);
+      });
+    });
     observer.observe(element);
-    onCleanup(() => observer.disconnect());
+    onCleanup(() => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    });
   };
 
   return (
@@ -399,12 +409,21 @@ function ToolParameters(props: { text: string; literature?: boolean; output?: bo
 
   onMount(() => {
     // Measure wrapped visual lines, including when the panel is resized.
+    // Defer layout-changing signals until after ResizeObserver delivery.
+    let frame = 0;
     const observer = new ResizeObserver(() => {
-      const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
-      setLong(text.getBoundingClientRect().height > lineHeight * 6 + 1);
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+        setLong(text.getBoundingClientRect().height > lineHeight * 6 + 1);
+      });
     });
     observer.observe(text);
-    onCleanup(() => observer.disconnect());
+    onCleanup(() => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    });
   });
 
   return (

@@ -24,6 +24,22 @@ struct Browser {
     directory: Option<tempfile::TempDir>,
     canceled: Arc<AtomicBool>,
 }
+impl Browser {
+    async fn close(&self) -> Result<(), ToolError> {
+        self.canceled.store(true, Ordering::Relaxed);
+        let app = self.app.clone();
+        let label = self.label.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.app.run_on_main_thread(move || {
+            let result = match app.get_webview(&label) {
+                Some(webview) => webview.close().map_err(|e| ToolError(e.to_string())),
+                None => Ok(()),
+            };
+            let _ = tx.send(result);
+        }).map_err(|e| ToolError(e.to_string()))?;
+        rx.await.map_err(|e| ToolError(e.to_string()))?
+    }
+}
 impl Drop for Browser {
     fn drop(&mut self) {
         if let Ok(mut browsers) = BROWSERS.lock() {
@@ -43,7 +59,19 @@ impl Drop for Browser {
 #[tauri::command]
 pub(crate) async fn position_browser(app: tauri::AppHandle, webview: tauri::Webview, label: String, bounds: Option<[f64; 4]>) -> Result<(), String> {
     if webview.label() != "main" || !label.starts_with("paper-download-") { return Err("invalid browser host".into()); }
-    let Some(browser) = app.get_webview(&label) else { return Ok(()); };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let host = app.clone();
+    app.run_on_main_thread(move || {
+        let result = position_browser_on_main(&host, &label, bounds);
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| e.to_string())?
+}
+
+// On the UI thread Tauri applies these operations directly, rather than merely
+// enqueueing them. Acknowledgment therefore follows the whole layout operation.
+fn position_browser_on_main(app: &tauri::AppHandle, label: &str, bounds: Option<[f64; 4]>) -> Result<(), String> {
+    let Some(browser) = app.get_webview(label) else { return Ok(()); };
     if let Some([x, y, width, height]) = bounds {
         if ![x, y, width, height].iter().all(|n| n.is_finite()) || width <= 0.0 || height <= 0.0 { return Err("invalid browser bounds".into()); }
         browser.set_bounds(tauri::Rect { position: tauri::LogicalPosition::new(x, y).into(), size: tauri::LogicalSize::new(width, height).into() }).map_err(|e| e.to_string())?;
@@ -75,7 +103,7 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>, progress: &(dyn Fn(&st
     }
     let label = format!("paper-download-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let canceled = Arc::new(AtomicBool::new(false));
-    let _browser = Browser { app: app.clone(), label: label.clone(), directory: Some(dir), canceled: canceled.clone() };
+    let browser = Browser { app: app.clone(), label: label.clone(), directory: Some(dir), canceled: canceled.clone() };
     let closed = Arc::new(tokio::sync::Notify::new());
     BROWSERS.lock().map_err(|e| ToolError(e.to_string()))?.insert(label.clone(), closed.clone());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BrowserEvent>();
@@ -143,13 +171,16 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>, progress: &(dyn Fn(&st
         if !bytes.starts_with(b"%PDF-") { return Err(ToolError("browser downloaded a file that is not a PDF".into())); }
         Ok(bytes)
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         _ = turn.stopped() => Err(ToolError(super::tools::STOPPED.into())),
         _ = closed.notified() => Err(ToolError("PDF download canceled: browser closed".into())),
         result = tokio::time::timeout(Duration::from_secs(180), operation) =>
             result.unwrap_or_else(|_| Err(ToolError("browser PDF download timed out after 180 seconds".into()))),
-    }
+    };
+    // Do not publish a paper result while its native view is still on screen.
+    browser.close().await?;
+    result
 }
 
 #[cfg(test)]

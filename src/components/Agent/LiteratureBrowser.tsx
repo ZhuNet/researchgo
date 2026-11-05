@@ -1,11 +1,13 @@
 import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { Icon } from '../Icon';
+import { queueBrowserLayout } from '../../lib/browserLayout';
 
 /** The native child follows this slot; it is never a separate browser window. */
 export function LiteratureBrowser(props: { browser: { label: string; downloading: boolean } }) {
   let slot!: HTMLDivElement;
   const [closing, setClosing] = createSignal(false);
   const [error, setError] = createSignal('');
+  const [downloadVisible, setDownloadVisible] = createSignal(false);
   const invoke = (globalThis as { __TAURI__?: { core: { invoke: (command: string, args: unknown) => Promise<unknown> } } }).__TAURI__?.core.invoke;
   const close = async () => {
     if (!invoke || closing()) return;
@@ -21,14 +23,27 @@ export function LiteratureBrowser(props: { browser: { label: string; downloading
     let previous = '';
     let syncing = false;
     const hidden = () => closing() || props.browser.downloading;
+    const position = (bounds: number[] | null) => queueBrowserLayout(label, async () => {
+      // A queued show can become obsolete while an earlier native operation runs.
+      if (bounds && (disposed || hidden())) return;
+      // Check after earlier operations finish, so cleanup does not hide twice.
+      if (bounds === null && previous === 'null') {
+        if (!disposed && props.browser.downloading) setDownloadVisible(true);
+        return;
+      }
+      if (invoke) {
+        await invoke('position_browser', { label, bounds });
+        previous = JSON.stringify(bounds);
+        if (bounds === null && !disposed && props.browser.downloading) setDownloadVisible(true);
+      }
+    });
     const sync = async () => {
       if (disposed || syncing) return;
       syncing = true;
       if (hidden()) {
-        if (previous !== 'null' && invoke) {
+        if (invoke) {
           try {
-            await invoke('position_browser', { label, bounds: null });
-            previous = 'null';
+            await position(null);
           } catch { /* The browser may already have been closed. */ }
         }
         syncing = false;
@@ -54,8 +69,7 @@ export function LiteratureBrowser(props: { browser: { label: string; downloading
       const key = JSON.stringify(bounds);
       if (key !== previous && invoke) {
         try {
-          await invoke('position_browser', { label, bounds });
-          previous = key;
+          await position(bounds);
         } catch { /* The download may finish while a layout update is in flight. */ }
       }
       syncing = false;
@@ -69,17 +83,17 @@ export function LiteratureBrowser(props: { browser: { label: string; downloading
     onCleanup(() => {
       disposed = true;
       cancelAnimationFrame(frame);
-      if (invoke) void invoke('position_browser', { label, bounds: null }).catch(() => {});
+      void position(null).catch(() => {});
     });
   });
   return <div class="literature-browser">
     <div class="literature-browser__head">
-      <Icon name={props.browser.downloading ? 'book' : 'globe'} size={13} />
-      <span>{closing() ? '正在关闭…' : props.browser.downloading ? '正在下载文献' : '文献网页'}</span>
+      <Icon name={downloadVisible() ? 'book' : 'globe'} size={13} />
+      <span>{closing() ? '正在关闭…' : downloadVisible() ? '正在下载文献' : '文献网页'}</span>
       <button class="literature-browser__close" aria-label="关闭当前文献网页" title="关闭当前文献网页" disabled={closing()} onClick={() => { void close(); }}><Icon name="x" size={14} /></button>
     </div>
-    <div ref={slot} class="literature-browser__body" classList={{ 'literature-browser__body--downloading': props.browser.downloading }}>
-      <Show when={props.browser.downloading} fallback={<span class="literature-browser__placeholder">文献网页</span>}>
+    <div ref={slot} class="literature-browser__body" classList={{ 'literature-browser__body--downloading': downloadVisible() }}>
+      <Show when={downloadVisible()} fallback={<span class="literature-browser__placeholder">文献网页</span>}>
         <div class="literature-browser__progress" role="progressbar" aria-label="正在下载文献">
           <span class="literature-browser__progress-beam" />
         </div>

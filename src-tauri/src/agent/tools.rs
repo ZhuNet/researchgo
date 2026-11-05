@@ -421,7 +421,7 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
 
   // Each bounded worker downloads one PDF, then queues its save. Keeping the
   // save inside the worker applies backpressure instead of retaining the batch.
-  use futures_util::stream::{self, StreamExt, TryStreamExt};
+  use futures_util::stream::{self, StreamExt};
   let save_queue = tokio::sync::Mutex::new(());
   let tasks = stream::iter(results.into_iter().enumerate().map(|(index, detail)| {
     let turn = turn.clone();
@@ -445,7 +445,10 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
     }
   })).buffer_unordered(LITERATURE_CONCURRENCY);
 
-  let mut done: Vec<_> = tasks.try_collect().await?;
+  // Drain workers on cancellation too, so every native view finishes closing
+  // before the tool publishes its final status.
+  let outcomes: Vec<_> = tasks.collect().await;
+  let mut done: Vec<_> = outcomes.into_iter().collect::<Result<_, _>>()?;
   done.sort_by_key(|(index, _, _)| *index);
   let paper_failures = done.iter().filter(|(_, _, f)| *f).count();
   let papers: Vec<Value> = done.into_iter().map(|(_, p, _)| p).collect();
