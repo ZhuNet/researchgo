@@ -38,6 +38,7 @@ pub struct EditorContext {
 
 /// Registers the state the commands share. Called once from `lib.rs`.
 pub fn init(app: &mut tauri::App) {
+  browser_download::init(app.handle());
   app.manage(AgentState::new());
   config::init(app.handle());
 }
