@@ -75,24 +75,15 @@ const MAX_READ_LINES: usize = 2000;
 const BASH_TIMEOUT_SECS: u64 = 120;
 const BASH_MAX_TIMEOUT_SECS: u64 = 3600;
 const BASH_MAX_OUTPUT: usize = 60_000;
-/// The single longest wait for any network step (a Google Scholar search, the
-/// PDF itself). It is a safety net against a very slow network, not a
-/// substitute for handling errors: HTTP 4xx/5xx, parse failures and invalid
-/// PDFs are real errors and are reported as such, never swallowed by a timeout.
+/// Deadline for the Google Scholar search request.
 const LITERATURE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
-/// Bounds citation requests and paper downloads across each batch. Within one
+/// Bounds browser downloads across each batch. Within one
 /// paper, the PDF must be saved before its metadata is added to the index.
 const LITERATURE_CONCURRENCY: usize = 4;
 /// How many Google Scholar results one search asks for. SerpAPI caps this at
 /// 20, which is also the ceiling the tool enforces on `max_papers`, so one
 /// page always covers the whole batch before deduplication.
 const SERPAPI_RESULTS: usize = 20;
-/// A realistic desktop Chrome User-Agent for direct PDF downloads: some hosts
-/// refuse requests without a browser-like UA.
-const DOWNLOAD_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-/// PDFs larger than this are rejected: a bigger body is almost certainly an
-/// HTML error page or a redirected landing page.
-const DOWNLOAD_MAX_PDF: usize = 50 * 1024 * 1024;
 /// Bounds that keep `grep` an answer rather than a sweep of the whole disk.
 const GREP_MAX_FILES: usize = 20_000;
 const GREP_MAX_HITS: usize = 300;
@@ -424,7 +415,7 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   // a red cross and the reason, and nothing is downloaded.
   let hits = search_serpapi(&client, args, serpapi_key, turn).await?;
   let hits = select_new_papers(hits, existing, args.max_papers);
-  let results = fetch_selected_bibtex(&client, hits, serpapi_key, turn).await?;
+  let results: Vec<_> = hits.into_iter().map(|hit| hit.record).collect();
   progress(json!({ "stage": "retrieving", "total": results.len() }));
   if !results.is_empty() { fs::create_dir_all(&reference_dir).map_err(|e| ToolError(format!("cannot create reference directory: {e}")))?; }
 
@@ -432,18 +423,14 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
   // save inside the worker applies backpressure instead of retaining the batch.
   use futures_util::stream::{self, StreamExt, TryStreamExt};
   let save_queue = tokio::sync::Mutex::new(());
-  let tasks = stream::iter(results.into_iter().enumerate().map(|(index, (detail, bib))| {
-    let client = client.clone();
+  let tasks = stream::iter(results.into_iter().enumerate().map(|(index, detail)| {
     let turn = turn.clone();
     let reference_dir = &reference_dir;
     let save_queue = &save_queue;
     async move {
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
       progress(json!({ "stage": "paper", "index": index, "title": detail.title }));
-      let pdf = match bib {
-        Err(error) => Err(error),
-        Ok(()) => download_pdf(&client, &detail.pdf_link, &turn).await,
-      };
+      let pdf = super::browser_download::download(&detail.pdf_link, &turn).await;
       if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
       let _save = tokio::select! {
         biased;
@@ -474,10 +461,8 @@ async fn research_literature_with_progress(root: &Path, args: &ResearchLiteratur
 #[derive(Clone, Debug, serde::Serialize, Deserialize)]
 struct LiteratureRecord {
   title: String,
-  /// BibTeX exported by Google Scholar Cite.
-  bib: String,
-  /// Authors, comma-separated, as Google Scholar lists them.
-  authors: String,
+  /// Publication summary as Google Scholar lists it.
+  publication_summary: String,
   abstract_text: String,
   cited_by_count: u64,
   /// The paper's landing page from the search result.
@@ -489,7 +474,8 @@ struct LiteratureRecord {
 /// One parsed Google Scholar organic result and its citation endpoint.
 struct SerpapiHit {
   record: LiteratureRecord,
-  /// The `serpapi_cite_link` used to fetch the BibTeX export.
+  /// Required candidate metadata; never requested by the download workflow.
+  #[allow(dead_code)]
   cite_link: String,
 }
 
@@ -501,11 +487,8 @@ fn serpapi_hit(result: &Value) -> Option<SerpapiHit> {
   let cite_link = result["inline_links"]["serpapi_cite_link"].as_str()?;
   if cite_link.trim().is_empty() { return None; }
   let cite_link = cite_link.to_string();
-  let authors = result["publication_info"]["authors"]
-    .as_array()?
-    .iter().map(|author| author["name"].as_str().filter(|name| !name.trim().is_empty()))
-    .collect::<Option<Vec<_>>>()?.join(", ");
-  if authors.is_empty() { return None; }
+  let publication_summary = result["publication_info"]["summary"].as_str()?.trim().to_string();
+  if publication_summary.is_empty() { return None; }
   // Scholar provides a snippet, not necessarily the complete abstract.
   let abstract_text = result["snippet"].as_str()?.trim().to_string();
   if abstract_text.is_empty() { return None; }
@@ -519,7 +502,7 @@ fn serpapi_hit(result: &Value) -> Option<SerpapiHit> {
       is_pdf.then(|| link.to_string())
     }).next())?;
   Some(SerpapiHit {
-    record: LiteratureRecord { title, bib: String::new(), authors, abstract_text, cited_by_count, url, pdf_link },
+  record: LiteratureRecord { title, publication_summary, abstract_text, cited_by_count, url, pdf_link },
     cite_link,
   })
 }
@@ -554,43 +537,6 @@ async fn search_serpapi(client: &reqwest::Client, args: &ResearchLiteratureArgs,
   Ok(results.iter().filter_map(serpapi_hit).collect())
 }
 
-async fn fetch_selected_bibtex(client: &reqwest::Client, hits: Vec<SerpapiHit>, api_key: &str, turn: &Arc<Turn>) -> Result<Vec<(LiteratureRecord, Result<(), ToolError>)>, ToolError> {
-  // Only selected papers incur citation requests. Parallel requests are still
-  // individual Cite API calls; the documented API has no batch-ID parameter.
-  use futures_util::stream::{self, StreamExt, TryStreamExt};
-  let work = hits.into_iter().enumerate().map(|(index, hit)| {
-    let client = client.clone();
-    let turn = turn.clone();
-    async move {
-      let mut record = hit.record;
-      let bib = fetch_citation_bibtex(&client, &hit.cite_link, api_key, &turn).await;
-      if turn.is_stopped() { return Err(ToolError(STOPPED.into())); }
-      let status = bib.map(|text| { record.bib = text; });
-      Ok::<_, ToolError>((index, record, status))
-    }
-  });
-  let mut records: Vec<_> = stream::iter(work).buffer_unordered(LITERATURE_CONCURRENCY).try_collect().await?;
-  records.sort_by_key(|(index, _, _)| *index);
-  Ok(records.into_iter().map(|(_, record, status)| (record, status)).collect())
-}
-
-/// Downloads the BibTeX export through the Google Scholar Cite engine.
-///
-/// The cite engine returns citation strings in several styles and a set of
-/// export links. A missing or failed export prevents that paper from being saved.
-async fn fetch_citation_bibtex(client: &reqwest::Client, cite_link: &str, api_key: &str, turn: &Arc<Turn>) -> Result<String, ToolError> {
-  let mut url = reqwest::Url::parse(cite_link).map_err(|e| ToolError(format!("invalid BibTeX cite link: {e}")))?;
-  if !api_key.is_empty() { url.query_pairs_mut().append_pair("api_key", api_key); }
-  let body = literature_json(client, url.as_str(), &[], turn).await?;
-  let bibtex_url = body["links"].as_array()
-    .and_then(|links| links.iter().find(|l| l["name"].as_str() == Some("BibTeX")))
-    .and_then(|l| l["link"].as_str());
-  let bibtex_url = bibtex_url.ok_or_else(|| ToolError("no BibTeX export link".into()))?;
-  let bytes = http_bytes(client, bibtex_url, turn, DOWNLOAD_MAX_PDF).await?;
-  let bibtex = String::from_utf8(bytes).map_err(|e| ToolError(format!("invalid BibTeX text: {e}")))?;
-  if !bibtex.trim_start().starts_with('@') { return Err(ToolError("invalid BibTeX export".into())); }
-  Ok(bibtex)
-}
 
 fn title_key(title: &str) -> String {
   title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
@@ -666,7 +612,6 @@ fn paper_identity(detail: &LiteratureRecord) -> String {
 /// stop before committing) removes only the PDF created by this attempt.
 fn save_paper_and_reference(reference_dir: &Path, detail: &LiteratureRecord, pdf_path: &Path, bytes: &[u8], turn: &Arc<Turn>) -> Result<PathBuf, ToolError> {
   use std::io::Write;
-  if detail.bib.is_empty() { return Err(ToolError("BibTeX is missing".into())); }
   let pdf_temp = pdf_path.with_extension("pdf.part");
   if pdf_path.exists() { return Err(ToolError("PDF path already exists without an index entry".into())); }
   let mut staged = fs::OpenOptions::new().write(true).create_new(true).open(&pdf_temp)
@@ -699,50 +644,6 @@ fn save_paper_and_reference(reference_dir: &Path, detail: &LiteratureRecord, pdf
   }
 }
 
-/// Downloads a PDF from its resource link, held in memory.
-///
-/// The bytes stay in memory until the caller writes them to disk, so a failure
-/// here cannot leave a partial file behind.
-async fn download_pdf(client: &reqwest::Client, url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, ToolError> {
-  let bytes = http_bytes(client, url, turn, DOWNLOAD_MAX_PDF).await?;
-  if !bytes.starts_with(b"%PDF-") {
-    return Err(ToolError("downloaded file is not a valid PDF".into()));
-  }
-  Ok(bytes)
-}
-
-/// GETs `url` and returns the body bytes, aborting the moment the turn stops.
-/// The client's single timeout is the whole "longest wait" safety net; a
-/// non-success HTTP status is a real error and is reported, never timed out.
-async fn http_bytes(client: &reqwest::Client, url: &str, turn: &Arc<Turn>, max_bytes: usize) -> Result<Vec<u8>, ToolError> {
-  tokio::select! {
-    biased;
-    _ = turn.stopped() => Err(ToolError(STOPPED.into())),
-    result = async {
-      let mut response = client.get(url)
-        .header("User-Agent", DOWNLOAD_UA)
-        // This client is built without a decompression feature, and some PDF
-        // hosts gzip-encode the file when a client advertises gzip. Force
-        // identity so we receive the raw `%PDF-` bytes instead of a gzip
-        // wrapper we could not read.
-        .header("Accept-Encoding", "identity")
-        .send().await
-        .map_err(|e| ToolError(e.to_string()))?
-        .error_for_status().map_err(|e| ToolError(e.to_string()))?;
-      if response.content_length().is_some_and(|length| length > max_bytes as u64) {
-        return Err(ToolError("response exceeds download size limit".into()));
-      }
-      let mut bytes = Vec::new();
-      while let Some(chunk) = response.chunk().await.map_err(|e| ToolError(e.to_string()))? {
-        if chunk.len() > max_bytes - bytes.len() {
-          return Err(ToolError("response exceeds download size limit".into()));
-        }
-        bytes.extend_from_slice(&chunk);
-      }
-      Ok(bytes)
-    } => result,
-  }
-}
 
 /// The reference library is one Markdown index and the PDFs themselves.
 static REFERENCE_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -772,11 +673,8 @@ fn persist_reference_entry(reference_dir: &Path, entry: &str) -> Result<PathBuf,
 
 fn reference_entry(detail: &LiteratureRecord, pdf_path: &Path) -> String {
   let mut out = format!("<!-- TITLE:{} -->\n## {}\n\n", paper_identity(detail), detail.title);
-  if !detail.authors.is_empty() {
-    out.push_str(&format!("- 作者: {}\n", detail.authors));
-  }
-  if !detail.bib.is_empty() {
-    out.push_str(&format!("- BibTeX:\n```bibtex\n{}\n```\n", detail.bib.trim()));
+  if !detail.publication_summary.is_empty() {
+    out.push_str(&format!("- 出版信息: {}\n", detail.publication_summary));
   }
   if !detail.abstract_text.is_empty() {
     out.push_str(&format!("查询初步匹配片段: {}\n", detail.abstract_text));
@@ -1354,7 +1252,7 @@ mod tests {
   fn scholar_fixture(overrides: Value) -> Value {
     let mut result = json!({
       "title": "Test paper", "link": "https://example.org/paper",
-      "publication_info": {"authors": [{"name": "Test Author"}]},
+      "publication_info": {"summary": "Test Author - Test Journal, 2024 - example.org"},
       "snippet": "Original snippet ...",
       "inline_links": {"cited_by": {"total": 0}, "serpapi_cite_link": "https://serpapi.com/search?engine=google_scholar_cite&q=test"},
       "resources": [{"file_format": "PDF", "link": "https://example.org/paper.pdf"}]
@@ -1366,7 +1264,7 @@ mod tests {
   }
 
   #[test]
-  fn incomplete_search_results_stop_before_cite() {
+  fn incomplete_search_results_are_not_candidates() {
     let complete = scholar_fixture(json!({}));
     assert_eq!(serpapi_hit(&complete).unwrap().record.cited_by_count, 0);
     for field in ["title", "link", "publication_info", "snippet", "inline_links", "resources"] {
@@ -1376,8 +1274,9 @@ mod tests {
     }
     for overrides in [
       json!({"title": " "}), json!({"link": ""}), json!({"snippet": ""}),
-      json!({"publication_info": {"authors": []}}),
-      json!({"publication_info": {"authors": [{"name": ""}]}}),
+      json!({"publication_info": {"summary": ""}}),
+      json!({"publication_info": {"summary": " "}}),
+      json!({"publication_info": {"authors": [{"name": "Test Author"}]}}),
       json!({"inline_links": {"cited_by": {"total": "invalid"}}}),
       json!({"inline_links": {"cited_by": {"total": 0}}}),
       json!({"inline_links": {"cited_by": {"total": 0}, "serpapi_cite_link": " "}}),
@@ -1410,9 +1309,8 @@ mod tests {
     let paper = serpapi_hit(&result).unwrap().record;
     assert!(serde_json::to_value(&paper).unwrap().get("doi").is_none());
     assert_eq!(paper.title, "A Test Paper");
-    // The summary is not BibTeX; BibTeX comes from the cite export.
-    assert!(paper.bib.is_empty());
-    assert_eq!(paper.authors, "Ada Lovelace, Grace Hopper");
+    assert!(serde_json::to_value(&paper).unwrap().get("bib").is_none());
+    assert_eq!(paper.publication_summary, "Ada Lovelace - Journal of Tests, 2024 - example.org");
     assert_eq!(paper.abstract_text, "A detailed abstract snippet.");
     assert_eq!(paper.cited_by_count, 42);
     assert_eq!(paper.pdf_link, "https://example.org/paper.pdf");
@@ -1425,7 +1323,7 @@ mod tests {
       "publication_info": {"summary": "B Author - Journal, 2020 - doi.org/10.5678/abc", "authors": [{"name": "B Author"}]},
       "resources": [{"title": "host", "file_format": "PDF", "link": "https://host.example/book.pdf"}]
     }))).unwrap().record;
-    assert!(from_summary.bib.is_empty());
+    assert_eq!(from_summary.publication_summary, "B Author - Journal, 2020 - doi.org/10.5678/abc");
 
     // A resource explicitly marked HTML is not a PDF, regardless of its URL.
     let no_pdf = serpapi_hit(&scholar_fixture(json!({
@@ -1436,7 +1334,7 @@ mod tests {
     })));
     assert!(no_pdf.is_none());
 
-    // Keep the cite link for fetching BibTeX after title selection.
+    // Require the cite link without requesting it.
     let no_doi = serpapi_hit(&scholar_fixture(json!({
       "title": "No DOI", "result_id": "rid-4",
       "link": "https://scholar.google.com/scholar?cluster=123",
@@ -1476,8 +1374,7 @@ mod tests {
     fs::create_dir_all(&reference).unwrap();
     let detail = LiteratureRecord {
       title: "Test title".into(),
-      bib: "@article{test,\n  title = {Test title},\n  doi = {10.1234/example}\n}".into(),
-      authors: "Ada Lovelace".into(), abstract_text: "Detailed abstract".into(),
+      publication_summary: "Ada Lovelace - Journal of Tests, 2024 - example.org".into(), abstract_text: "Detailed abstract".into(),
       cited_by_count: 3, url: "https://doi.org/10.1234/example".into(),
       pdf_link: "https://example.org/paper.pdf".into(),
     };
@@ -1486,17 +1383,16 @@ mod tests {
     let markdown_path = persist_reference_entry(&reference, &entry).unwrap();
     assert_eq!(markdown_path, reference.join("index.md"));
     let markdown = fs::read_to_string(&markdown_path).unwrap();
-    // The heading is the paper title, and Google Scholar's citation line is
-    // stored as the actual BibTeX export.
+    // Basic metadata is saved without a BibTeX requirement.
     assert!(markdown.contains("## Test title"));
-    assert!(markdown.contains("```bibtex\n@article{test,"));
-    assert!(markdown.contains("作者: Ada Lovelace"));
+    assert!(!markdown.contains("BibTeX"));
+    assert!(markdown.contains("出版信息: Ada Lovelace - Journal of Tests, 2024 - example.org"));
     assert!(markdown.contains("Detailed abstract") && markdown.contains("引用数: 3"));
     assert!(!reference.join("papers.json").exists());
     // New titles append without modifying the bytes already in the index.
     let detail2 = LiteratureRecord {
       title: "Second title".into(),
-      bib: String::new(), authors: "Updated author".into(), abstract_text: String::new(),
+      publication_summary: "Updated author".into(), abstract_text: String::new(),
       cited_by_count: 0, url: String::new(), pdf_link: String::new(),
     };
     let entry2 = reference_entry(&detail2, &pdf_path);
@@ -1515,7 +1411,7 @@ mod tests {
     let reference = fixture.0.join("reference");
     fs::create_dir_all(&reference).unwrap();
     let detail = LiteratureRecord {
-      title: "Paper with PDF".into(), bib: "@article{test}".into(), authors: "Author".into(),
+      title: "Paper with PDF".into(), publication_summary: "Author".into(),
       abstract_text: String::new(), cited_by_count: 0, url: String::new(), pdf_link: String::new(),
     };
     let pdf_path = reference.join(format!("{}.pdf", paper_identity(&detail)));
@@ -1535,18 +1431,18 @@ mod tests {
   }
 
   #[test]
-  fn saving_paper_requires_bibtex() {
+  fn saving_paper_does_not_require_bibtex() {
     let fixture = Fixture::new();
     let reference = fixture.0.join("reference");
     fs::create_dir_all(&reference).unwrap();
     let detail = LiteratureRecord {
-      title: "Incomplete metadata".into(), bib: String::new(), authors: String::new(),
+      title: "Basic metadata".into(), publication_summary: "Author".into(),
       abstract_text: String::new(), cited_by_count: 0, url: String::new(), pdf_link: String::new(),
     };
     let pdf_path = reference.join(format!("{}.pdf", paper_identity(&detail)));
-    assert!(save_paper_and_reference(&reference, &detail, &pdf_path, b"%PDF-test", &Turn::detached()).is_err());
-    assert!(!pdf_path.exists());
-    assert!(!reference.join("index.md").exists());
+    assert!(save_paper_and_reference(&reference, &detail, &pdf_path, b"%PDF-test", &Turn::detached()).is_ok());
+    assert!(pdf_path.exists());
+    assert!(reference.join("index.md").exists());
   }
 
   #[tokio::test]
@@ -1555,7 +1451,7 @@ mod tests {
     fixture.write("reference/index.md", "# References\n\nExisting content\n\n");
     let reference = fixture.0.join("reference");
     let detail = LiteratureRecord {
-      title: "Queued paper".into(), bib: "@article{queued}".into(), authors: "Author".into(),
+      title: "Queued paper".into(), publication_summary: "Author".into(),
       abstract_text: "Snippet".into(), cited_by_count: 0, url: "https://example.org/paper".into(),
       pdf_link: "https://example.org/paper.pdf".into(),
     };
@@ -1572,36 +1468,13 @@ mod tests {
     assert_eq!(fs::read(&pdf_path).unwrap(), b"%PDF-test");
   }
 
-  #[tokio::test]
-  async fn downloads_enforce_limits_with_and_without_content_length() {
-    use std::io::{Read, Write};
-    for (headers, body, limit, succeeds) in [
-      ("Content-Length: 5\r\n", "hello", 5, true),
-      ("Content-Length: 5\r\n", "hello", 4, false),
-      ("", "hello", 4, false),
-    ] {
-      let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-      let url = format!("http://{}/", listener.local_addr().unwrap());
-      let server = std::thread::spawn(move || {
-        let (mut connection, _) = listener.accept().unwrap();
-        let mut request = [0; 4096];
-        connection.read(&mut request).unwrap();
-        let _ = write!(connection, "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n{body}");
-      });
-      let client = reqwest::Client::builder().no_proxy().build().unwrap();
-      let result = http_bytes(&client, &url, &Turn::detached(), limit).await;
-      assert_eq!(result.is_ok(), succeeds);
-      if succeeds { assert_eq!(result.unwrap(), b"hello"); }
-      server.join().unwrap();
-    }
-  }
 
   #[tokio::test]
   async fn failed_pdf_download_skips_metadata() {
     let fixture = Fixture::new();
     let reference = fixture.0.join("reference");
     let detail = LiteratureRecord {
-      title: "No PDF".into(), bib: String::new(), authors: String::new(),
+      title: "No PDF".into(), publication_summary: String::new(),
       abstract_text: String::new(), cited_by_count: 0, url: String::new(), pdf_link: "https://example.org/paper.pdf".into(),
     };
     let result = process_one_paper(&reference, &Turn::detached(), 0, &detail, Err(ToolError("connection reset".into())), &|_| {}).await.unwrap();
@@ -1617,7 +1490,7 @@ mod tests {
     let reference = fixture.0.join("reference");
     fs::create_dir_all(&reference).unwrap();
     let detail = LiteratureRecord {
-      title: "Stopped paper".into(), bib: "@article{test}".into(), authors: String::new(),
+      title: "Stopped paper".into(), publication_summary: String::new(),
       abstract_text: String::new(), cited_by_count: 0, url: String::new(), pdf_link: String::new(),
     };
     let pdf_path = reference.join(format!("{}.pdf", paper_identity(&detail)));
@@ -1644,32 +1517,14 @@ mod tests {
     assert_eq!(selected.len(), 2);
     assert_eq!(selected[0].record.title, "New Paper");
     assert_eq!(selected[1].record.title, "Other Paper");
-    assert!(selected.iter().all(|hit| !hit.cite_link.is_empty() && !hit.record.pdf_link.is_empty() && hit.record.bib.is_empty()));
+    assert!(selected.iter().all(|hit| !hit.cite_link.is_empty() && !hit.record.pdf_link.is_empty()));
   }
 
-  #[tokio::test]
-  async fn missing_bibtex_prevents_paper_download_and_metadata() {
-    let hit = serpapi_hit(&scholar_fixture(json!({
-      "title": "Invalid cite link",
-      "resources": [{"file_format": "PDF", "link": "https://example.org/paper.pdf"}]
-    }))).unwrap();
-    let hit = SerpapiHit { cite_link: "invalid URL".into(), ..hit };
-    let records = fetch_selected_bibtex(&reqwest::Client::new(), vec![hit], "", &Turn::detached()).await.unwrap();
-    assert_eq!(records.len(), 1);
-    let (detail, status) = records.into_iter().next().unwrap();
-    assert!(status.is_err());
-    let fixture = Fixture::new();
-    let reference = fixture.0.join("reference");
-    let result = process_one_paper(&reference, &Turn::detached(), 0, &detail, Err(status.unwrap_err()), &|_| {}).await.unwrap();
-    assert_eq!(result["source"]["status"], "unavailable");
-    assert!(result["markdown_path"].is_null());
-    assert!(!reference.join("index.md").exists());
-  }
 
   #[test]
   fn literature_entries_with_distinct_titles_do_not_overwrite_each_other() {
     let record = |title: &str| LiteratureRecord {
-      title: title.into(), bib: String::new(), authors: String::new(),
+      title: title.into(), publication_summary: String::new(),
       abstract_text: String::new(), cited_by_count: 0, url: String::new(), pdf_link: String::new(),
     };
     let selected = vec![record("First"), record("Second")];

@@ -58,6 +58,8 @@ reqwest = { version = "0.12", default-features = false, features = [
   "http2",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-tungstenite = "0.28"
+tempfile = "3"
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "process"] }
 
 # Windows keeps PATH in the registry, and reading it there is the only way a
