@@ -255,6 +255,13 @@ function PatchCard(props: {
   onToggle: () => void;
 }) {
   const mark = () => props.patch.op === 'create' ? 'A' : props.patch.op === 'delete' ? 'D' : 'M';
+  const [expanded, setExpanded] = createSignal(false);
+  const [long, setLong] = createSignal(false);
+  const observeLines = (element: HTMLDivElement) => {
+    const observer = new ResizeObserver(() => setLong(element.getBoundingClientRect().height > 19 * 6 + 1));
+    observer.observe(element);
+    onCleanup(() => observer.disconnect());
+  };
 
   return (
     <div class="patch" classList={{ 'patch--open': props.open }}>
@@ -265,7 +272,9 @@ function PatchCard(props: {
         <Icon name="chevronDown" size={12} class="patch__caret" />
       </button>
       <Show when={props.open}>
-        <div class="patch__diff scroll">
+        <div class="patch__diff">
+          <div class="patch__clip" classList={{ 'patch__clip--expanded': expanded(), 'tool-parameters__clip--faded': long() && !expanded() }}>
+          <div ref={observeLines}>
           <Index each={props.patch.diff.split('\n')}>
             {(line, index) => (
               <div
@@ -282,6 +291,20 @@ function PatchCard(props: {
               </div>
             )}
           </Index>
+          </div>
+          </div>
+          <Show when={long()}>
+            <button
+              class="tool-parameters__toggle"
+              classList={{ 'tool-parameters__toggle--expanded': expanded() }}
+              aria-expanded={expanded()}
+              aria-label={expanded() ? '收起 diff' : '展开 diff'}
+              data-tooltip={expanded() ? '收起 diff' : '展开 diff'}
+              onClick={() => setExpanded(!expanded())}
+            >
+              <Icon name="chevronDown" size={14} />
+            </button>
+          </Show>
         </div>
       </Show>
     </div>
@@ -360,7 +383,7 @@ function ToolCard(props: {
             <ToolParameters text={tool().input} />
           </Show>
           <Show when={tool().name !== 'research_literature'}>
-            <pre class="tool__io tool__io--out">{tool().output || '…'}</pre>
+            <ToolParameters text={tool().output || '…'} output />
           </Show>
         </div>
       </Show>
@@ -368,7 +391,7 @@ function ToolCard(props: {
   );
 }
 
-function ToolParameters(props: { text: string; literature?: boolean }) {
+function ToolParameters(props: { text: string; literature?: boolean; output?: boolean }) {
   const [expanded, setExpanded] = createSignal(false);
   const [long, setLong] = createSignal(false);
   let text!: HTMLPreElement;
@@ -384,7 +407,11 @@ function ToolParameters(props: { text: string; literature?: boolean }) {
   });
 
   return (
-    <div class="tool-parameters" classList={{ 'tool-parameters--literature': props.literature }}>
+    <div class="tool-parameters" classList={{
+      'tool-parameters--literature': props.literature && !props.output,
+      'tool__io tool__io--out': props.output && !props.literature,
+      'research-workflow__detail': props.output && props.literature,
+    }}>
       <div class="tool-parameters__clip" classList={{ 'tool-parameters__clip--expanded': expanded(), 'tool-parameters__clip--faded': long() && !expanded() }}>
         <pre ref={text} class="tool-parameters__text">{props.text}</pre>
       </div>
@@ -393,8 +420,8 @@ function ToolParameters(props: { text: string; literature?: boolean }) {
           class="tool-parameters__toggle"
           classList={{ 'tool-parameters__toggle--expanded': expanded() }}
           aria-expanded={expanded()}
-          aria-label={expanded() ? '收起参数' : '展开参数'}
-          data-tooltip={expanded() ? '收起参数' : '展开参数'}
+          aria-label={`${expanded() ? '收起' : '展开'}${props.output ? '结果' : '参数'}`}
+          data-tooltip={`${expanded() ? '收起' : '展开'}${props.output ? '结果' : '参数'}`}
           onClick={() => setExpanded(!expanded())}
         >
           <Icon name="chevronDown" size={14} />
@@ -437,7 +464,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
         <ToolParameters text={props.input} literature />
       </Show>
       <Show when={failed() && !stopped() && !searched() && props.output && !finalPapers()}>
-        <pre class="research-workflow__detail">{props.output}</pre>
+        <ToolParameters text={props.output} literature output />
       </Show>
       <div class="research-workflow__step">
         <span class="research-workflow__mark" classList={{ 'research-workflow__mark--pending': !searched(), 'research-workflow__mark--err': failed() && searched() }}>
@@ -449,7 +476,7 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
         <span class="research-workflow__summary truncate">{step2()}</span>
       </div>
       <Show when={failed() && !stopped() && searched() && props.output && !finalPapers()}>
-        <pre class="research-workflow__detail">{props.output}</pre>
+        <ToolParameters text={props.output} literature output />
       </Show>
       <Index each={papers()}>{(paper, index) => (
         <div class="research-workflow__paper">
@@ -459,17 +486,12 @@ function LiteratureWorkflow(props: { status: 'running' | 'ok' | 'error'; summary
           }}>
             <span>{index + 1}. {paper().title}</span>
           </div>
-          <div class="research-workflow__detail">
-            <Show when={paper().result} fallback={props.status === 'running' ? 'Downloading PDF…' : 'Download interrupted'}>
-              <Show when={paper().result?.source.status === 'unavailable'}>
-                <div>Download failed: {paper().result?.extraction_note}</div>
-              </Show>
-              <Show when={paper().result?.source.status !== 'unavailable'}>
-                <div>{paper().result?.source.status.toUpperCase()} saved</div>
-              </Show>
-              <Show when={paper().result?.source.path}><div>{paper().result?.source.path}</div></Show>
-            </Show>
-          </div>
+          <ToolParameters literature output text={paper().result
+            ? [paper().result?.source.status === 'unavailable'
+                ? `Download failed: ${paper().result?.extraction_note ?? ''}`
+                : `${paper().result?.source.status.toUpperCase()} saved`,
+              paper().result?.source.path].filter(Boolean).join('\n')
+            : props.status === 'running' ? 'Downloading PDF…' : 'Download interrupted'} />
         </div>
       )}</Index>
     </div>
