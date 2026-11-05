@@ -63,6 +63,7 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, Too
         socket.send(Message::Text(json!({"id":1,"method":"Browser.setDownloadBehavior","params":{
             "behavior":"allowAndName", "downloadPath":downloads, "eventsEnabled":true
         }}).to_string().into())).await.map_err(|e| ToolError(e.to_string()))?;
+        let mut paper_target = None;
         while let Some(message) = socket.next().await {
             let message = message.map_err(|e| ToolError(e.to_string()))?;
             let Message::Text(text) = message else { continue };
@@ -71,12 +72,27 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>) -> Result<Vec<u8>, Too
             let next = match event["id"].as_u64() {
                 // Do not create an empty tab and navigate it afterwards. The
                 // requested URL is the only target this browser session owns.
-                Some(1) => Some(json!({"id":2,"method":"Target.createTarget","params":{"url":url}})),
-                Some(2) => Some(json!({"id":3,"method":"Target.attachToTarget","params":{"targetId":event["result"]["targetId"],"flatten":true}})),
+                // Subscribe before opening the page: attachment alone does not
+                // enable targetDestroyed notifications on the browser socket.
+                Some(1) => Some(json!({"id":5,"method":"Target.setDiscoverTargets","params":{"discover":true}})),
+                Some(5) => Some(json!({"id":2,"method":"Target.createTarget","params":{"url":url}})),
+                Some(2) => {
+                    paper_target = event["result"]["targetId"].as_str().map(str::to_owned);
+                    Some(json!({"id":3,"method":"Target.attachToTarget","params":{"targetId":event["result"]["targetId"],"flatten":true}}))
+                },
                 _ => None,
             };
             if let Some(next) = next {
                 socket.send(Message::Text(next.to_string().into())).await.map_err(|e| ToolError(e.to_string()))?;
+            }
+            // Closing the visible paper window destroys its target. Treat that
+            // as cancellation so the caller discards the result and reaps the
+            // browser process immediately.
+            if event["method"] == "Target.targetDestroyed"
+                && paper_target.is_some()
+                && event["params"]["targetId"].as_str() == paper_target.as_deref()
+            {
+                return Err(ToolError("PDF download canceled: browser window closed".into()));
             }
             if event["method"] == "Browser.downloadProgress" {
                 match event["params"]["state"].as_str() {
