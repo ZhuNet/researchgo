@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { Icon } from '../Icon';
 
 /** The native child follows this slot; it is never a separate browser window. */
@@ -19,8 +19,22 @@ export function LiteratureBrowser(props: { browser: { label: string; downloading
     let frame = 0;
     let disposed = false;
     let previous = '';
+    let syncing = false;
+    const hidden = () => closing() || props.browser.downloading;
     const sync = async () => {
-      if (disposed) return;
+      if (disposed || syncing) return;
+      syncing = true;
+      if (hidden()) {
+        if (previous !== 'null' && invoke) {
+          try {
+            await invoke('position_browser', { label, bounds: null });
+            previous = 'null';
+          } catch { /* The browser may already have been closed. */ }
+        }
+        syncing = false;
+        if (!disposed && !hidden()) frame = requestAnimationFrame(() => { void sync(); });
+        return;
+      }
       const rect = slot.getBoundingClientRect();
       let visible = !closing() && !props.browser.downloading && rect.width > 0 && rect.height > 0;
       let top = 0, left = 0, right = innerWidth, bottom = innerHeight;
@@ -44,9 +58,14 @@ export function LiteratureBrowser(props: { browser: { label: string; downloading
           previous = key;
         } catch { /* The download may finish while a layout update is in flight. */ }
       }
+      syncing = false;
       if (!disposed) frame = requestAnimationFrame(() => { void sync(); });
     };
-    void sync();
+    createEffect(() => {
+      hidden();
+      cancelAnimationFrame(frame);
+      void sync();
+    });
     onCleanup(() => {
       disposed = true;
       cancelAnimationFrame(frame);

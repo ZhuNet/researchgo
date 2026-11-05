@@ -17,7 +17,7 @@ pub(crate) async fn close_browser(webview: tauri::Webview, label: String) -> Res
     Ok(())
 }
 
-// Also closes the native window if the caller drops the download future.
+// Also closes the native child webview if the caller drops the download future.
 struct Browser {
     app: tauri::AppHandle,
     label: String,
@@ -67,8 +67,8 @@ pub(super) async fn download(url: &str, turn: &Arc<Turn>, progress: &(dyn Fn(&st
     let profile = dir.path().join("profile");
     #[cfg(windows)]
     {
-        // Keep inline PDFs on the download path, as with the previous Chromium
-        // browser. Other engines retain their native PDF/download controls.
+        // Route inline PDFs to downloads in WebView2. Other engines retain
+        // their native PDF/download controls.
         let default = profile.join("EBWebView/Default");
         std::fs::create_dir_all(&default).map_err(|e| ToolError(e.to_string()))?;
         std::fs::write(default.join("Preferences"), r#"{"plugins":{"always_open_pdf_externally":true}}"#).map_err(|e| ToolError(e.to_string()))?;
