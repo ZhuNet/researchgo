@@ -213,6 +213,7 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         automaticLayout: true,
         fontFamily: style.getPropertyValue('--font-mono').trim() || 'monospace',
         fontSize: px('--code-font-size', 12),
+        mouseWheelZoom: true,
         lineHeight: px('--code-line-h', 20),
         tabSize: 4,
         minimap: { enabled: true, renderCharacters: false },
