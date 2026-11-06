@@ -214,6 +214,8 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         fontFamily: style.getPropertyValue('--font-mono').trim() || 'monospace',
         fontSize: px('--code-font-size', 12),
         mouseWheelZoom: true,
+        // Supported by the installed runtime, but not yet exposed in its public typings.
+        suggest: { fitWidthToDetails: true } as Monaco.editor.ISuggestOptions & { fitWidthToDetails: boolean },
         lineHeight: px('--code-line-h', 20),
         tabSize: 4,
         minimap: { enabled: true, renderCharacters: false },
@@ -225,6 +227,13 @@ export function MonacoText(props: { ws: Workspace; path: string }) {
         scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
       });
       unregisterEditor = monacoDocuments.registerEditor(editor);
+      editor.onDidChangeConfiguration((event) => {
+        if (event.hasChanged(monaco.editor.EditorOption.fontInfo)) {
+          // Recompute the next suggestion popup using the new font metrics,
+          // rather than retaining a size chosen at the previous zoom level.
+          editor?.trigger('font-zoom', 'editor.action.resetSuggestSize', undefined);
+        }
+      });
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
       editor.onDidChangeCursorPosition((e) =>
         setCaret({ line: e.position.lineNumber, col: e.position.column }),
