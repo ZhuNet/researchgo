@@ -11,6 +11,7 @@ import {
 
 import { FileGlyph, Icon } from '../Icon';
 import { scrollToReveal, tabWindow, TAB_WIDTH } from '../../lib/tabwindow';
+import { observeLayout } from '../../lib/observeLayout';
 import { copyText, openMenu } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
 
@@ -79,10 +80,8 @@ export function TabBar(props: { ws: Workspace }) {
   onMount(() => {
     const el = strip;
     if (!el) return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
+    onCleanup(observeLayout(el, measure));
     measure();
-    onCleanup(() => ro.disconnect());
   });
 
   /** Brings a tab into view with the smallest movement that does it. */

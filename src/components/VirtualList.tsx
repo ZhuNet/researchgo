@@ -1,4 +1,5 @@
 import { createSignal, For, onCleanup, onMount } from 'solid-js';
+import { observeLayout } from '../lib/observeLayout';
 
 /** Fixed-row virtual window. The input array remains complete; only visible rows mount. */
 export function VirtualList<T>(props: {
@@ -16,9 +17,7 @@ export function VirtualList<T>(props: {
   const end = () => Math.min(props.items.length, Math.ceil((scrollTop() + props.height) / props.rowHeight) + overscan());
   const visible = () => props.items.slice(start(), end());
   onMount(() => {
-    const observer = new ResizeObserver(() => setScrollTop(element.scrollTop));
-    observer.observe(element);
-    onCleanup(() => observer.disconnect());
+    onCleanup(observeLayout(element, () => setScrollTop(element.scrollTop)));
   });
   return (
     <div

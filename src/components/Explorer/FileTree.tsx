@@ -10,6 +10,7 @@ import {
 
 import { FileGlyph, FolderGlyph, Icon } from '../Icon';
 import { anchoredScrollTop, virtualRange } from '../../lib/tree';
+import { observeLayout } from '../../lib/observeLayout';
 import { moveTargetOf, parentOf, type Row } from '../../lib/rowindex';
 import { copyText, openMenu, setTreeCmd, toast, treeCmd } from '../../store/ui';
 import type { Workspace } from '../../store/workspace';
@@ -221,9 +222,7 @@ export function FileTree(props: { ws: Workspace }) {
   createEffect(() => {
     const sizer = content;
     if (!sizer) return;
-    const ro = new ResizeObserver(() => restore());
-    ro.observe(sizer);
-    onCleanup(() => ro.disconnect());
+    onCleanup(observeLayout(sizer, restore));
   });
 
   // Creating inside a folder that is scrolled out of view would hide the inline
@@ -255,10 +254,8 @@ export function FileTree(props: { ws: Workspace }) {
   createEffect(() => {
     if (!scroller) return;
     const el = scroller;
-    const ro = new ResizeObserver(() => setViewport(el.clientHeight));
-    ro.observe(el);
+    onCleanup(observeLayout(el, () => setViewport(el.clientHeight)));
     setViewport(el.clientHeight);
-    onCleanup(() => ro.disconnect());
   });
 
   // The cursor is a row *number*, and expanding a directory above it moves every
