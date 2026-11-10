@@ -33,8 +33,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 const MAGIC: &[u8; 4] = b"RGDI";
-const VERSION: u32 = 1;
-/// magic, version, count, files, dirs, mtime, reserved, path_len, body_start
+const VERSION: u32 = 2;
+/// magic, version, count, files, dirs, mtime (128-bit nanoseconds), path_len, body_start
 const HEADER_LEN: usize = 56;
 const CHUNK: usize = 32_768;
 const FANIN: usize = 4;
@@ -128,16 +128,22 @@ fn io(e: std::io::Error) -> String {
   e.to_string()
 }
 
-fn secs(t: SystemTime) -> u64 {
+fn nanos(t: SystemTime) -> u128 {
   t
     .duration_since(UNIX_EPOCH)
-    .map(|d| d.as_secs())
+    .map(|d| d.as_nanos())
     .unwrap_or(0)
 }
 
-fn mtime_of(path: &Path) -> Result<u64, String> {
+fn secs(t: SystemTime) -> u64 {
+  t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn mtime_of(path: &Path) -> Result<u128, String> {
+  // A missed watcher event must still be caught by the next page request.
+  // Whole seconds alias rapid directory changes and can keep stale rows forever.
   let meta = fs::metadata(path).map_err(|e| format!("stat failed: {e}"))?;
-  Ok(secs(meta.modified().unwrap_or(UNIX_EPOCH)))
+  Ok(nanos(meta.modified().unwrap_or(UNIX_EPOCH)))
 }
 
 fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -188,7 +194,7 @@ struct MemListing {
   /// covers expanded directories, so a file can land while a directory is
   /// collapsed (or in the gap before a fresh watch engages) and no event
   /// ever invalidates this entry — the mtime is the backstop that catches it.
-  mtime: u64,
+  mtime: u128,
 }
 
 /// FIFO by insertion order, not by access. A directory the user scrolls back into
@@ -215,7 +221,7 @@ impl MemStore {
     }
   }
 
-  fn insert(&mut self, dir: &str, recs: Vec<Rec>, files: usize, dirs: usize, mtime: u64) {
+  fn insert(&mut self, dir: &str, recs: Vec<Rec>, files: usize, dirs: usize, mtime: u128) {
     self.drop_dir(dir);
     self.entries += recs.len();
     self.map.insert(
@@ -259,7 +265,7 @@ struct Header {
   count: usize,
   files: usize,
   dirs: usize,
-  mtime: u64,
+  mtime: u128,
 }
 
 pub struct DirIndex {
@@ -366,7 +372,7 @@ impl DirIndex {
     dir: &str,
     offset: usize,
     limit: usize,
-    mtime: u64,
+    mtime: u128,
   ) -> Result<Option<DirPage>, String> {
     let idx = self.idx_path(dir);
     let off = self.off_path(dir);
@@ -433,7 +439,7 @@ impl DirIndex {
     }))
   }
 
-  fn ensure(&self, dir: &str, path: &Path, mtime: u64) -> Result<(), String> {
+  fn ensure(&self, dir: &str, path: &Path, mtime: u128) -> Result<(), String> {
     let _guard = self.build.lock().map_err(|_| "dir index poisoned".to_string())?;
     {
       let mem = self.mem.lock().map_err(|_| "dir index poisoned".to_string())?;
@@ -450,7 +456,7 @@ impl DirIndex {
     self.build_at(dir, path, mtime, CHUNK)
   }
 
-  fn index_valid(&self, dir: &str, mtime: u64) -> Result<bool, String> {
+  fn index_valid(&self, dir: &str, mtime: u128) -> Result<bool, String> {
     if !self.off_path(dir).exists() {
       return Ok(false);
     }
@@ -470,7 +476,7 @@ impl DirIndex {
   /// `chunk` is the sort chunk size, i.e. the memory ceiling of a build: entries
   /// beyond it spill to run files. Parameterised so tests can exercise the spill
   /// path without writing tens of thousands of files.
-  fn build_at(&self, dir: &str, path: &Path, mtime: u64, chunk: usize) -> Result<(), String> {
+  fn build_at(&self, dir: &str, path: &Path, mtime: u128, chunk: usize) -> Result<(), String> {
     let tag = key_of(dir);
     let mut buf: Vec<Rec> = Vec::with_capacity(chunk.min(8192));
     let mut runs: Vec<PathBuf> = Vec::new();
@@ -563,7 +569,7 @@ impl DirIndex {
     header[8..16].copy_from_slice(&((files + dir_count) as u64).to_le_bytes());
     header[16..24].copy_from_slice(&(files as u64).to_le_bytes());
     header[24..32].copy_from_slice(&(dir_count as u64).to_le_bytes());
-    header[32..40].copy_from_slice(&mtime.to_le_bytes());
+    header[32..48].copy_from_slice(&mtime.to_le_bytes());
     header[48..52].copy_from_slice(&(dir.len() as u32).to_le_bytes());
     header[52..56].copy_from_slice(&(body_start as u32).to_le_bytes());
     header[HEADER_LEN..].copy_from_slice(dir.as_bytes());
@@ -626,7 +632,7 @@ fn read_header(file: &mut File, dir: &str) -> Result<Option<Header>, String> {
     count: u64::from_le_bytes(head[8..16].try_into().unwrap()) as usize,
     files: u64::from_le_bytes(head[16..24].try_into().unwrap()) as usize,
     dirs: u64::from_le_bytes(head[24..32].try_into().unwrap()) as usize,
-    mtime: u64::from_le_bytes(head[32..40].try_into().unwrap()),
+    mtime: u128::from_le_bytes(head[32..48].try_into().unwrap()),
   }))
 }
 
@@ -860,6 +866,41 @@ mod tests {
     assert_eq!(page.files, 3);
     assert_eq!(page.dirs, 1);
     assert!(!page.has_more);
+  }
+
+  #[test]
+  fn same_second_changes_without_watch_events_refresh_memory_and_disk_indexes() {
+    use std::time::Duration;
+
+    for spill in [false, true] {
+      let scratch = Scratch::new(if spill { "subsecond-disk" } else { "subsecond-memory" });
+      scratch.put("before.rs", false);
+      // Open directories explicitly on Windows so set_times works there too.
+      let mut options = fs::OpenOptions::new();
+      #[cfg(windows)]
+      {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.access_mode(0x100) // FILE_WRITE_ATTRIBUTES
+          .custom_flags(0x02000000); // FILE_FLAG_BACKUP_SEMANTICS
+      }
+      #[cfg(not(windows))]
+      options.read(true);
+      let handle = options.open(&scratch.data).expect("open directory");
+      let early = UNIX_EPOCH + Duration::new(1_700_000_000, 100_000_000);
+      let late = UNIX_EPOCH + Duration::new(1_700_000_000, 900_000_000);
+      handle.set_times(fs::FileTimes::new().set_modified(early)).unwrap();
+      let index = scratch.index();
+      let dir = scratch.data.to_string_lossy().to_string();
+      if spill {
+        index.build_at(&dir, &scratch.data, mtime_of(&scratch.data).unwrap(), 1).unwrap();
+        assert!(!index.mem.lock().unwrap().map.contains_key(&dir));
+      }
+      assert_eq!(names(&index.page(&dir, 0, 512).unwrap()), vec!["before.rs"]);
+      scratch.put("after.rs", false);
+      handle.set_times(fs::FileTimes::new().set_modified(late)).unwrap();
+      // Deliberately do not invalidate: this is the missed-event fallback.
+      assert_eq!(names(&index.page(&dir, 0, 512).unwrap()), vec!["after.rs", "before.rs"]);
+    }
   }
 
   #[test]
