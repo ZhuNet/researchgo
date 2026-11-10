@@ -399,12 +399,30 @@ export function createWorkspace(
     });
   }
 
+  // Watcher patches can arrive while an IPC listing is on its way back. Never
+  // publish that older snapshot over the patch, including for paginated reads.
+  const directoryReads = new Set<{ dir: string; changed: boolean }>();
+
+  async function readDirectoryPage(dir: string, offset: number) {
+    const read = { dir, changed: false };
+    directoryReads.add(read);
+    try {
+      for (;;) {
+        read.changed = false;
+        const page = await backend.listDirPage(dir, offset, PAGE);
+        if (!read.changed || disposed) return page;
+      }
+    } finally {
+      directoryReads.delete(read);
+    }
+  }
+
   /** Page 0 of a directory. One request per directory, ever, unless it goes stale. */
   function loadPage0(dir: string): Promise<void> {
     const inFlight = loading.get(`${dir}@0`);
     if (inFlight) return inFlight;
     const work = trackBusy(dir, async () => {
-      const page = await backend.listDirPage(dir, 0, PAGE);
+      const page = await readDirectoryPage(dir, 0);
       cache.seed(dir, page);
       forgetUnreadable(dir);
       if (root() && dir === root()) setRootName(basenameOf(dir, dir));
@@ -498,7 +516,7 @@ export function createWorkspace(
     const inFlight = loading.get(key);
     if (inFlight) return inFlight;
     const work = trackBusy(dir, async () => {
-      const page = await backend.listDirPage(dir, offset, PAGE);
+      const page = await readDirectoryPage(dir, offset);
       cache.append(dir, page);
       forgetUnreadable(dir);
       recount();
@@ -515,13 +533,13 @@ export function createWorkspace(
   async function reload(dir: string): Promise<void> {
     const resident = cache.listing(dir)?.entries.length ?? 0;
     if (!cache.has(dir)) return;
-    const page = await backend.listDirPage(dir, 0, PAGE);
+    const page = await readDirectoryPage(dir, 0);
     cache.reseed(dir, page);
     if (root() && dir === root()) setRootName(basenameOf(dir, dir));
     let loaded = page.offset + page.entries.length;
     let pages = 1;
     while (loaded < resident && pages < RELOAD_PAGES) {
-      const next = await backend.listDirPage(dir, loaded, PAGE);
+      const next = await readDirectoryPage(dir, loaded);
       cache.append(dir, next);
       loaded = next.offset + next.entries.length;
       pages += 1;
@@ -1230,6 +1248,9 @@ export function createWorkspace(
   function onDiskChange(change: Change): void {
     const base = root();
     if (!base || (change.dir !== base && !change.dir.startsWith(base === '/' ? '/' : `${base}/`))) return;
+    if (change.kind !== 'changed') {
+      for (const read of directoryReads) if (read.dir === change.dir) read.changed = true;
+    }
     const touched = joinPath(change.dir, change.name);
     const old = change.from ? joinPath(change.dir, change.from) : touched;
     const target = buildScope();
@@ -1426,12 +1447,15 @@ export function createWorkspace(
   // Native events are hints; this bounded pass also repairs missed events and
   // watches lost when an ancestor was moved. It never loads an invisible tree.
   let auditing = false;
-  const auditTimer = setInterval(() => {
-    if (disposed || auditing || !root()) return;
+  const auditDocument = typeof document === 'undefined' ? undefined : document;
+  const auditHidden = () => auditDocument?.visibilityState === 'hidden';
+  function audit(): void {
+    if (disposed || auditing || !root() || auditHidden()) return;
     auditing = true;
     syncWatch();
     void (async () => {
       for (const dir of visibleTreeDirs()) {
+        if (disposed || auditHidden()) return;
         if (!cache.has(dir)) continue;
         try {
           await reload(dir);
@@ -1444,15 +1468,32 @@ export function createWorkspace(
       // which keeps the retry bounded; a success clears the record and
       // repaints the rows itself.
       for (const dir of unreadable()) {
+        if (disposed || auditHidden()) return;
         try {
           await loadPage0(dir);
         } catch {
           // Still failing: keep the record and its reason as they are.
         }
       }
-      for (const path of monitoredTabs()) await checkTab(path, false);
+      for (const path of monitoredTabs()) {
+        if (disposed || auditHidden()) return;
+        await checkTab(path, false);
+      }
     })().finally(() => { auditing = false; });
-  }, 2000);
+  }
+
+  let auditTimer: ReturnType<typeof setInterval> | undefined;
+  function scheduleAudit(): void {
+    if (auditTimer !== undefined) clearInterval(auditTimer);
+    auditTimer = undefined;
+    if (!disposed && !auditHidden()) auditTimer = setInterval(audit, 2000);
+  }
+  function onAuditVisibility(): void {
+    scheduleAudit();
+    if (!auditHidden()) audit();
+  }
+  auditDocument?.addEventListener('visibilitychange', onAuditVisibility);
+  scheduleAudit();
 
   async function reconcile(): Promise<void> {
     const batched = [...queued.entries()];
@@ -1569,6 +1610,7 @@ export function createWorkspace(
     dispose: () => {
       disposed = true;
       clearInterval(auditTimer);
+      auditDocument?.removeEventListener('visibilitychange', onAuditVisibility);
       void backend.syncWatch([]).catch(() => {});
       stopWatch();
       stopToolchainWatch();

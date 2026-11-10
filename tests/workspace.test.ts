@@ -1,5 +1,5 @@
 import { createRoot } from 'solid-js';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createWorkspace, type Workspace } from '../src/store/workspace';
 import { emitToolchainChange, fakeBackend, FakeFs, SAMPLE_TREE } from './fakefs';
@@ -29,6 +29,49 @@ const paths = (ws: Workspace) => {
   for (let i = 0; i < ws.rowCount(); i++) out.push(ws.rowAt(i)?.path ?? '?');
   return out;
 };
+
+describe('隐藏窗口的兜底检查', () => {
+  it('隐藏时暂停，恢复可见立即补查，释放后移除监听和定时器', async () => {
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    vi.stubGlobal('document', doc);
+    vi.useFakeTimers();
+    let ws: Workspace | undefined;
+    try {
+      const fs = new FakeFs(SAMPLE_TREE);
+      ws = createRoot(() => createWorkspace(fakeBackend(fs)));
+      await ws.openFolder('/');
+      await ws.toggleDir('/src');
+      await vi.advanceTimersByTimeAsync(0);
+      doc.visibilityState = 'hidden';
+      doc.dispatchEvent(new Event('visibilitychange'));
+      fs.pageCalls.length = 0;
+      fs.addEntry('/src', 'missed.rs', 'file');
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(fs.pageCalls).toEqual([]);
+      expect(paths(ws)).not.toContain('/src/missed.rs');
+
+      doc.visibilityState = 'visible';
+      doc.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(paths(ws)).toContain('/src/missed.rs');
+      fs.pageCalls.length = 0;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(fs.pageCalls).toContain('/src@0');
+
+      ws.dispose();
+      ws = undefined;
+      fs.pageCalls.length = 0;
+      doc.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(fs.pageCalls).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      ws?.dispose();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe('打开文件夹', () => {
   it('新建入口共用选中位置，文件取父目录，目录取自身，无选择取根目录', async () => {
@@ -992,6 +1035,67 @@ describe('磁盘同步', () => {
       await flush();
       expect(paths(ws)).toContain('/src/fromdisk.rs');
       expect(fs.pageCalls.filter((c) => c.startsWith('/src@')).length).toBe(before);
+    });
+  });
+
+  it('旧目录请求晚于新建事件返回时，不得覆盖已经出现的新文件', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalList = backend.listDirPage;
+    const held = deferred<Awaited<ReturnType<typeof originalList>>>();
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.toggleDir('/src');
+        await flush();
+        let hold = true;
+        backend.listDirPage = (dir, offset, limit) => {
+          if (dir === '/src' && hold) {
+            hold = false;
+            return held.promise;
+          }
+          return originalList(dir, offset, limit);
+        };
+        const reading = ws.refresh('/src');
+        const oldPage = await originalList('/src', 0, 512);
+        fs.addEntry('/src', 'arrived.rs', 'file');
+        fs.emit({ dir: '/src', name: 'arrived.rs', kind: 'created', isDir: false });
+        await flush();
+        expect(paths(ws)).toContain('/src/arrived.rs');
+        held.resolve(oldPage);
+        await reading;
+        expect(paths(ws)).toContain('/src/arrived.rs');
+      } finally { ws.dispose(); }
+    });
+  });
+
+  it('首次展开读盘途中收到事件，即使还没有目录缓存也会重新读取', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalList = backend.listDirPage;
+    const held = deferred<Awaited<ReturnType<typeof originalList>>>();
+    let hold = true;
+    backend.listDirPage = (dir, offset, limit) => {
+      if (dir === '/src' && hold) {
+        hold = false;
+        return held.promise;
+      }
+      return originalList(dir, offset, limit);
+    };
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        const opening = ws.toggleDir('/src');
+        const oldPage = await originalList('/src', 0, 512);
+        expect(ws.listingOf('/src')).toBeUndefined();
+        fs.addEntry('/src', 'arrived.rs', 'file');
+        fs.emit({ dir: '/src', name: 'arrived.rs', kind: 'created', isDir: false });
+        held.resolve(oldPage);
+        await opening;
+        expect(paths(ws)).toContain('/src/arrived.rs');
+      } finally { ws.dispose(); }
     });
   });
 
