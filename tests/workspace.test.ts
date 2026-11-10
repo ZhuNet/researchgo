@@ -1512,6 +1512,42 @@ describe('展开不该闪一下 loading', () => {
     });
   });
 
+  it('折叠前发出的读取晚到，不会清除折叠时的过期标记', async () => {
+    const fs = new FakeFs(SAMPLE_TREE);
+    const backend = fakeBackend(fs);
+    const originalList = backend.listDirPage;
+    const held = deferred<Awaited<ReturnType<typeof originalList>>>();
+    await createRoot(async () => {
+      const ws = createWorkspace(backend);
+      try {
+        await ws.openFolder('/');
+        await ws.toggleDir('/src');
+        await flush();
+        const oldPage = await originalList('/src', 0, 512);
+        let hold = true;
+        backend.listDirPage = (dir, offset, limit) => {
+          if (dir === '/src' && hold) {
+            hold = false;
+            return held.promise;
+          }
+          return originalList(dir, offset, limit);
+        };
+        const reading = ws.refresh('/src');
+        ws.setExpanded('/src', false);
+        await flush();
+        expect(fs.watching).not.toContain('/src');
+        held.resolve(oldPage);
+        await reading;
+        expect(ws.listingOf('/src')?.stale).toBe(true);
+        // The file lands after the old request completed, with no watch active.
+        fs.addEntry('/src', 'late.rs', 'file');
+        await ws.toggleDir('/src');
+        await flush();
+        expect(paths(ws)).toContain('/src/late.rs');
+      } finally { ws.dispose(); }
+    });
+  });
+
   it('预热读不动的目录不会弹提示，但失败仍被记住', async () => {
     await withWs(async (ws, fs) => {
       await ws.openFolder('/');

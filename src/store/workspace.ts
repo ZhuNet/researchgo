@@ -6,6 +6,7 @@ import {
   type Backend,
   type Change,
   type DirEntry,
+  type DirPage,
 } from '../lib/backend';
 import {
   DirCache,
@@ -401,16 +402,27 @@ export function createWorkspace(
 
   // Watcher patches can arrive while an IPC listing is on its way back. Never
   // publish that older snapshot over the patch, including for paginated reads.
-  const directoryReads = new Set<{ dir: string; changed: boolean }>();
+  const directoryReads = new Set<{ dir: string; changed: boolean; lostCoverage: boolean }>();
 
-  async function readDirectoryPage(dir: string, offset: number) {
-    const read = { dir, changed: false };
+  function loseDirectoryCoverage(dir: string): void {
+    cache.markStale(dir);
+    for (const read of directoryReads) if (read.dir === dir) read.lostCoverage = true;
+  }
+
+  async function readDirectoryPage(dir: string, offset: number, install: (page: DirPage) => void) {
+    const read = { dir, changed: false, lostCoverage: false };
     directoryReads.add(read);
     try {
       for (;;) {
         read.changed = false;
         const page = await backend.listDirPage(dir, offset, PAGE);
-        if (!read.changed || disposed) return page;
+        if (!read.changed || disposed) {
+          install(page);
+          // Collapsing/unwatching invalidates even a successful pending read:
+          // later writes can now arrive without any event to stale this listing.
+          if (read.lostCoverage) cache.markStale(dir);
+          return page;
+        }
       }
     } finally {
       directoryReads.delete(read);
@@ -422,8 +434,7 @@ export function createWorkspace(
     const inFlight = loading.get(`${dir}@0`);
     if (inFlight) return inFlight;
     const work = trackBusy(dir, async () => {
-      const page = await readDirectoryPage(dir, 0);
-      cache.seed(dir, page);
+      await readDirectoryPage(dir, 0, (page) => cache.seed(dir, page));
       forgetUnreadable(dir);
       if (root() && dir === root()) setRootName(basenameOf(dir, dir));
       recount();
@@ -516,8 +527,7 @@ export function createWorkspace(
     const inFlight = loading.get(key);
     if (inFlight) return inFlight;
     const work = trackBusy(dir, async () => {
-      const page = await readDirectoryPage(dir, offset);
-      cache.append(dir, page);
+      await readDirectoryPage(dir, offset, (page) => cache.append(dir, page));
       forgetUnreadable(dir);
       recount();
       bump();
@@ -533,14 +543,12 @@ export function createWorkspace(
   async function reload(dir: string): Promise<void> {
     const resident = cache.listing(dir)?.entries.length ?? 0;
     if (!cache.has(dir)) return;
-    const page = await readDirectoryPage(dir, 0);
-    cache.reseed(dir, page);
+    const page = await readDirectoryPage(dir, 0, (page) => cache.reseed(dir, page));
     if (root() && dir === root()) setRootName(basenameOf(dir, dir));
     let loaded = page.offset + page.entries.length;
     let pages = 1;
-    while (loaded < resident && pages < RELOAD_PAGES) {
-      const next = await readDirectoryPage(dir, loaded);
-      cache.append(dir, next);
+    while (loaded < resident && pages < RELOAD_PAGES && !cache.listing(dir)?.stale) {
+      const next = await readDirectoryPage(dir, loaded, (page) => cache.append(dir, page));
       loaded = next.offset + next.entries.length;
       pages += 1;
       if (next.entries.length === 0) break;
@@ -603,7 +611,7 @@ export function createWorkspace(
       if (disposed || syncingWatch) return;
       const tree = visibleTreeDirs();
       const entering = [...tree].filter((dir) => !watchedTree.has(dir));
-      for (const dir of watchedTree) if (!tree.has(dir)) cache.markStale(dir);
+      for (const dir of watchedTree) if (!tree.has(dir)) loseDirectoryCoverage(dir);
       watchedTree = tree;
       const wanted = new Set(tree);
       const base = root();
@@ -649,9 +657,9 @@ export function createWorkspace(
       // flag stays set; without this they reappear with stale children until
       // the reader collapses and re-expands the subfolder itself.
       for (const d of expanded()) {
-        if (d !== path && d.startsWith(`${path}/`)) cache.markStale(d);
+        if (d !== path && d.startsWith(`${path}/`)) loseDirectoryCoverage(d);
       }
-      if (cache.has(path)) cache.markStale(path);
+      loseDirectoryCoverage(path);
       syncWatch();
     }
   }
