@@ -5,11 +5,36 @@ import {
   applyViewerPosition,
   captureSidebarView,
   captureViewerPosition,
+  preserveOutlineHorizontalPosition,
   SIDEBAR_VIEW,
   type PdfViewerLike,
   type ViewerPosition,
   type ViewsManagerLike,
 } from '../src/lib/pdfposition';
+
+describe('大纲跳转保留横向滚动', () => {
+  it('仍跳到目标纵向位置，横向使用每次点击前的位置', async () => {
+    const viewer = { container: { scrollLeft: 260, scrollTop: 0 } };
+    const original = {
+      async goToDestination(destination: unknown) {
+        await Promise.resolve();
+        viewer.container.scrollLeft = 72;
+        viewer.container.scrollTop = destination as number;
+      },
+    };
+    const outline = { linkService: original };
+    const dispose = preserveOutlineHorizontalPosition(outline, viewer);
+    await outline.linkService.goToDestination(1200);
+    expect(viewer.container).toEqual({ scrollLeft: 260, scrollTop: 1200 });
+    viewer.container.scrollLeft = 350;
+    await outline.linkService.goToDestination(2400);
+    expect(viewer.container).toEqual({ scrollLeft: 350, scrollTop: 2400 });
+    await original.goToDestination(600);
+    expect(viewer.container.scrollLeft).toBe(72);
+    dispose();
+    expect(outline.linkService).toBe(original);
+  });
+});
 
 /**
  * The rebuild loop's promise: the preview reopens the new PDF where the reader

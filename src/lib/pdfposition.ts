@@ -145,3 +145,33 @@ export function applySidebarView(views: ViewsManagerLike, view: number): void {
   }
   views.switchView(view, true);
 }
+
+export interface OutlineNavigationLike {
+  linkService: { goToDestination(destination: unknown): Promise<void> };
+}
+
+/** Keep the reader's horizontal pan when following an outline destination. */
+export function preserveOutlineHorizontalPosition(
+  outline: OutlineNavigationLike,
+  viewer: Pick<PdfViewerLike, 'container'> & { update?(): void },
+): () => void {
+  const original = outline.linkService;
+  // The outline closes over its link service when rendering each link. Give
+  // only that view a facade; document links retain their full destinations.
+  const service: OutlineNavigationLike['linkService'] = Object.create(original);
+  let active = true;
+  let navigation = 0;
+  service.goToDestination = async (destination) => {
+    const id = ++navigation;
+    const left = viewer.container.scrollLeft;
+    await original.goToDestination(destination);
+    if (!active || id !== navigation) return;
+    viewer.container.scrollLeft = left;
+    viewer.update?.();
+  };
+  outline.linkService = service;
+  return () => {
+    active = false;
+    if (outline.linkService === service) outline.linkService = original;
+  };
+}

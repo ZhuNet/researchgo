@@ -14,11 +14,14 @@ import type PdfjsViewerElement from 'pdfjs-viewer-element';
 import type { PdfViewerApplication } from 'pdfjs-viewer-element';
 
 import { Icon } from '../Icon';
+import { installOutlineToggles } from '../../lib/pdfoutline';
 import {
   applySidebarView,
   applyViewerPosition,
   captureSidebarView,
   captureViewerPosition,
+  preserveOutlineHorizontalPosition,
+  type OutlineNavigationLike,
   type PdfViewerLike,
   type ViewerPosition,
   type ViewsManagerLike,
@@ -323,6 +326,8 @@ export function PdfViewer(props: { ws: Workspace }) {
     const abs = editor().artifact()?.absPath;
     if (!el || !abs) return;
     let alive = true;
+    let releaseOutlineNavigation: (() => void) | undefined;
+    let releaseOutlineToggles: (() => void) | undefined;
     const visibilityWait = new AbortController();
     setLoadError(null);
     // Capture synchronously while the old document is still visible. If it is
@@ -349,6 +354,11 @@ export function PdfViewer(props: { ws: Workspace }) {
         if (!alive) return;
         const pv = pdfViewerOf(viewerApp);
         const vm = viewsManagerOf(viewerApp);
+        const outline = (viewerApp as ViewerApp | undefined)?.pdfOutlineViewer;
+        if (outline && pv) {
+          releaseOutlineNavigation = preserveOutlineHorizontalPosition(outline, pv);
+          releaseOutlineToggles = installOutlineToggles(outline.container);
+        }
         // Prefer the state captured before the asynchronous artifact read. If
         // the preview was hidden while that read ran, the synchronous capture
         // still describes the last visible frame.
@@ -435,6 +445,8 @@ export function PdfViewer(props: { ws: Workspace }) {
     })();
     onCleanup(() => {
       alive = false;
+      releaseOutlineNavigation?.();
+      releaseOutlineToggles?.();
       visibilityWait.abort();
     });
   });
@@ -610,6 +622,7 @@ const ZAP_ICON =
  * pages exist.
  */
 interface ViewerApp extends PdfViewerApplication {
+  pdfOutlineViewer?: OutlineNavigationLike & { container: HTMLElement };
   pdfViewer?: PdfViewerLike & {
     pagesPromise: Promise<void> | null;
     update?(): void;
