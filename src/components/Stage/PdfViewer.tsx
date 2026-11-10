@@ -257,6 +257,39 @@ export function PdfViewer(props: { ws: Workspace }) {
     if (vm) hiddenSidebar = captureSidebarView(vm);
   });
 
+  // When the iframe reappears, the sidebar can briefly leave the viewport at
+  // its full width. The browser then clamps scrollLeft to the smaller range
+  // available without the sidebar. Reapply the snapshot after layout, even
+  // when no rebuild occurred.
+  createEffect(() => {
+    const hidden = props.ws.stageMode() === 'code';
+    const el = viewer();
+    if (hidden || !el || untrack(restoring) || !hiddenPosition) return;
+    const position = hiddenPosition;
+    const sidebar = hiddenSidebar;
+    const app = viewerAppOf(el);
+    const pv = pdfViewerOf(app);
+    const vm = viewsManagerOf(app);
+    const doc = el.iframe?.contentDocument;
+    if (!pv || !doc || !viewerHost) return;
+    const controller = new AbortController();
+    doc.documentElement.classList.add('rg-restoring');
+    onCleanup(() => {
+      controller.abort();
+      doc.documentElement.classList.remove('rg-restoring');
+    });
+    void (async () => {
+      await waitForVisibleLayout(viewerHost!, controller.signal);
+      if (controller.signal.aborted || untrack(restoring)) return;
+      if (vm && sidebar !== null) applySidebarView(vm, sidebar);
+      await nextFrame();
+      if (controller.signal.aborted || untrack(restoring)) return;
+      applyViewerPosition(pv, position);
+      pv.update?.();
+      doc.documentElement.classList.remove('rg-restoring');
+    })();
+  });
+
   /**
    * The document itself.
    *
