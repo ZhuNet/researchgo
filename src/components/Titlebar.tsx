@@ -16,21 +16,37 @@ const desktop = isDesktop();
 
 export function Titlebar(props: { ws: Workspace; agent: Agent }) {
   const [maximized, setMaximized] = createSignal(false);
+  let disposed = false;
+  let stateRequest = 0;
+  const updateIcon = async () => {
+    const request = ++stateRequest;
+    try {
+      const value = await windowCtl.isMaximized();
+      if (!disposed && request === stateRequest) setMaximized(value ?? false);
+    } catch (error) {
+      console.error('Cannot read maximized state', error);
+    }
+  };
+  const toggleMaximize = async () => {
+    try {
+      await windowCtl.toggleMaximize();
+      await updateIcon();
+    } catch (error) {
+      console.error('Cannot toggle maximized state', error);
+    }
+  };
+  onCleanup(() => { disposed = true; });
   onMount(() => {
     if (!desktop) return;
-    let disposed = false;
-    const updateIcon = async () => {
-      try {
-        const value = await windowCtl.isMaximized();
-        if (!disposed) setMaximized(value ?? false);
-      } catch (error) {
-        console.error('Cannot read maximized state', error);
-      }
-    };
+    let unlisten: (() => void) | undefined;
+    void windowCtl.onResized(updateIcon)?.then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error) => console.error('Cannot listen for window resize', error));
     void updateIcon();
     window.addEventListener('resize', updateIcon);
     onCleanup(() => {
-      disposed = true;
+      unlisten?.();
       window.removeEventListener('resize', updateIcon);
     });
   });
@@ -47,6 +63,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
     targetY: number;
     applying: boolean;
     released: boolean;
+    moved: boolean;
     scale: number;
   } | null = null;
 
@@ -87,7 +104,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
   };
 
   const finishDrag = (event: PointerEvent) => {
-    if (drag && event.isPrimary) {
+    if (drag?.moved && event.isPrimary) {
       drag.targetX = Math.round(drag.windowX + (event.screenX - drag.pointerX) * drag.scale);
       drag.targetY = Math.round(drag.windowY + (event.screenY - drag.pointerY) * drag.scale);
       // An in-flight update also delivers the final target after release.
@@ -102,6 +119,10 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
       stopTracking();
       return;
     }
+    // A click (including small hand jitter) must never reposition the window:
+    // setting a maximized window's position can restore it on Windows.
+    if (!drag.moved && Math.hypot(event.screenX - drag.pointerX, event.screenY - drag.pointerY) < 4) return;
+    drag.moved = true;
     drag.targetX = Math.round(drag.windowX + (event.screenX - drag.pointerX) * drag.scale);
     drag.targetY = Math.round(drag.windowY + (event.screenY - drag.pointerY) * drag.scale);
     if (frame === undefined) {
@@ -149,6 +170,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
       targetY: origin.y,
       applying: false,
       released: false,
+      moved: false,
       scale,
     };
     window.addEventListener('pointermove', trackDrag);
@@ -169,7 +191,7 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
       onDblClick={(event) => {
         const target = event.target as Element | null;
         if (desktop && !target?.closest("button, input, textarea, select, a, [role='button']")) {
-          windowCtl.toggleMaximize();
+          void toggleMaximize();
         }
       }}
     >
@@ -256,9 +278,9 @@ export function Titlebar(props: { ws: Workspace; agent: Agent }) {
           </button>
           <button
             class="winctl__btn"
-            onClick={() => windowCtl.toggleMaximize()}
-            aria-label="Maximize"
-            data-tooltip={desktop ? 'Maximize' : 'Maximize (needs the desktop shell)'}
+            onClick={() => void toggleMaximize()}
+            aria-label={maximized() ? 'Restore' : 'Maximize'}
+            data-tooltip={desktop ? (maximized() ? 'Restore' : 'Maximize') : 'Maximize (needs the desktop shell)'}
             disabled={!desktop}
           >
             <Icon name={maximized() ? 'restore' : 'maximize'} size={13} stroke={1.4} />

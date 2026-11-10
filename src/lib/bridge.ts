@@ -110,8 +110,9 @@ interface TauriBridge {
   window?: {
     getCurrentWindow?: () => {
       minimize: () => void;
-      toggleMaximize: () => void;
+      toggleMaximize: () => Promise<void>;
       isMaximized: () => Promise<boolean>;
+      onResized: (handler: () => void) => Promise<() => void>;
       close: () => void;
       outerPosition: () => Promise<{ x: number; y: number }>;
       setPosition: (position: { type: 'Physical'; x: number; y: number }) => Promise<void>;
@@ -131,6 +132,7 @@ export const windowCtl = {
   minimize: () => tauri()?.window?.getCurrentWindow?.().minimize(),
   toggleMaximize: () => tauri()?.window?.getCurrentWindow?.().toggleMaximize(),
   isMaximized: () => tauri()?.window?.getCurrentWindow?.().isMaximized(),
+  onResized: (handler: () => void) => tauri()?.window?.getCurrentWindow?.().onResized(handler),
   close: () => tauri()?.window?.getCurrentWindow?.().close(),
   outerPosition: () => tauri()?.window?.getCurrentWindow?.().outerPosition(),
   setPosition: (position: { type: 'Physical'; x: number; y: number }) =>
