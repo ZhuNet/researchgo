@@ -107,6 +107,11 @@ export function PdfViewer(props: { ws: Workspace }) {
     viewerHost = host;
     const base = import.meta.env.BASE_URL;
     const el = document.createElement('pdfjs-viewer-element') as PdfjsViewerElement;
+    // This preview owns reading-position restoration. INITIAL (1) skips
+    // pdfjs.history's fingerprint-based position and resets navigation history
+    // on open, instead of competing with our current-document snapshot.
+    // Queue options before attaching: the element consumes them at startup.
+    void el.setViewerOptions({ viewOnLoad: 1 });
     // A CID font with no ToUnicode table — which is what XeLaTeX produces for
     // CJK — can only be mapped through the predefined CMaps, and pdf.js 5+ needs
     // WebAssembly for JPEG2000 and colour management. Without these the engine
@@ -296,6 +301,12 @@ export function PdfViewer(props: { ws: Workspace }) {
       if (controller.signal.aborted || untrack(restoring)) return;
       applyViewerPosition(pv, position);
       pv.update?.();
+      // A visibility snapshot is single-use. Preview <-> Split also reruns
+      // this effect, but must not replay an earlier Source -> Preview position.
+      if (hiddenPosition === position) {
+        hiddenPosition = null;
+        hiddenSidebar = null;
+      }
       doc.documentElement.classList.remove('rg-restoring');
     })();
   });
@@ -449,7 +460,13 @@ export function PdfViewer(props: { ws: Workspace }) {
             // failure.
           }
         }
-        if (alive) setRestoring(false);
+        if (alive) {
+          // The rebuild has consumed the last hidden snapshot too. Subsequent
+          // visible mode changes must keep the reader's new position.
+          hiddenPosition = null;
+          hiddenSidebar = null;
+          setRestoring(false);
+        }
       } catch (err: unknown) {
         if (!alive) return;
         setRestoring(false);
