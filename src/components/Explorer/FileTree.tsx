@@ -364,12 +364,19 @@ export function FileTree(props: { ws: Workspace }) {
     });
   }
 
+  let deleting = false;
   function deleteSelection(): void {
+    if (deleting) return;
     const many = ws().selected();
-    const target = many.length ? many : cursorPath() ? [cursorPath() as string] : [];
+    const target = [...many];
     if (!target.length) return;
+    deleting = true;
     void ws().removeEntries(target).then(() => {
       toast('info', target.length > 1 ? `Deleted ${target.length} items` : 'Deleted', target[0]);
+    }).catch((err: unknown) => {
+      toast('error', 'Delete failed', String(err));
+    }).finally(() => {
+      deleting = false;
     });
   }
 
@@ -525,6 +532,7 @@ export function FileTree(props: { ws: Workspace }) {
       startRename(path);
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && (path || ws().selected().length)) {
       e.preventDefault();
+      if (e.repeat) return;
       deleteSelection();
     }
   }

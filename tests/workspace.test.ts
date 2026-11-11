@@ -445,6 +445,16 @@ describe('文件操作', () => {
     });
   });
 
+  it('批量删除合并父子路径并清理选区', async () => {
+    await withWs(async (ws) => {
+      await ws.openFolder('/');
+      ws.setSelected(['/src', '/src/lib.rs', '/README.md']);
+      await ws.removeEntries(['/src/lib.rs', '/src', '/src']);
+      expect(ws.selected()).toEqual(['/README.md']);
+      expect(paths(ws)).not.toContain('/src');
+    });
+  });
+
   it('移动文件到另一个目录并重映射 tab', async () => {
     await withWs(async (ws) => {
       await ws.openFolder('/');

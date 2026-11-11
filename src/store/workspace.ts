@@ -918,8 +918,13 @@ export function createWorkspace(
     if (!base) return;
     const parent = parentOf(path, base);
     const doomed = new Set<string>([path, ...(isDir(path) ? descendants(path) : [])]);
-    await backend.removeEntry(path);
+    try {
+      await backend.removeEntry(path);
+    } catch (err) {
+      throw new Error(`${path}: ${String(err)}`);
+    }
     batch(() => {
+      setSelected((prev) => prev.filter((p) => p !== path && !p.startsWith(`${path}/`)));
       for (const p of doomed) {
         cache.delete(p);
         forgetRows(p);
@@ -944,7 +949,13 @@ export function createWorkspace(
   }
 
   async function removeEntries(paths: Iterable<string>): Promise<void> {
-    for (const p of paths) await removeEntry(p);
+    const targets = [...new Set(paths)];
+    // Removing a parent already removes its descendants.
+    for (const p of targets) {
+      if (!targets.some((parent) => parent !== p && p.startsWith(`${parent}/`))) {
+        await removeEntry(p);
+      }
+    }
   }
 
   async function move(from: string, destDir: string): Promise<string | null> {
