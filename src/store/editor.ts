@@ -397,7 +397,10 @@ export function createEditor(
     };
   }
 
-  async function build(root: string): Promise<BuildOutcome | null> {
+  async function build(
+    root: string,
+    afterBuild?: (outcome: BuildOutcome) => Promise<void>,
+  ): Promise<BuildOutcome | null> {
     if (buildState()?.phase === 'running') return null;
     const buildEpoch = epoch;
     setBuildState({ phase: 'running', error: null });
@@ -408,10 +411,12 @@ export function createEditor(
         setBuildOutput(outcome.output);
         setBuildCommand(outcome.command);
         setBuildDuration(outcome.durationMs);
-        setBuildState({ phase: outcome.ok ? 'ok' : 'failed', error: null });
         if (outcome.ok) setArtifact(outcome.artifact);
         setPreviewState({ page: outcome.ok ? 'pdf' : 'failed', error: null });
       });
+      await afterBuild?.(outcome);
+      if (epoch !== buildEpoch) return null;
+      setBuildState({ phase: outcome.ok ? 'ok' : 'failed', error: null });
       return outcome;
     } catch (err) {
       if (epoch !== buildEpoch) return null;

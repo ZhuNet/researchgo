@@ -59,11 +59,18 @@ export function PdfViewer(props: { ws: Workspace }) {
   const plan = createMemo(() => editor().plan());
   const disabled = createMemo(() => building() || !editor().buildTarget() || plan()?.buildable !== true);
   const undimmed = createMemo(() => !building() && plan()?.buildable === true);
+  let finishPreview: (() => void) | undefined;
+  onCleanup(() => finishPreview?.());
 
   async function build() {
     const dir = editor().buildTarget();
     if (!dir || disabled()) return;
-    const outcome = await editor().build(dir);
+    const previewDone = new Promise<void>((resolve) => { finishPreview = resolve; });
+    const completePreview = finishPreview;
+    const outcome = await editor().build(dir, async (result) => {
+      if (result.ok && result.artifact) await previewDone;
+    });
+    if (finishPreview === completePreview) finishPreview = undefined;
     if (!outcome) {
       toast('error', 'Build failed', editor().buildState()?.error ?? 'unknown error');
       return;
@@ -325,6 +332,7 @@ export function PdfViewer(props: { ws: Workspace }) {
     const el = viewer();
     const abs = editor().artifact()?.absPath;
     if (!el || !abs) return;
+    const completePreview = finishPreview;
     let alive = true;
     let releaseOutlineNavigation: (() => void) | undefined;
     let releaseOutlineToggles: (() => void) | undefined;
@@ -359,9 +367,8 @@ export function PdfViewer(props: { ws: Workspace }) {
           releaseOutlineNavigation = preserveOutlineHorizontalPosition(outline, pv);
           releaseOutlineToggles = installOutlineToggles(outline.container);
         }
-        // Prefer the state captured before the asynchronous artifact read. If
-        // the preview was hidden while that read ran, the synchronous capture
-        // still describes the last visible frame.
+        // Capture the latest visible position, including scrolling during the
+        // build/read. A hidden viewer instead uses its last visible snapshot.
         const nowHidden = !viewerHost || !hasVisibleLayout(viewerHost);
         const position = nowHidden
           ? hiddenPosition ?? positionBeforeRead ?? (pv ? captureViewerPosition(pv) : null)
@@ -388,7 +395,15 @@ export function PdfViewer(props: { ws: Workspace }) {
         // Fresh bytes every time, and only ever once: `getDocument` transfers the
         // buffer to the worker, which detaches it. A second `open` with the same
         // array would see a zero-length one.
+        // Subscribe before opening: a fast document can initialize before
+        // open() returns. Cancellation releases the listener on project changes.
+        const initialized = afterDocumentInit(viewerApp, visibilityWait.signal);
         await viewerApp?.open({ data: new Uint8Array(bytes) });
+        if (!alive) return;
+        await Promise.all([initialized, pv?.pagesPromise]);
+        // PDF.js may apply its initial view again after pagesPromise (mixed
+        // page sizes). Let those promise continuations finish before restoring.
+        await nextFrame();
         if (!alive) return;
         if (pv && position) {
           try {
@@ -396,8 +411,6 @@ export function PdfViewer(props: { ws: Workspace }) {
             // exist for the position to anchor to, and the app's own initial
             // view must have run — a PDF with /PageMode opens the sidebar on
             // its own, and restoring before that would only be overridden.
-            await Promise.all([afterDocumentInit(viewerApp, 2_000), pv.pagesPromise]);
-            if (!alive) return;
             // The reader may have switched back to Source while `open` or page
             // layout was running. Never restore against that zero-sized box.
             // The sidebar goes back first, with its slide animation
@@ -441,6 +454,9 @@ export function PdfViewer(props: { ws: Workspace }) {
         if (!alive) return;
         setRestoring(false);
         setLoadError(err instanceof Error ? err.message : String(err));
+      } finally {
+        visibilityWait.abort();
+        completePreview?.();
       }
     })();
     onCleanup(() => {
@@ -448,6 +464,7 @@ export function PdfViewer(props: { ws: Workspace }) {
       releaseOutlineNavigation?.();
       releaseOutlineToggles?.();
       visibilityWait.abort();
+      completePreview?.();
     });
   });
 
@@ -643,31 +660,30 @@ function viewsManagerOf(app: PdfViewerApplication | undefined): ViewerApp['views
 
 /**
  * Resolves once the app has applied its own initial view for the document it
- * just loaded — or once the deadline passes, because a viewer that never
- * gets there should not keep the restore waiting on it.
+ * just loaded. A timeout is not evidence that initialization finished.
  *
  * `open` resolving only means the document is loaded; the app then applies a
  * "setInitialView" of its own once the first page is ready, and that view can
  * move the reader — a PDF's /PageMode opens the sidebar, a default zoom is
  * set. The "documentinit" event is dispatched immediately after it, so
- * waiting for it is waiting for the app to be done before the reader's own
- * state is put back over it.
+ * This is the first gate; the caller also drains page initialization before
+ * putting the reader's state back.
  */
-function afterDocumentInit(app: PdfViewerApplication | undefined, deadlineMs: number): Promise<void> {
+function afterDocumentInit(app: PdfViewerApplication | undefined, signal: AbortSignal): Promise<void> {
   const bus = app?.eventBus;
-  if (!bus) return Promise.resolve();
+  if (!bus || signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
     let settled = false;
     const settle = (): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      signal.removeEventListener('abort', settle);
       bus.off('documentinit', listener);
       resolve();
     };
     const listener = () => settle();
-    const timer = setTimeout(settle, deadlineMs);
     bus.on('documentinit', listener);
+    signal.addEventListener('abort', settle, { once: true });
   });
 }
 

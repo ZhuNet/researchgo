@@ -444,6 +444,36 @@ describe('编译：结果与原因都在预览里', () => {
     expect(editor.previewState()).toBeNull();
   });
 
+  it('预览恢复结束前仍占用编译槽，不能开始下一轮', async () => {
+    const fs = new FakeFs({ '/': [] });
+    const backend = fakeBackend(fs);
+    const editor = createEditor(backend);
+    const restored = deferred<void>();
+    const entered = deferred<void>();
+    let builds = 0;
+    backend.buildProject = async () => {
+      builds += 1;
+      return {
+        ok: true, command: 'xelatex', code: 0, output: '', durationMs: 5,
+        artifact: { path: '/main.pdf', absPath: '/a/main.pdf', size: 10, builtMs: 5 },
+      };
+    };
+    const first = editor.build('/a', async () => {
+      entered.resolve();
+      await restored.promise;
+    });
+    await entered.promise;
+    expect(editor.previewState()?.page).toBe('pdf');
+    expect(editor.buildState()?.phase).toBe('running');
+    expect(await editor.build('/a')).toBeNull();
+    expect(builds).toBe(1);
+    restored.resolve();
+    await first;
+    expect(editor.buildState()?.phase).toBe('ok');
+    await editor.build('/a');
+    expect(builds).toBe(2);
+  });
+
   it('每次成功编译都换上新的 artifact 对象：预览的重开靠它触发', async () => {
     await withEditor(async (editor, fs) => {
       const artifact = () => ({
