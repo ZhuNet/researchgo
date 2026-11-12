@@ -10,6 +10,7 @@ import {
   type PdfViewerLike,
   type ViewerPosition,
   type ViewsManagerLike,
+  type OutlineNavigationLike,
 } from '../src/lib/pdfposition';
 
 describe('大纲跳转保留横向滚动', () => {
@@ -33,6 +34,105 @@ describe('大纲跳转保留横向滚动', () => {
     expect(viewer.container.scrollLeft).toBe(72);
     dispose();
     expect(outline.linkService).toBe(original);
+  });
+
+  it('不注册 PDF.js 延迟的文字层聚焦，避免之后覆盖滚动位置', async () => {
+    const registrations: string[] = [];
+    const eventBus = {
+      on(name: string) {
+        registrations.push(name);
+      },
+    };
+    const original = {
+      eventBus,
+      async goToDestination(this: { eventBus: typeof eventBus }, _destination: unknown) {
+        this.eventBus.on('textlayerrendered');
+        this.eventBus.on('other-event');
+      },
+    };
+    const outline = { linkService: original };
+    const dispose = preserveOutlineHorizontalPosition(outline, {
+      container: { scrollLeft: 0, scrollTop: 0 },
+    });
+
+    await outline.linkService.goToDestination(null);
+
+    expect(registrations).toEqual(['other-event']);
+    await original.goToDestination(null);
+    expect(registrations).toEqual(['other-event', 'textlayerrendered', 'other-event']);
+    dispose();
+  });
+});
+
+describe('大纲导航生命周期', () => {
+  function setup() {
+    const container = Object.assign(new EventTarget(), { scrollLeft: 260, scrollTop: 0 });
+    const pending = new Map<number, () => void>();
+    const history: unknown[] = [];
+    const service = {
+      pdfDocument: {},
+      pdfViewer: {
+        scrollPageIntoView(...args: unknown[]) {
+          container.scrollTop = args[0] as number;
+          container.scrollLeft = 72;
+        },
+      },
+      pdfHistory: {
+        pushCurrentPosition() { history.push('current'); },
+        push(...args: unknown[]) { history.push(args[0]); },
+      },
+      async goToDestination(this: OutlineNavigationLike['linkService'], dest: unknown) {
+        await new Promise<void>((resolve) => pending.set(dest as number, resolve));
+        this.pdfHistory?.pushCurrentPosition();
+        this.pdfHistory?.push(dest);
+        this.pdfViewer?.scrollPageIntoView(dest);
+      },
+    };
+    const outline: OutlineNavigationLike = { linkService: service };
+    const dispose = preserveOutlineHorizontalPosition(outline, { container });
+    return { container, pending, history, service, outline, dispose };
+  }
+
+  it('后点击的请求先完成时，旧请求不能再改位置或历史', async () => {
+    const f = setup();
+    const first = f.outline.linkService.goToDestination(100);
+    const second = f.outline.linkService.goToDestination(200);
+    f.pending.get(200)!();
+    await second;
+    f.pending.get(100)!();
+    await first;
+    expect(f.container.scrollTop).toBe(200);
+    expect(f.container.scrollLeft).toBe(260);
+    expect(f.history).toEqual(['current', 200]);
+    f.dispose();
+  });
+
+  it.each(['wheel', 'pointerdown', 'touchstart'])('用户 %s 后不再执行旧导航，仍可发起新导航', async (name) => {
+    const f = setup();
+    const first = f.outline.linkService.goToDestination(100);
+    f.container.dispatchEvent(new Event(name));
+    f.container.scrollTop = 500;
+    f.pending.get(100)!();
+    await first;
+    expect(f.container.scrollTop).toBe(500);
+    expect(f.history).toEqual([]);
+    const next = f.outline.linkService.goToDestination(200);
+    f.pending.get(200)!();
+    await next;
+    expect(f.container.scrollTop).toBe(200);
+    f.dispose();
+  });
+
+  it.each(['document', 'dispose'])('%s 变更使未完成的请求失效', async (change) => {
+    const f = setup();
+    const first = f.outline.linkService.goToDestination(100);
+    if (change === 'document') f.service.pdfDocument = {};
+    else f.dispose();
+    f.pending.get(100)!();
+    await first;
+    expect(f.container.scrollTop).toBe(0);
+    expect(f.history).toEqual([]);
+    f.dispose();
   });
 });
 

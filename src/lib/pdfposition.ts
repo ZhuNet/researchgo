@@ -147,31 +147,103 @@ export function applySidebarView(views: ViewsManagerLike, view: number): void {
 }
 
 export interface OutlineNavigationLike {
-  linkService: { goToDestination(destination: unknown): Promise<void> };
+  linkService: {
+    goToDestination(destination: unknown): Promise<void>;
+    eventBus?: { on(name: string, ...args: unknown[]): void };
+    pdfDocument?: unknown;
+    pdfViewer?: { scrollPageIntoView(...args: unknown[]): void };
+    pdfHistory?: {
+      pushCurrentPosition(): void;
+      push(...args: unknown[]): void;
+    } | null;
+  };
 }
 
-/** Keep the reader's horizontal pan when following an outline destination. */
+const NAVIGATION_INPUTS = ['wheel', 'pointerdown', 'touchstart'] as const;
+const SCROLL_KEYS = new Set([
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'PageUp', 'PageDown', 'Home', 'End', ' ',
+]);
+
+/** Follow only the latest outline request, retaining the reader's horizontal pan. */
 export function preserveOutlineHorizontalPosition(
   outline: OutlineNavigationLike,
-  viewer: Pick<PdfViewerLike, 'container'> & { update?(): void },
+  viewer: {
+    container: PdfViewerLike['container'] & Partial<Pick<HTMLElement, 'addEventListener' | 'removeEventListener'>>;
+    update?(): void;
+  },
 ): () => void {
   const original = outline.linkService;
   // The outline closes over its link service when rendering each link. Give
   // only that view a facade; document links retain their full destinations.
   const service: OutlineNavigationLike['linkService'] = Object.create(original);
+  if (original.eventBus) {
+    const bus = original.eventBus;
+    service.eventBus = {
+      on(name, ...args) {
+        // PDF.js 6 queues focus() after text-layer rendering, which can move
+        // the viewport long after navigation. Keep focus in the outline.
+        // Forward other subscriptions with the real bus as their receiver.
+        if (name !== 'textlayerrendered') bus.on(name, ...args);
+      },
+    };
+  }
   let active = true;
   let navigation = 0;
+  const cancel = () => { navigation++; };
+  const onKey = (event: Event) => {
+    if (SCROLL_KEYS.has((event as KeyboardEvent).key)) cancel();
+  };
+  // Listen to intent rather than scroll: navigation itself emits scroll events.
+  const container = viewer.container;
+  for (const name of NAVIGATION_INPUTS) {
+    container.addEventListener?.(name, cancel, { capture: true, passive: true });
+  }
+  container.addEventListener?.('keydown', onKey, true);
   service.goToDestination = async (destination) => {
+    if (!active) return;
     const id = ++navigation;
+    const document = original.pdfDocument;
+    const current = () => active && id === navigation && original.pdfDocument === document;
     const left = viewer.container.scrollLeft;
-    await original.goToDestination(destination);
-    if (!active || id !== navigation) return;
-    viewer.container.scrollLeft = left;
-    viewer.update?.();
+    // Each request needs its own receiver: checking only after await is too
+    // late, because PDF.js has already scrolled and written navigation history.
+    const request: typeof service = Object.create(service);
+    request.pdfDocument = document;
+    const pv = original.pdfViewer;
+    if (pv) {
+      // goToDestination only uses this viewer method. Keep the adapter explicit
+      // instead of proxying every property and rebinding arbitrary methods.
+      request.pdfViewer = {
+        scrollPageIntoView(...args) {
+          if (!current()) return;
+          pv.scrollPageIntoView(...args);
+          viewer.container.scrollLeft = left;
+          viewer.update?.();
+        },
+      };
+    }
+    const history = original.pdfHistory;
+    if (history) {
+      request.pdfHistory = {
+        pushCurrentPosition() { if (current()) history.pushCurrentPosition(); },
+        push(...args) { if (current()) history.push(...args); },
+      };
+    }
+    await original.goToDestination.call(request, destination);
+    if (!pv && current()) {
+      viewer.container.scrollLeft = left;
+      viewer.update?.();
+    }
   };
   outline.linkService = service;
   return () => {
     active = false;
+    cancel();
+    for (const name of NAVIGATION_INPUTS) {
+      container.removeEventListener?.(name, cancel, true);
+    }
+    container.removeEventListener?.('keydown', onKey, true);
     if (outline.linkService === service) outline.linkService = original;
   };
 }
